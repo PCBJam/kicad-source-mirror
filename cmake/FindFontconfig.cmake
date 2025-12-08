@@ -34,6 +34,14 @@ This will define the following variables in your project:
 
 #]=======================================================================]
 
+# WASM: Fontconfig not available in browser (no system font access)
+if(EMSCRIPTEN)
+    set(Fontconfig_FOUND FALSE)
+    set(Fontconfig_LIBRARIES "")
+    set(Fontconfig_INCLUDE_DIRS "")
+    message(STATUS "Fontconfig not available for WASM build (system fonts not accessible in browser)")
+    return()
+endif()
 
 # use pkg-config to get the directories and then use these values
 # in the FIND_PATH() and FIND_LIBRARY() calls

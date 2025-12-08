@@ -222,7 +222,11 @@ void WX_INFOBAR::onThemeChange( wxSysColourChangedEvent& aEvent )
 
     if( wxBitmapButton* btn = GetCloseButton() )
     {
+#if wxUSE_TOOLTIPS
         wxString tooltip = btn->GetToolTipText();
+#else
+        wxString tooltip;
+#endif
         RemoveAllButtons();
         AddCloseButton( tooltip );
     }

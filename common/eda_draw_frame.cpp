@@ -538,7 +538,11 @@ void EDA_DRAW_FRAME::OnSelectGrid( wxCommandEvent& event )
 {
     wxCHECK_RET( m_gridSelectBox, wxS( "m_gridSelectBox uninitialized" ) );
 
+#ifdef __EMSCRIPTEN__
+    int idx = m_gridSelectBox->GetSelection();
+#else
     int idx = m_gridSelectBox->GetCurrentSelection();
+#endif
 
     if( idx == int( m_gridSelectBox->GetCount() ) - 2 )
     {
@@ -665,7 +669,11 @@ void EDA_DRAW_FRAME::OnSelectZoom( wxCommandEvent& event )
 {
     wxCHECK_RET( m_zoomSelectBox, wxS( "m_zoomSelectBox uninitialized" ) );
 
+#ifdef __EMSCRIPTEN__
+    int id = m_zoomSelectBox->GetSelection();
+#else
     int id = m_zoomSelectBox->GetCurrentSelection();
+#endif
 
     if( id < 0 || id >= (int) m_zoomSelectBox->GetCount() )
         return;

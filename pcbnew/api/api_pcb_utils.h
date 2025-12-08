@@ -21,6 +21,8 @@
 #ifndef KICAD_API_PCB_UTLIS_H
 #define KICAD_API_PCB_UTLIS_H
 
+#ifdef KICAD_IPC_API
+
 #include <memory>
 #include <core/typeinfo.h>
 #include <import_export.h>
@@ -42,5 +44,7 @@ void PackLayerSet( google::protobuf::RepeatedField<int>& aOutput, const LSET& aL
 LSET UnpackLayerSet( const google::protobuf::RepeatedField<int>& aInput );
 
 }   // namespace kiapi::board
+
+#endif // KICAD_IPC_API
 
 #endif //KICAD_API_PCB_UTLIS_H

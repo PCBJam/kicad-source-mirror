@@ -22,7 +22,14 @@
 #include <cstdio>
 
 
-#if defined(__GNUC__) || defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(__EMSCRIPTEN__)
+    // WebAssembly/Emscripten - use Emscripten's Asyncify for coroutines
+    #undef LIBCONTEXT_HAS_OWN_STACK
+    #define LIBCONTEXT_COMPILER_gcc
+    #define LIBCONTEXT_PLATFORM_wasm32
+    #define LIBCONTEXT_CALL_CONVENTION
+
+#elif defined(__GNUC__) || defined(__APPLE__) || defined(__FreeBSD__)
 
     #undef LIBCONTEXT_HAS_OWN_STACK
 

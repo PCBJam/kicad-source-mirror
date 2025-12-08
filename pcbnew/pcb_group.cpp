@@ -34,11 +34,13 @@
 #include <string_utils.h>
 #include <widgets/msgpanel.h>
 #include <view/view.h>
+#ifdef KICAD_IPC_API
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/api_pcb_utils.h>
 #include <api/board/board_types.pb.h>
 #include <google/protobuf/any.pb.h>
+#endif
 
 #include <wx/debug.h>
 #include <properties/property.h>
@@ -55,6 +57,8 @@ PCB_GROUP::PCB_GROUP( BOARD_ITEM* aParent, KICAD_T idtype, PCB_LAYER_ID aLayer )
 {
 }
 
+
+#ifdef KICAD_IPC_API
 void PCB_GROUP::Serialize( google::protobuf::Any &aContainer ) const
 {
     using namespace kiapi::board::types;
@@ -101,6 +105,8 @@ bool PCB_GROUP::Deserialize( const google::protobuf::Any &aContainer )
 
     return true;
 }
+#endif // KICAD_IPC_API
+
 
 std::unordered_set<BOARD_ITEM*> PCB_GROUP::GetBoardItems() const
 {

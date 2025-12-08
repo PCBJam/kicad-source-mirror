@@ -16,8 +16,6 @@ set( GAL_SRCS
     cursors.cpp
     gal_display_options.cpp
     graphics_abstraction_layer.cpp
-    hidpi_gl_canvas.cpp
-    hidpi_gl_3D_canvas.cpp
 
     ../view/view.cpp
     ../view/view_controls.cpp
@@ -30,28 +28,35 @@ set( GAL_SRCS
 
     3d/camera.cpp
 
-    # OpenGL GAL
-    opengl/opengl_gal.cpp
-    opengl/gl_resources.cpp
-
-    opengl/shader.cpp
-    opengl/vertex_item.cpp
-    opengl/vertex_container.cpp
-    opengl/cached_container.cpp
-    opengl/cached_container_gpu.cpp
-    opengl/cached_container_ram.cpp
-    opengl/noncached_container.cpp
-    opengl/vertex_manager.cpp
-    opengl/gpu_manager.cpp
-    opengl/antialiasing.cpp
-    opengl/opengl_compositor.cpp
-    opengl/utils.cpp
-
     # Cairo GAL
     cairo/cairo_gal.cpp
     cairo/cairo_compositor.cpp
     cairo/cairo_print.cpp
     )
+
+# OpenGL GAL - not supported on Emscripten/WASM due to GLU and desktop OpenGL dependencies
+if( NOT EMSCRIPTEN )
+    list( APPEND GAL_SRCS
+        hidpi_gl_canvas.cpp
+        hidpi_gl_3D_canvas.cpp
+
+        # OpenGL GAL
+        opengl/opengl_gal.cpp
+        opengl/gl_resources.cpp
+        opengl/shader.cpp
+        opengl/vertex_item.cpp
+        opengl/vertex_container.cpp
+        opengl/cached_container.cpp
+        opengl/cached_container_gpu.cpp
+        opengl/cached_container_ram.cpp
+        opengl/noncached_container.cpp
+        opengl/vertex_manager.cpp
+        opengl/gpu_manager.cpp
+        opengl/antialiasing.cpp
+        opengl/opengl_compositor.cpp
+        opengl/utils.cpp
+    )
+endif()
 
 add_library( gal SHARED ${GAL_SRCS} )
 
@@ -78,13 +83,20 @@ target_link_libraries( gal
     nlohmann_json
     ${CAIRO_LIBRARIES}
     ${PIXMAN_LIBRARIES}
-    ${OPENGL_LIBRARIES}
     ${GDI_PLUS_LIBRARIES}
     # outline font support
     ${FREETYPE_LIBRARIES}
     ${HarfBuzz_LIBRARIES}
     ${Fontconfig_LIBRARIES}
 )
+
+# OpenGL libraries - not needed for Emscripten/WASM (using Cairo only)
+if( NOT EMSCRIPTEN )
+    target_link_libraries( gal
+        ${GLEW_LIBRARIES}
+        ${OPENGL_LIBRARIES}
+    )
+endif()
 
 target_compile_definitions( gal PRIVATE GAL_DLL=1 )
 
@@ -121,38 +133,41 @@ if( APPLE )
     set_target_properties( gal PROPERTIES BUILD_WITH_INSTALL_RPATH 1 )
 endif()
 
-function( add_shader outTarget inFile shaderName )
-    set(outCppName "${shaderName}.cpp")
-    set(outHeaderName "${shaderName}.h")
+# OpenGL shaders - only needed when building with OpenGL support (not for Emscripten/WASM)
+if( NOT EMSCRIPTEN )
+    function( add_shader outTarget inFile shaderName )
+        set(outCppName "${shaderName}.cpp")
+        set(outHeaderName "${shaderName}.h")
 
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${outCppName}
-                ${CMAKE_BINARY_DIR}/include/gal/shaders/${outHeaderName}
-        COMMAND ${CMAKE_COMMAND}
-            -DSOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}"
-            -DOUT_CPP_DIR="${CMAKE_CURRENT_BINARY_DIR}/"
-            -DOUT_HEADER_DIR="${CMAKE_BINARY_DIR}/include/gal/shaders/"
-            -DOUT_CPP_FILENAME="${outCppName}"
-            -DOUT_HEADER_FILENAME="${outHeaderName}"
-            -DOUT_VAR_NAME="${shaderName}"
-            -P ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}
-                ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
-        )
+        add_custom_command(
+            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${outCppName}
+                    ${CMAKE_BINARY_DIR}/include/gal/shaders/${outHeaderName}
+            COMMAND ${CMAKE_COMMAND}
+                -DSOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}"
+                -DOUT_CPP_DIR="${CMAKE_CURRENT_BINARY_DIR}/"
+                -DOUT_HEADER_DIR="${CMAKE_BINARY_DIR}/include/gal/shaders/"
+                -DOUT_CPP_FILENAME="${outCppName}"
+                -DOUT_HEADER_FILENAME="${outHeaderName}"
+                -DOUT_VAR_NAME="${shaderName}"
+                -P ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}
+                    ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
+            )
 
-    target_sources( ${outTarget} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/${outCppName} )
-    target_include_directories( ${outTarget} PUBLIC ${CMAKE_BINARY_DIR}/include/gal/shaders/ )
-endfunction()
+        target_sources( ${outTarget} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/${outCppName} )
+        target_include_directories( ${outTarget} PUBLIC ${CMAKE_BINARY_DIR}/include/gal/shaders/ )
+    endfunction()
 
-add_shader( gal kicad_frag.glsl glsl_kicad_frag )
-add_shader( gal kicad_vert.glsl glsl_kicad_vert )
-add_shader( gal smaa_base.glsl glsl_smaa_base )
-add_shader( gal smaa_pass_1_frag_color.glsl glsl_smaa_pass_1_frag_color )
-add_shader( gal smaa_pass_1_frag_luma.glsl glsl_smaa_pass_1_frag_luma )
-add_shader( gal smaa_pass_1_vert.glsl glsl_smaa_pass_1_vert )
-add_shader( gal smaa_pass_2_frag.glsl glsl_smaa_pass_2_frag )
-add_shader( gal smaa_pass_2_vert.glsl glsl_smaa_pass_2_vert )
-add_shader( gal smaa_pass_3_frag.glsl glsl_smaa_pass_3_frag )
-add_shader( gal smaa_pass_3_vert.glsl glsl_smaa_pass_3_vert )
-add_shader( gal xor_diff_frag.glsl glsl_xor_diff_frag )
-add_shader( gal xor_diff_vert.glsl glsl_xor_diff_vert )
+    add_shader( gal kicad_frag.glsl glsl_kicad_frag )
+    add_shader( gal kicad_vert.glsl glsl_kicad_vert )
+    add_shader( gal smaa_base.glsl glsl_smaa_base )
+    add_shader( gal smaa_pass_1_frag_color.glsl glsl_smaa_pass_1_frag_color )
+    add_shader( gal smaa_pass_1_frag_luma.glsl glsl_smaa_pass_1_frag_luma )
+    add_shader( gal smaa_pass_1_vert.glsl glsl_smaa_pass_1_vert )
+    add_shader( gal smaa_pass_2_frag.glsl glsl_smaa_pass_2_frag )
+    add_shader( gal smaa_pass_2_vert.glsl glsl_smaa_pass_2_vert )
+    add_shader( gal smaa_pass_3_frag.glsl glsl_smaa_pass_3_frag )
+    add_shader( gal smaa_pass_3_vert.glsl glsl_smaa_pass_3_vert )
+    add_shader( gal xor_diff_frag.glsl glsl_xor_diff_frag )
+    add_shader( gal xor_diff_vert.glsl glsl_xor_diff_vert )
+endif()

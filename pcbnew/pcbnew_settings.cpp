@@ -21,7 +21,9 @@
 * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 */
 
+#ifdef KICAD_SCRIPTING
 #include <pybind11/pybind11.h>
+#endif
 
 #include <common.h>
 #include <settings/color_settings.h>

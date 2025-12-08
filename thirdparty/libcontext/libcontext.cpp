@@ -17,6 +17,34 @@
 #include <cstdlib>
 #include <libcontext.h>
 
+// WASM/Emscripten: Stub implementations for context switching
+// KiCad uses libcontext for coroutines in the router, which we'll need to
+// handle differently in WASM (either via Asyncify or by disabling coroutines)
+#if defined(LIBCONTEXT_PLATFORM_wasm32)
+
+namespace libcontext {
+
+// Stub: WASM doesn't support the low-level stack manipulation required
+// Return nullptr to indicate failure - callers should handle gracefully
+fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
+        void (* fn)( intptr_t ) )
+{
+    // Cannot create contexts in WASM without Emscripten fibers/Asyncify
+    return nullptr;
+}
+
+// Stub: Return 0 and don't actually switch contexts
+intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t nfc,
+        intptr_t vp, bool preserve_fpu )
+{
+    // Cannot switch contexts in WASM
+    return 0;
+}
+
+} // namespace libcontext
+
+#endif // LIBCONTEXT_PLATFORM_wasm32
+
 #if defined(LIBCONTEXT_PLATFORM_windows_i386) && defined(LIBCONTEXT_COMPILER_gcc)
 __asm (
 ".text\n"

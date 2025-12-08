@@ -54,7 +54,9 @@
 
 // Needed to handle adding the plugins to the toolbar
 // TODO (ISM): This should be better abstracted away from the toolbars
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <api/api_plugin_manager.h>
 
 

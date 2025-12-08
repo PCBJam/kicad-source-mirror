@@ -61,7 +61,9 @@
 #include <pgm_base.h>
 #include <design_block_library_adapter.h>
 #include <policy_keys.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <settings/common_settings.h>
 #include <settings/settings_manager.h>
 #include <string_utils.h>
@@ -502,8 +504,10 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aSkipPyInit, bool aIsUnitTest )
 
     // Create the python scripting stuff
     // Skip it for applications that do not use it
+#ifdef KICAD_SCRIPTING
     if( !aSkipPyInit )
         m_python_scripting = std::make_unique<SCRIPTING>();
+#endif
 
     // TODO(JE): Remove this if apps are refactored to not assume Prj() always works
     // Need to create a project early for now (it can have an empty path for the moment)
@@ -516,11 +520,14 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aSkipPyInit, bool aIsUnitTest )
 
     // This sets the maximum tooltip display duration to 10s (up from 5) but only affects
     // Windows as other platforms display tooltips while the mouse is not moving
+#ifndef __EMSCRIPTEN__
+    // wxToolTip not available in wxUniversal/WASM
     if( !aHeadless )
     {
         wxToolTip::Enable( true );
         wxToolTip::SetAutoPop( 10000 );
     }
+#endif
 
     if( ADVANCED_CFG::GetCfg().m_UpdateUIEventInterval != 0 )
         wxUpdateUIEvent::SetUpdateInterval( ADVANCED_CFG::GetCfg().m_UpdateUIEventInterval );

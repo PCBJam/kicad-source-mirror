@@ -22,11 +22,20 @@
 
 find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
 
-find_library(ZSTD_LIBRARY_DEBUG NAMES zstdd zstd_staticd)
-find_library(ZSTD_LIBRARY_RELEASE NAMES zstd zstd_static)
+# For cross-compilation, check if ZSTD_LIBRARY is already specified
+if( ZSTD_LIBRARY )
+    # Already provided - use it directly
+elseif( ZSTD_ROOT AND EXISTS "${ZSTD_ROOT}/lib/libzstd.a" )
+    # Cross-compilation: use direct path check
+    set( ZSTD_LIBRARY "${ZSTD_ROOT}/lib/libzstd.a" )
+else()
+    # Native build: use find_library
+    find_library(ZSTD_LIBRARY_DEBUG NAMES zstdd zstd_staticd)
+    find_library(ZSTD_LIBRARY_RELEASE NAMES zstd zstd_static)
 
-include(SelectLibraryConfigurations)
-SELECT_LIBRARY_CONFIGURATIONS(ZSTD)
+    include(SelectLibraryConfigurations)
+    SELECT_LIBRARY_CONFIGURATIONS(ZSTD)
+endif()
 
 include(FindPackageHandleStandardArgs)
 FIND_PACKAGE_HANDLE_STANDARD_ARGS(

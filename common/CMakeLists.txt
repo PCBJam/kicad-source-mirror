@@ -312,14 +312,11 @@ set( KICOMMON_SRCS
     singleton.cpp
     pgm_base.cpp
 
-    ../scripting/python_scripting.cpp
-
     io/kicad/kicad_io_utils.cpp    # needed by richio
     io/io_base.cpp
     io/io_utils.cpp
 
     api/serializable.cpp
-    api/api_utils.cpp
 
     startwizard/startwizard.cpp
     startwizard/startwizard_provider_libraries.cpp
@@ -327,7 +324,7 @@ set( KICOMMON_SRCS
     startwizard/startwizard_provider_settings.cpp
     )
 
-if( UNIX AND NOT APPLE )
+if( UNIX AND NOT APPLE AND NOT EMSCRIPTEN )
     list( APPEND KICOMMON_SRCS
         spacenav/libspnav_driver.cpp
     )
@@ -337,14 +334,19 @@ list( APPEND KICOMMON_SRCS
     navlib_safe_init.cpp
 )
 
+if( KICAD_SCRIPTING )
+    list( APPEND KICOMMON_SRCS
+        ../scripting/python_scripting.cpp
+    )
+endif()
+
 if( KICAD_IPC_API )
-    set( KICOMMON_SRCS
-        ${KICOMMON_SRCS}
+    list( APPEND KICOMMON_SRCS
+        api/api_utils.cpp
         api/api_handler.cpp
         api/api_plugin.cpp
         api/api_plugin_manager.cpp
         api/api_server.cpp
-
         ../scripting/python_manager.cpp
     )
 endif()
@@ -374,7 +376,7 @@ set_target_properties(kicommon PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
 target_link_libraries( kicommon
     core
-    kiapi
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:kiapi>
     kimath
     kiplatform
     nlohmann_json
@@ -470,7 +472,7 @@ target_include_directories( kicommon
         $<TARGET_PROPERTY:magic_enum,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:pegtl,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:expected,INTERFACE_INCLUDE_DIRECTORIES>
-        $<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>
+        $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
         $<TARGET_PROPERTY:picosha2,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:nlohmann_json_schema_validator,INTERFACE_INCLUDE_DIRECTORIES>
     )
@@ -646,9 +648,15 @@ set( COMMON_WIDGET_SRCS
     widgets/wx_progress_reporters.cpp
     widgets/wx_splitter_window.cpp
     widgets/wx_treebook.cpp
-    widgets/webview_panel.cpp
     widgets/zoom_correction_ctrl.cpp
     )
+
+# WebView is not available on Emscripten/WASM
+if( NOT EMSCRIPTEN )
+    list( APPEND COMMON_WIDGETS_SRCS
+        widgets/webview_panel.cpp
+    )
+endif()
 
 set( COMMON_DRAWING_SHEET_SRCS
     drawing_sheet/ds_data_item.cpp
@@ -696,13 +704,6 @@ set( PLOTTERS_CONTROL_SRCS
 
 set( COMMON_IO_SRCS
 
-    # Altium
-    io/altium/altium_binary_parser.cpp
-    io/altium/altium_ascii_parser.cpp
-    io/altium/altium_parser_utils.cpp
-    io/altium/altium_project_variants.cpp
-    io/altium/altium_props_utils.cpp
-
     # Cadstar
     io/cadstar/cadstar_archive_parser.cpp
     io/cadstar/cadstar_parts_lib_parser.cpp
@@ -720,6 +721,17 @@ set( COMMON_IO_SRCS
 
     io/csv.cpp
     )
+
+# Altium import not supported on WASM (compoundfilereader uses non-standard std::basic_string<unsigned short>)
+if( NOT EMSCRIPTEN )
+    list( APPEND COMMON_IO_SRCS
+        io/altium/altium_binary_parser.cpp
+        io/altium/altium_ascii_parser.cpp
+        io/altium/altium_parser_utils.cpp
+        io/altium/altium_project_variants.cpp
+        io/altium/altium_props_utils.cpp
+    )
+endif()
 
 set ( COMMON_TRANSLINE_CALCULATION_SRCS
     transline_calculations/transline_calculation_base.cpp
@@ -852,13 +864,23 @@ set( COMMON_SRCS
     properties/property_mgr.cpp
     properties/std_optional_variants.cpp
 
-    database/database_connection.cpp
-
     http_lib/http_lib_connection.cpp
     http_lib/http_lib_settings.cpp
-
-    api/api_enums.cpp
     )
+
+# Database support not available on WASM (requires nanodbc/ODBC)
+if( NOT EMSCRIPTEN )
+    list( APPEND COMMON_SRCS
+        database/database_connection.cpp
+    )
+endif()
+
+# API enums require protobuf
+if( KICAD_IPC_API )
+    list( APPEND COMMON_SRCS
+        api/api_enums.cpp
+    )
+endif()
 
 # This needs to be in the common library until draw_panel_gal is moved to kicommon
 if( UNIX AND NOT APPLE )
@@ -904,7 +926,9 @@ add_dependencies( common version_header )
 if( TARGET remote_provider_schema_build_copy )
     add_dependencies( common remote_provider_schema_build_copy )
 endif()
-add_dependencies( common compoundfilereader )  # used by altium_parser.cpp
+if( NOT EMSCRIPTEN )
+    add_dependencies( common compoundfilereader )  # used by altium_parser.cpp
+endif()
 
 target_link_libraries( common
     libcontext
@@ -922,8 +946,8 @@ target_link_libraries( common
     pybind11::embed
     compoundfilereader
     Boost::headers
-    # Database support needs these two
-    nanodbc # for now; maybe hoist out of common
+    # Database support needs these two (not available for WASM)
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:nanodbc>
     Boost::locale
     ${wxWidgets_LIBRARIES}
     ${EXTRA_LIBS}
@@ -949,7 +973,7 @@ target_include_directories( common
         .
         ${CMAKE_BINARY_DIR}
         $<TARGET_PROPERTY:argparse::argparse,INTERFACE_INCLUDE_DIRECTORIES>
-        $<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>
+        $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
     )
 
 # text markup support
@@ -960,9 +984,12 @@ target_include_directories( common PUBLIC
     $<TARGET_PROPERTY:magic_enum,INTERFACE_INCLUDE_DIRECTORIES>
     )
 
-target_include_directories( common SYSTEM PUBLIC
-    $<TARGET_PROPERTY:nanodbc,INTERFACE_INCLUDE_DIRECTORIES>
-    )
+# WASM: nanodbc (ODBC) not available
+if( NOT EMSCRIPTEN )
+    target_include_directories( common SYSTEM PUBLIC
+        $<TARGET_PROPERTY:nanodbc,INTERFACE_INCLUDE_DIRECTORIES>
+        )
+endif()
 
 set( PCB_COMMON_SRCS
     hash_eda.cpp
@@ -1068,11 +1095,13 @@ set( PCB_COMMON_SRCS
     widgets/area_selector.cpp
 )
 
-set( PCB_COMMON_SRCS
-    ${PCB_COMMON_SRCS}
-    ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_enums.cpp
-    ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_utils.cpp
-)
+if( KICAD_IPC_API )
+    set( PCB_COMMON_SRCS
+        ${PCB_COMMON_SRCS}
+        ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_enums.cpp
+        ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_utils.cpp
+    )
+endif()
 
 add_library( pcbcommon STATIC ${PCB_COMMON_SRCS} )
 
