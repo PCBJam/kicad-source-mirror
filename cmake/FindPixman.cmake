@@ -23,6 +23,39 @@
 # (To distribute this file outside of CMake, substitute the full
 #  License text for the above reference.)
 
+# WASM cross-compilation: use direct paths since find_library fails
+if(EMSCRIPTEN)
+    foreach(_path ${CMAKE_PREFIX_PATH})
+        if(EXISTS "${_path}/include/pixman-1/pixman.h")
+            set(PIXMAN_INCLUDE_DIR "${_path}/include/pixman-1")
+        endif()
+        if(EXISTS "${_path}/lib/libpixman-1.a")
+            set(PIXMAN_LIBRARIES "${_path}/lib/libpixman-1.a")
+        endif()
+    endforeach()
+
+    if(PIXMAN_INCLUDE_DIR AND PIXMAN_LIBRARIES)
+        # Extract version from pixman-version.h
+        if(EXISTS "${PIXMAN_INCLUDE_DIR}/pixman-version.h")
+            file(READ "${PIXMAN_INCLUDE_DIR}/pixman-version.h" _PIXMAN_VERSION_H_CONTENTS)
+            string(REGEX REPLACE "^(.*\n)?#define[ \t]+PIXMAN_VERSION_MAJOR[ \t]+([0-9]+).*"
+                   "\\2" PIXMAN_VERSION_MAJOR ${_PIXMAN_VERSION_H_CONTENTS})
+            string(REGEX REPLACE "^(.*\n)?#define[ \t]+PIXMAN_VERSION_MINOR[ \t]+([0-9]+).*"
+                   "\\2" PIXMAN_VERSION_MINOR ${_PIXMAN_VERSION_H_CONTENTS})
+            string(REGEX REPLACE "^(.*\n)?#define[ \t]+PIXMAN_VERSION_MICRO[ \t]+([0-9]+).*"
+                   "\\2" PIXMAN_VERSION_MICRO ${_PIXMAN_VERSION_H_CONTENTS})
+            set(PIXMAN_VERSION ${PIXMAN_VERSION_MAJOR}.${PIXMAN_VERSION_MINOR}.${PIXMAN_VERSION_MICRO})
+        endif()
+
+        include(FindPackageHandleStandardArgs)
+        find_package_handle_standard_args(Pixman
+            REQUIRED_VARS PIXMAN_LIBRARIES PIXMAN_INCLUDE_DIR
+            VERSION_VAR PIXMAN_VERSION)
+        message(STATUS "Found Pixman for WASM: ${PIXMAN_LIBRARIES}")
+        return()
+    endif()
+endif()
+
 find_package(PkgConfig)
 
 if(PKG_CONFIG_FOUND)

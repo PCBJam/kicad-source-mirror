@@ -28,6 +28,7 @@ DIALOG_PASTE_SPECIAL::DIALOG_PASTE_SPECIAL( wxWindow* aParent, PASTE_MODE* aMode
     DIALOG_PASTE_SPECIAL_BASE( aParent ),
     m_mode( aMode )
 {
+#if wxUSE_TOOLTIPS
     m_options->SetItemToolTip( static_cast<int>( PASTE_MODE::UNIQUE_ANNOTATIONS ),
                                _( "Finds the next available reference designator for any designators that already "
                                   "exist in the design." ) );
@@ -37,6 +38,7 @@ DIALOG_PASTE_SPECIAL::DIALOG_PASTE_SPECIAL( wxWindow* aParent, PASTE_MODE* aMode
 
     m_options->SetItemToolTip( static_cast<int>( PASTE_MODE::REMOVE_ANNOTATIONS ),
                                wxString::Format( _( "Replaces reference designators with '%s'." ), aDefaultRef ) );
+#endif
 
     m_options->SetFocus();
 

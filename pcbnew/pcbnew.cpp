@@ -67,7 +67,9 @@
 #include <panel_3D_opengl_options.h>
 #include <panel_3D_raytracing_options.h>
 #include <project_pcb.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <string_utils.h>
 #include <thread_pool.h>
 #include <trace_helpers.h>
@@ -88,7 +90,9 @@
 
 /* init functions defined by swig */
 
+#ifdef KICAD_SCRIPTING
 extern "C" PyObject* PyInit__pcbnew( void );
+#endif
 
 
 /**
@@ -254,8 +258,10 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         {
             auto frame = new PCB_EDIT_FRAME( aKiway, aParent );
 
+#ifdef KICAD_SCRIPTING
             // give the scripting helpers access to our frame
             ScriptingSetPcbEditFrame( frame );
+#endif
 
             if( Kiface().IsSingle() )
             {
@@ -545,8 +551,10 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             return reinterpret_cast<void*>( &filterFootprints );
         }
 
+#ifdef KICAD_SCRIPTING
         case KIFACE_SCRIPTING_LEGACY:
             return reinterpret_cast<void*>( PyInit__pcbnew );
+#endif
 
         default:
             return nullptr;

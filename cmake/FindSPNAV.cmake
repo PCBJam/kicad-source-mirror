@@ -37,7 +37,11 @@
 # SPNAV_LIBRARIES - library to link against
 # SPNAV_FOUND - true if pugixml was found.
 
-if(UNIX)
+if(EMSCRIPTEN)
+  # SPNAV (3D mouse) not available in browser environment
+  set(SPNAV_FOUND FALSE)
+  message(STATUS "SPNAV not available for WASM build (3D mouse not supported in browser)")
+elseif(UNIX)
 
   find_path(SPNAV_INCLUDE_DIR spnav.h)
 

@@ -26,6 +26,47 @@
 # License along with this library; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
 
+# WASM cross-compilation: use direct paths since find_library fails
+if(EMSCRIPTEN)
+    # OCC_INCLUDE_DIR and OCC_LIBRARY_DIR should be passed from build script
+    if(NOT OCC_INCLUDE_DIR)
+        message(FATAL_ERROR "OCC_INCLUDE_DIR must be set for WASM builds")
+    endif()
+    if(NOT OCC_LIBRARY_DIR)
+        message(FATAL_ERROR "OCC_LIBRARY_DIR must be set for WASM builds")
+    endif()
+
+    # Verify the TKernel library exists
+    if(EXISTS "${OCC_LIBRARY_DIR}/libTKernel.a")
+        set(OCC_LIBRARY "${OCC_LIBRARY_DIR}/libTKernel.a")
+
+        # Extract version from Standard_Version.hxx
+        if(EXISTS "${OCC_INCLUDE_DIR}/Standard_Version.hxx")
+            file(STRINGS "${OCC_INCLUDE_DIR}/Standard_Version.hxx" OCC_MAJOR
+                REGEX "#define OCC_VERSION_MAJOR.*")
+            string(REGEX MATCH "[0-9]+" OCC_MAJOR "${OCC_MAJOR}")
+            file(STRINGS "${OCC_INCLUDE_DIR}/Standard_Version.hxx" OCC_MINOR
+                REGEX "#define OCC_VERSION_MINOR.*")
+            string(REGEX MATCH "[0-9]+" OCC_MINOR "${OCC_MINOR}")
+            file(STRINGS "${OCC_INCLUDE_DIR}/Standard_Version.hxx" OCC_MAINT
+                REGEX "#define OCC_VERSION_MAINTENANCE.*")
+            string(REGEX MATCH "[0-9]+" OCC_MAINT "${OCC_MAINT}")
+            set(OCC_VERSION_STRING "${OCC_MAJOR}.${OCC_MINOR}.${OCC_MAINT}")
+        else()
+            set(OCC_VERSION_STRING "7.8.0")
+        endif()
+
+        # Gather all OCC libraries
+        file(GLOB OCC_LIBRARIES "${OCC_LIBRARY_DIR}/libTK*.a")
+        set(OCC_FOUND TRUE)
+        set(OpenCASCADE_FOUND TRUE)
+        message(STATUS "Found OpenCASCADE ${OCC_VERSION_STRING} for WASM: ${OCC_LIBRARY_DIR}")
+        return()
+    else()
+        message(FATAL_ERROR "OpenCASCADE TKernel not found at ${OCC_LIBRARY_DIR}/libTKernel.a")
+    endif()
+endif()
+
 # Set the needed libraries
 set( OCC_LIBS_COMMON
     TKBinL

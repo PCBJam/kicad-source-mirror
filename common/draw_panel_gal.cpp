@@ -38,7 +38,9 @@
 #include <base_screen.h>
 #include <gal/cursors.h>
 #include <gal/graphics_abstraction_layer.h>
+#ifndef __EMSCRIPTEN__
 #include <gal/opengl/opengl_gal.h>
+#endif
 #include <gal/opengl/gpu_oom_error.h>
 #include <gal/cairo/cairo_gal.h>
 #include <math/vector2wx.h>
@@ -776,6 +778,7 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
     {
         switch( aGalType )
         {
+#ifndef __EMSCRIPTEN__
         case GAL_TYPE_OPENGL:
         {
             wxString errormsg = KIGFX::OPENGL_GAL::CheckFeatures( m_options );
@@ -804,6 +807,7 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
 
             break;
         }
+#endif
 
         case GAL_TYPE_CAIRO:
             new_gal = new KIGFX::CAIRO_GAL( m_options, this, this, this );

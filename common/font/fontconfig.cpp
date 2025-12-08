@@ -36,10 +36,17 @@
 using namespace fontconfig;
 
 static FONTCONFIG* g_config = nullptr;
-static bool        g_fcInitSuccess = false;
+static std::mutex g_fontConfigMutex;
 
 REPORTER* FONTCONFIG::s_reporter = nullptr;
-static std::mutex g_fontConfigMutex;
+
+#if KICAD_USE_FONTCONFIG
+
+// ============================================================================
+// Native fontconfig implementation (Linux, macOS, Windows)
+// ============================================================================
+
+static bool g_fcInitSuccess = false;
 
 /**
  * A simple wrapper to avoid exporting fontconfig in the header
@@ -77,11 +84,6 @@ REPORTER* fontconfig::FONTCONFIG::GetReporter()
 
 /**
  * This is simply a wrapper to call FcInit() with SEH for Windows.
- *
- * SEH on Windows can only be used in functions without objects that might be unwound
- * (basically objects with destructors).
- * For example, new FONTCONFIG() in Fontconfig() is creating a object with a destructor
- * that *might* need to be unwound. MSVC catches this and throws a compile error.
  */
 static void bootstrapFc()
 {
@@ -97,11 +99,6 @@ static void bootstrapFc()
                                                          : EXCEPTION_CONTINUE_SEARCH )
     {
         g_fcInitSuccess = false;
-
-        // We have documented cases that fontconfig while trying to cache fonts
-        // ends up using freetype to try and get font info
-        // freetype itself reads fonts through memory mapping instead of normal file APIs
-        // there are crashes reading fonts sometimes as a result that return STATUS_IN_PAGE_ERROR
     }
 #endif
 }
@@ -136,14 +133,10 @@ bool FONTCONFIG::isLanguageMatch( const wxString& aSearchLang, const wxString& a
     wxArrayString searhcLangBits;
     wxStringSplit( aSearchLang.Lower(), searhcLangBits, wxS( '-' ) );
 
-    // if either side of the comparison have only one section, then its a broad match but fine
-    // i.e. the haystack is declaring broad support or the search language is broad
     if( searhcLangBits.size() == 1 || supportedLangBits.size() == 1 )
     {
         return searhcLangBits[0] == supportedLangBits[0];
     }
-
-    // the full two part comparison should have passed the initial shortcut
 
     return false;
 }
@@ -182,8 +175,7 @@ void FONTCONFIG::getAllFamilyStrings( FONTCONFIG_PAT&                           
             fam = getFcString( aPat, FC_FAMILY, langIdx );
             aFamStringMap.insert_or_assign( famLang, fam );
         }
-    } while( langIdx++ < std::numeric_limits<
-                     int8_t>::max() ); //arbitrary to avoid getting stuck for any reason
+    } while( langIdx++ < std::numeric_limits<int8_t>::max() );
 }
 
 
@@ -203,9 +195,6 @@ std::string FONTCONFIG::getFamilyStringByLang( FONTCONFIG_PAT& aPat, const wxStr
         }
     }
 
-    // fall back to the first and maybe only available name
-    // most fonts by review don't even bother declaring more than one font family name
-    // and they don't even bother declare the language tag either, they just leave it blank
     return famStrings.begin()->second;
 }
 
@@ -219,11 +208,9 @@ FONTCONFIG::FF_RESULT FONTCONFIG::FindFont( const wxString& aFontName, wxString&
     if( !g_fcInitSuccess )
         return retval;
 
-    // If the original font name contains any of these, then it is bold, regardless
-    // of whether we are looking for bold or not
-    if( aFontName.Lower().Contains( wxS( "bold" ) )       // also catches ultrabold
+    if( aFontName.Lower().Contains( wxS( "bold" ) )
         || aFontName.Lower().Contains( wxS( "heavy" ) )
-        || aFontName.Lower().Contains( wxS( "black" ) )   // also catches extrablack
+        || aFontName.Lower().Contains( wxS( "black" ) )
         || aFontName.Lower().Contains( wxS( "thick" ) )
         || aFontName.Lower().Contains( wxS( "dark" ) ) )
     {
@@ -304,7 +291,7 @@ FONTCONFIG::FF_RESULT FONTCONFIG::FindFont( const wxString& aFontName, wxString&
                 wxString lower_style = styleStr.Lower();
 
                 if( lower_style.Contains( wxS( "thin" ) )
-                         || lower_style.Contains( wxS( "light" ) )   // catches ultra & extra light
+                         || lower_style.Contains( wxS( "light" ) )
                          || lower_style.Contains( wxS( "regular" ) )
                          || lower_style.Contains( wxS( "roman" ) )
                          || lower_style.Contains( wxS( "book" ) ) )
@@ -317,9 +304,9 @@ FONTCONFIG::FF_RESULT FONTCONFIG::FindFont( const wxString& aFontName, wxString&
                 {
                     has_bold = aBold;
                 }
-                else if( lower_style.Contains( wxS( "bold" ) )       // also catches ultrabold
+                else if( lower_style.Contains( wxS( "bold" ) )
                          || lower_style.Contains( wxS( "heavy" ) )
-                         || lower_style.Contains( wxS( "black" ) )   // also catches extrablack
+                         || lower_style.Contains( wxS( "black" ) )
                          || lower_style.Contains( wxS( "thick" ) )
                          || lower_style.Contains( wxS( "dark" ) ) )
                 {
@@ -370,8 +357,6 @@ FONTCONFIG::FF_RESULT FONTCONFIG::FindFont( const wxString& aFontName, wxString&
     {
         fontName.Replace( ':', ' ' );
 
-        // If we missed a case but the matching found the original font name, then we are
-        // not substituting
         if( fontName.CmpNoCase( qualifiedFontName ) == 0 )
             retval = FF_RESULT::FF_OK;
         else if( s_reporter )
@@ -390,7 +375,6 @@ void FONTCONFIG::ListFonts( std::vector<std::string>& aFonts, const std::string&
     if( !g_fcInitSuccess )
         return;
 
-    // be sure to cache bust if the language changed
     if( m_fontInfoCache.empty() || m_fontCacheLastLang != aDesiredLang || aForce )
     {
         FcConfig* config = FcConfigGetCurrent();
@@ -429,13 +413,6 @@ void FONTCONFIG::ListFonts( std::vector<std::string>& aFonts, const std::string&
                         getFamilyStringByLang( patHolder, From_UTF8( aDesiredLang.c_str() ) );
 
 #ifdef __WXMAC__
-                // On Mac (at least) some of the font names are in their own language.  If
-                // the OS doesn't support this language then we get a bunch of garbage names
-                // in the font menu.
-                //
-                // GTK, on the other hand, doesn't appear to support wxLocale::IsAvailable(),
-                // so we can't run these checks.
-
                 static std::map<wxString, bool> availableLanguages;
 
                 FcStrSet*  langStrSet = FcLangSetGetLangs( langSet );
@@ -445,7 +422,6 @@ void FONTCONFIG::ListFonts( std::vector<std::string>& aFonts, const std::string&
 
                 if( !langStr )
                 {
-                    // Symbol fonts (Wingdings, etc.) have no language
                     langSupported = true;
                 }
                 else while( langStr )
@@ -508,3 +484,142 @@ void FONTCONFIG::ListFonts( std::vector<std::string>& aFonts, const std::string&
         aFonts.push_back( entry.second.Family() );
 }
 
+#else // !KICAD_USE_FONTCONFIG
+
+// ============================================================================
+// WASM stub implementation - uses embedded/bundled fonts only
+// ============================================================================
+
+/**
+ * Stub for FONTCONFIG_PAT when fontconfig is not available
+ */
+struct fontconfig::FONTCONFIG_PAT
+{
+    void* pat;  // unused
+};
+
+
+wxString FONTCONFIG::Version()
+{
+    return wxS( "WASM (no fontconfig)" );
+}
+
+
+FONTCONFIG::FONTCONFIG()
+{
+}
+
+
+void fontconfig::FONTCONFIG::SetReporter( REPORTER* aReporter )
+{
+    std::lock_guard lock( g_fontConfigMutex );
+    s_reporter = aReporter;
+}
+
+
+FONTCONFIG* Fontconfig()
+{
+    if( !g_config )
+    {
+        g_config = new FONTCONFIG();
+    }
+
+    return g_config;
+}
+
+
+FONTCONFIG::FF_RESULT FONTCONFIG::FindFont( const wxString& aFontName, wxString& aFontFile,
+                                            int& aFaceIndex, bool aBold, bool aItalic,
+                                            const std::vector<wxString>* aEmbeddedFiles )
+{
+    // In WASM, we primarily use embedded fonts passed via aEmbeddedFiles
+    // or the built-in KiCad stroke font
+
+    // Check embedded files first
+    if( aEmbeddedFiles && !aEmbeddedFiles->empty() )
+    {
+        // Search for a matching font in embedded files
+        wxString searchName = aFontName.Lower();
+
+        for( const wxString& file : *aEmbeddedFiles )
+        {
+            // Simple matching: check if filename contains the font name
+            if( file.Lower().Contains( searchName ) )
+            {
+                aFontFile = file;
+                aFaceIndex = 0;
+                return FF_RESULT::FF_OK;
+            }
+        }
+
+        // If no exact match, return first embedded file as substitute
+        aFontFile = (*aEmbeddedFiles)[0];
+        aFaceIndex = 0;
+
+        if( s_reporter )
+        {
+            s_reporter->Report( wxString::Format(
+                _( "Font '%s' not found in embedded fonts; using '%s'." ),
+                aFontName, aFontFile ) );
+        }
+
+        return FF_RESULT::FF_SUBSTITUTE;
+    }
+
+    // No embedded fonts available - caller should fall back to stroke font
+    aFontFile = wxEmptyString;
+    aFaceIndex = 0;
+
+    return FF_RESULT::FF_ERROR;
+}
+
+
+void FONTCONFIG::ListFonts( std::vector<std::string>& aFonts, const std::string& aDesiredLang,
+                            const std::vector<wxString>* aEmbeddedFiles, bool aForce )
+{
+    // Clear and rebuild if forced or empty
+    if( m_fontInfoCache.empty() || aForce )
+    {
+        m_fontInfoCache.clear();
+
+        // Add embedded files as available fonts
+        if( aEmbeddedFiles )
+        {
+            for( const wxString& file : *aEmbeddedFiles )
+            {
+                // Extract font family name from filename
+                wxString filename = file.AfterLast( '/' ).AfterLast( '\\' );
+                wxString family = filename.BeforeLast( '.' );
+
+                // Remove common suffixes like -Regular, -Bold, etc.
+                family.Replace( wxS( "-Regular" ), wxEmptyString );
+                family.Replace( wxS( "-Bold" ), wxEmptyString );
+                family.Replace( wxS( "-Italic" ), wxEmptyString );
+                family.Replace( wxS( "-BoldItalic" ), wxEmptyString );
+
+                std::string familyStr = family.ToStdString();
+
+                if( m_fontInfoCache.find( familyStr ) == m_fontInfoCache.end() )
+                {
+                    FONTINFO fontInfo( file.ToStdString(), "Regular", familyStr );
+                    m_fontInfoCache.emplace( familyStr, fontInfo );
+                }
+            }
+        }
+
+        // Always include the built-in KiCad font
+        if( m_fontInfoCache.find( "KiCad Font" ) == m_fontInfoCache.end() )
+        {
+            FONTINFO kicadFont( "", "Regular", "KiCad Font" );
+            m_fontInfoCache.emplace( "KiCad Font", kicadFont );
+        }
+    }
+
+    // Return all cached font families
+    for( const auto& entry : m_fontInfoCache )
+    {
+        aFonts.push_back( entry.second.Family() );
+    }
+}
+
+#endif // KICAD_USE_FONTCONFIG
