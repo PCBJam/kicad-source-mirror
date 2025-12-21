@@ -56,6 +56,11 @@ if( NOT EMSCRIPTEN )
         opengl/opengl_compositor.cpp
         opengl/utils.cpp
     )
+else()
+    # WASM: Stub for HIDPI_GL_CANVAS (provides typeinfo for dynamic_cast in preview_utils.cpp)
+    list( APPEND GAL_SRCS
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs/gl_canvas_stub.cpp
+    )
 endif()
 
 add_library( gal SHARED ${GAL_SRCS} )

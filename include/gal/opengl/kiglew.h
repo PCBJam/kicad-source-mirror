@@ -35,6 +35,8 @@
     // WebGL: Emscripten provides OpenGL ES headers, no GLEW needed
     #include <GLES2/gl2.h>
     #include <GLES2/gl2ext.h>
+    // GLU support for 3D viewer (stubbed for WASM)
+    #include <GL/glu.h>
 
     // GLEW compatibility stubs for WebGL
     #define GLEW_OK 0

@@ -801,15 +801,26 @@ add_executable( pcbnew WIN32 MACOSX_BUNDLE
     ${CMAKE_SOURCE_DIR}/common/single_top.cpp
     ${PCBNEW_RESOURCES}
     )
+if( EMSCRIPTEN )
+    # WASM: Static kiface linking - don't define BUILD_KIWAY_DLL
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\""
+        )
+else()
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\";BUILD_KIWAY_DLL"
+        )
+endif()
+# pcbnew.cpp COMPILE_DEFINITIONS are set after pcbnew_kiface target
 
-set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
-    COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\";BUILD_KIWAY_DLL"
-    )
-
-target_link_libraries( pcbnew
-    kicommon
-    ${wxWidgets_LIBRARIES}
-    )
+if( NOT EMSCRIPTEN )
+    # Native: minimal link, kiface loaded dynamically
+    target_link_libraries( pcbnew
+        kicommon
+        ${wxWidgets_LIBRARIES}
+        )
+endif()
+# WASM linking is done after PCBNEW_KIFACE_LIBRARIES is defined
 
 target_link_options( pcbnew PRIVATE
     $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=pcbnew.map>
@@ -823,6 +834,24 @@ add_library( pcbnew_kiface_objects OBJECT
 
 if( KICAD_SCRIPTING )
     target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_SCRIPTING_SRCS} )
+endif()
+
+# WASM: Add stub implementations for scripting/plugin features not available in browser
+if( EMSCRIPTEN )
+    # Stub sources for pcbnew scripting/plugin features
+    set( PCBNEW_WASM_STUBS
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs/scripting_stub.cpp
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs/pcb_frame_stub.cpp
+    )
+    # Add 3D viewer stubs when 3D viewer is disabled
+    if( NOT KICAD_BUILD_3D_VIEWER_WASM )
+        list( APPEND PCBNEW_WASM_STUBS
+            ${CMAKE_SOURCE_DIR}/../wasm/stubs/3d_viewer_stub.cpp
+            ${CMAKE_SOURCE_DIR}/../wasm/stubs/3d_scenegraph_stub.cpp
+            ${CMAKE_SOURCE_DIR}/../wasm/stubs/3d_canvas_stub.cpp
+        )
+    endif()
+    target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_WASM_STUBS} )
 endif()
 
 if( KICAD_USE_PCH )
@@ -906,9 +935,22 @@ set( PCBNEW_KIFACE_LIBRARIES
     ${PCBNEW_EXTRA_LIBS}    # -lrt must follow Boost
     )
 
-# Add 3D viewer only for non-WASM builds (uses GLU/OpenGL fixed pipeline)
-if( NOT EMSCRIPTEN )
+# Add 3D viewer only for non-WASM builds (unless KICAD_BUILD_3D_VIEWER_WASM is enabled)
+if( NOT EMSCRIPTEN OR KICAD_BUILD_3D_VIEWER_WASM )
     list( APPEND PCBNEW_KIFACE_LIBRARIES 3d-viewer )
+endif()
+
+# WASM: Link kiface objects directly into pcbnew executable (static linking)
+if( EMSCRIPTEN )
+    target_link_libraries( pcbnew
+        PRIVATE
+            ${PCBNEW_KIFACE_LIBRARIES}
+        )
+    # WASM: Allow multiple definitions of symbols that exist in both
+    # KiCad and wxWidgets (e.g., nanosvg, wxGetContentRect)
+    target_link_options( pcbnew PRIVATE
+        "LINKER:--allow-multiple-definition"
+        )
 endif()
 
 target_link_libraries( pcbnew_kiface
@@ -916,10 +958,17 @@ target_link_libraries( pcbnew_kiface
         ${PCBNEW_KIFACE_LIBRARIES}
     )
 
-#The KIFACE is in pcbnew.cpp, export it:
-set_source_files_properties( pcbnew.cpp PROPERTIES
-    COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
-    )
+if( EMSCRIPTEN )
+    # WASM: Static linking - don't define BUILD_KIWAY_DLL
+    set_source_files_properties( pcbnew.cpp PROPERTIES
+        COMPILE_DEFINITIONS     "COMPILING_DLL"
+        )
+else()
+    set_source_files_properties( pcbnew.cpp PROPERTIES
+        # The KIFACE is in pcbnew.cpp, export it:
+        COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
+        )
+endif()
 
 target_link_options( pcbnew_kiface PRIVATE
     $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=_pcbnew.kiface.map>

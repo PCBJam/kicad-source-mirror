@@ -47,7 +47,7 @@ set(3D-VIEWER_SRCS
     ${DIR_RAY}/PerlinNoise.cpp
     ${DIR_RAY}/create_scene.cpp
     ${DIR_RAY}/render_3d_raytrace_base.cpp
-    ${DIR_RAY}/render_3d_raytrace_gl.cpp
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:${DIR_RAY}/render_3d_raytrace_gl.cpp>
     ${DIR_RAY}/render_3d_raytrace_ram.cpp
     ${DIR_RAY}/frustum.cpp
     ${DIR_RAY}/material.cpp
