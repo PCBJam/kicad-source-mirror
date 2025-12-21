@@ -127,6 +127,10 @@ option( KICAD_BUILD_QA_TESTS
     "Build software Quality assurance unit tests (default ON)"
     ON )
 
+option( KICAD_BUILD_3D_VIEWER_WASM
+    "Build 3D viewer for WASM (experimental, requires GLU stubs)"
+    OFF )
+
 # WASM builds disable Python by default (can be enabled with Pyodide later)
 if( EMSCRIPTEN )
     option( KICAD_SCRIPTING
@@ -300,16 +304,11 @@ option( KICAD_GAL_PROFILE
     "Enable profiling info for GAL"
     OFF )
 
-# WASM builds disable IPC API (IPC not supported in browser)
-if( EMSCRIPTEN )
-    option( KICAD_IPC_API
-        "Enable IPC API"
-        OFF )
-else()
-    option( KICAD_IPC_API
-        "Enable IPC API"
-        ON )
-endif()
+# IPC API: Default OFF, can be enabled via -DKICAD_IPC_API=ON
+# For WASM: Sockets stubbed, but serialization available for JS interop
+option( KICAD_IPC_API
+    "Enable IPC API"
+    OFF )
 
 option( KICAD_IDF_TOOLS
     "Build additional idf tools"
@@ -1274,8 +1273,8 @@ if( UNIX AND NOT APPLE )
 endif()
 
 # Binaries ( CMake targets )
-# WASM builds skip the IPC API (protobuf version mismatch and IPC not available)
-if( NOT EMSCRIPTEN )
+# Build API when IPC API is enabled (works for both native and WASM)
+if( KICAD_IPC_API )
     add_subdirectory( api )
 endif()
 add_subdirectory( resources )
@@ -1283,8 +1282,8 @@ add_subdirectory( thirdparty )
 add_subdirectory( libs )
 add_subdirectory( scripting )
 add_subdirectory( common )
-if( NOT EMSCRIPTEN )
-    # 3D viewer uses GLU and OpenGL fixed-function pipeline, not available in WebGL
+if( NOT EMSCRIPTEN OR KICAD_BUILD_3D_VIEWER_WASM )
+    # 3D viewer uses GLU - for WASM, requires GLU stubs and LEGACY_GL_EMULATION
     add_subdirectory( 3d-viewer )
 endif()
 add_subdirectory( eeschema )

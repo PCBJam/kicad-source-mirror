@@ -345,9 +345,27 @@ if( KICAD_IPC_API )
         api/api_utils.cpp
         api/api_handler.cpp
         api/api_plugin.cpp
-        api/api_plugin_manager.cpp
-        api/api_server.cpp
-        ../scripting/python_manager.cpp
+    )
+    # Plugin manager and server require Python and socket support (not available in WASM)
+    if( NOT EMSCRIPTEN )
+        list( APPEND KICOMMON_SRCS
+            api/api_plugin_manager.cpp
+            api/api_server.cpp
+            ../scripting/python_manager.cpp
+        )
+    else()
+        # WASM: Add stubs for API server and plugin manager
+        list( APPEND KICOMMON_SRCS
+            ${CMAKE_SOURCE_DIR}/../wasm/stubs/api_plugin_stub.cpp
+            ${CMAKE_SOURCE_DIR}/../wasm/stubs/python_manager_stub.cpp
+        )
+    endif()
+endif()
+
+# WASM: Python manager is used by panel_plugin_settings even without IPC API
+if( EMSCRIPTEN AND NOT KICAD_IPC_API )
+    list( APPEND KICOMMON_SRCS
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs/python_manager_stub.cpp
     )
 endif()
 
@@ -376,7 +394,7 @@ set_target_properties(kicommon PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
 target_link_libraries( kicommon
     core
-    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:kiapi>
+    $<$<BOOL:${KICAD_IPC_API}>:kiapi>
     kimath
     kiplatform
     nlohmann_json
@@ -414,7 +432,7 @@ if( KICAD_USE_SENTRY )
     set_property(SOURCE app_monitor.cpp APPEND PROPERTY COMPILE_DEFINITIONS KICAD_SENTRY_DSN="${KICAD_SENTRY_DSN}")
 endif()
 
-if( KICAD_IPC_API )
+if( KICAD_IPC_API AND NOT EMSCRIPTEN )
     target_link_libraries( kicommon
         kinng
         )
@@ -472,9 +490,11 @@ target_include_directories( kicommon
         $<TARGET_PROPERTY:magic_enum,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:pegtl,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:expected,INTERFACE_INCLUDE_DIRECTORIES>
-        $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
+        $<$<BOOL:${KICAD_IPC_API}>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
         $<TARGET_PROPERTY:picosha2,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:nlohmann_json_schema_validator,INTERFACE_INCLUDE_DIRECTORIES>
+        # WASM: Add scripting directory for python_manager.h (Python not available)
+        $<$<BOOL:${EMSCRIPTEN}>:${PROJECT_SOURCE_DIR}/scripting>
     )
 
 add_dependencies( kicommon pegtl version_header )
@@ -962,7 +982,7 @@ if( KICAD_USE_SENTRY )
         sentry )
 endif()
 
-if( KICAD_IPC_API )
+if( KICAD_IPC_API AND NOT EMSCRIPTEN )
     target_link_libraries( common
         kinng
         )
@@ -973,7 +993,7 @@ target_include_directories( common
         .
         ${CMAKE_BINARY_DIR}
         $<TARGET_PROPERTY:argparse::argparse,INTERFACE_INCLUDE_DIRECTORIES>
-        $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
+        $<$<BOOL:${KICAD_IPC_API}>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
     )
 
 # text markup support
