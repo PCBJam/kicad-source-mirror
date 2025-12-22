@@ -224,6 +224,22 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
     if( m_kiface[aFaceId] )
         return m_kiface[aFaceId];
 
+#ifdef __EMSCRIPTEN__
+    // WASM: Dynamic loading not supported. Use statically-linked KIFACE.
+    if( doLoad )
+    {
+        // Get the statically linked KIFACE_GETTER
+        extern KIFACE* KIFACE_GETTER( int*, int, PGM_BASE* );
+        KIFACE* kiface = KIFACE_GETTER( &m_kiface_version[aFaceId], KIFACE_VERSION, &Pgm() );
+
+        if( kiface && kiface->OnKifaceStart( &Pgm(), m_ctl, this ) )
+            return m_kiface[aFaceId] = kiface;
+
+        return nullptr;
+    }
+    return nullptr;
+#endif
+
     // DSO with KIFACE has not been loaded yet, does caller want to load it?
     if( doLoad )
     {
