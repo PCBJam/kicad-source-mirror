@@ -220,17 +220,30 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
         return nullptr;
     }
 
-    // return the previously loaded KIFACE, if it was.
-    if( m_kiface[aFaceId] )
-        return m_kiface[aFaceId];
-
 #ifdef __EMSCRIPTEN__
     // WASM: Dynamic loading not supported. Use statically-linked KIFACE.
-    if( doLoad )
+    // For WASM, we need to ensure OnKifaceStart is called even if set_kiface()
+    // was used to pre-register the kiface (as done in single_top.cpp for non-DLL builds).
+    // We use m_kiface_version as an indicator: if kiface is set but version is 0,
+    // OnKifaceStart hasn't been called yet.
+    if( m_kiface[aFaceId] && m_kiface_version[aFaceId] != 0 )
+        return m_kiface[aFaceId];
+
+    if( doLoad || m_kiface[aFaceId] )
     {
-        // Get the statically linked KIFACE_GETTER
-        extern KIFACE* KIFACE_GETTER( int*, int, PGM_BASE* );
-        KIFACE* kiface = KIFACE_GETTER( &m_kiface_version[aFaceId], KIFACE_VERSION, &Pgm() );
+        KIFACE* kiface = m_kiface[aFaceId];
+
+        if( !kiface )
+        {
+            // Get the statically linked KIFACE_GETTER
+            extern KIFACE* KIFACE_GETTER( int*, int, PGM_BASE* );
+            kiface = KIFACE_GETTER( &m_kiface_version[aFaceId], KIFACE_VERSION, &Pgm() );
+        }
+        else
+        {
+            // kiface was set via set_kiface(), but OnKifaceStart wasn't called
+            m_kiface_version[aFaceId] = KIFACE_VERSION;
+        }
 
         if( kiface && kiface->OnKifaceStart( &Pgm(), m_ctl, this ) )
             return m_kiface[aFaceId] = kiface;
@@ -238,6 +251,10 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
         return nullptr;
     }
     return nullptr;
+#else
+    // return the previously loaded KIFACE, if it was.
+    if( m_kiface[aFaceId] )
+        return m_kiface[aFaceId];
 #endif
 
     // DSO with KIFACE has not been loaded yet, does caller want to load it?
