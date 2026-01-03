@@ -391,46 +391,47 @@ OPENGL_GAL::OPENGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIO
     m_isGrouping = false;
     m_groupCounter = 0;
 
-    // Connect the native cursor handler
-    Connect( wxEVT_SET_CURSOR, wxSetCursorEventHandler( OPENGL_GAL::onSetNativeCursor ), nullptr,
-             this );
+    // Use Bind() for type-safe event binding with multiple inheritance
+    // Cast 'this' to HIDPI_GL_CANVAS* to call wxEvtHandler methods
+    auto* evtHandler = static_cast<HIDPI_GL_CANVAS*>( this );
 
-    // Connecting the event handlers
-    Connect( wxEVT_PAINT, wxPaintEventHandler( OPENGL_GAL::onPaint ) );
+    // Bind all event handlers - Bind() is type-safe and handles 'this' correctly
+    evtHandler->Bind( wxEVT_SET_CURSOR, &OPENGL_GAL::onSetNativeCursor, this );
+    evtHandler->Bind( wxEVT_PAINT, &OPENGL_GAL::onPaint, this );
 
     // Mouse events are skipped to the parent
-    Connect( wxEVT_MOTION, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_LEFT_DOWN, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_LEFT_UP, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_LEFT_DCLICK, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_MIDDLE_DOWN, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_MIDDLE_UP, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_MIDDLE_DCLICK, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_RIGHT_DOWN, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_RIGHT_UP, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_RIGHT_DCLICK, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_AUX1_DOWN, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_AUX1_UP, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_AUX1_DCLICK, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_AUX2_DOWN, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_AUX2_UP, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_AUX2_DCLICK, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_MOUSEWHEEL, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
-    Connect( wxEVT_MAGNIFY, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
+    evtHandler->Bind( wxEVT_MOTION, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_LEFT_DOWN, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_LEFT_UP, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_LEFT_DCLICK, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_MIDDLE_DOWN, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_MIDDLE_UP, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_MIDDLE_DCLICK, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_RIGHT_DOWN, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_RIGHT_UP, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_RIGHT_DCLICK, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_AUX1_DOWN, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_AUX1_UP, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_AUX1_DCLICK, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_AUX2_DOWN, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_AUX2_UP, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_AUX2_DCLICK, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_MOUSEWHEEL, &OPENGL_GAL::skipMouseEvent, this );
+    evtHandler->Bind( wxEVT_MAGNIFY, &OPENGL_GAL::skipMouseEvent, this );
 
 #if defined _WIN32 || defined _WIN64
-    Connect( wxEVT_ENTER_WINDOW, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
+    evtHandler->Bind( wxEVT_ENTER_WINDOW, &OPENGL_GAL::skipMouseEvent, this );
 #endif
 
-    Bind( wxEVT_GESTURE_ZOOM, &OPENGL_GAL::skipGestureEvent, this );
-    Bind( wxEVT_GESTURE_PAN, &OPENGL_GAL::skipGestureEvent, this );
+    evtHandler->Bind( wxEVT_GESTURE_ZOOM, &OPENGL_GAL::skipGestureEvent, this );
+    evtHandler->Bind( wxEVT_GESTURE_PAN, &OPENGL_GAL::skipGestureEvent, this );
 
-    SetSize( aParent->GetClientSize() );
-    m_screenSize = ToVECTOR2I( GetNativePixelSize() );
+    evtHandler->SetSize( aParent->GetClientSize() );
+    m_screenSize = ToVECTOR2I( evtHandler->GetNativePixelSize() );
 
     // Grid color settings are different in Cairo and OpenGL
-    SetGridColor( COLOR4D( 0.8, 0.8, 0.8, 0.1 ) );
-    SetAxesColor( COLOR4D( BLUE ) );
+    GAL::SetGridColor( COLOR4D( 0.8, 0.8, 0.8, 0.1 ) );
+    GAL::SetAxesColor( COLOR4D( BLUE ) );
 
     // Tesselator initialization
     m_tesselator = gluNewTess();
@@ -438,7 +439,7 @@ OPENGL_GAL::OPENGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIO
 
     gluTessProperty( m_tesselator, GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_POSITIVE );
 
-    SetTarget( TARGET_NONCACHED );
+    GAL::SetTarget( TARGET_NONCACHED );
 
     // Avoid uninitialized variables:
     ufm_worldPixelSize = -1;
