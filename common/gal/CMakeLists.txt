@@ -34,32 +34,32 @@ set( GAL_SRCS
     cairo/cairo_print.cpp
     )
 
-# OpenGL GAL - not supported on Emscripten/WASM due to GLU and desktop OpenGL dependencies
-if( NOT EMSCRIPTEN )
-    list( APPEND GAL_SRCS
-        hidpi_gl_canvas.cpp
-        hidpi_gl_3D_canvas.cpp
+# OpenGL GAL - enabled for all platforms including WASM
+list( APPEND GAL_SRCS
+    hidpi_gl_canvas.cpp
+    hidpi_gl_3D_canvas.cpp
 
-        # OpenGL GAL
-        opengl/opengl_gal.cpp
-        opengl/gl_resources.cpp
-        opengl/shader.cpp
-        opengl/vertex_item.cpp
-        opengl/vertex_container.cpp
-        opengl/cached_container.cpp
-        opengl/cached_container_gpu.cpp
-        opengl/cached_container_ram.cpp
-        opengl/noncached_container.cpp
-        opengl/vertex_manager.cpp
-        opengl/gpu_manager.cpp
-        opengl/antialiasing.cpp
-        opengl/opengl_compositor.cpp
-        opengl/utils.cpp
-    )
-else()
-    # WASM: Stub for HIDPI_GL_CANVAS (provides typeinfo for dynamic_cast in preview_utils.cpp)
+    # OpenGL GAL
+    opengl/opengl_gal.cpp
+    opengl/gl_resources.cpp
+    opengl/shader.cpp
+    opengl/vertex_item.cpp
+    opengl/vertex_container.cpp
+    opengl/cached_container.cpp
+    opengl/cached_container_gpu.cpp
+    opengl/cached_container_ram.cpp
+    opengl/noncached_container.cpp
+    opengl/vertex_manager.cpp
+    opengl/gpu_manager.cpp
+    opengl/antialiasing.cpp
+    opengl/opengl_compositor.cpp
+    opengl/utils.cpp
+)
+
+# For WASM: use earcut-based GLU tesselator implementation
+if( EMSCRIPTEN )
     list( APPEND GAL_SRCS
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs/gl_canvas_stub.cpp
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs/glu_wasm_impl.cpp
     )
 endif()
 
@@ -74,6 +74,11 @@ if( KICAD_USE_PCH )
             <pgm_base.h>
             <wx/wx.h>
              )
+endif()
+
+# For WASM: include path for GL/glu.h stub headers
+if( EMSCRIPTEN )
+    target_include_directories( gal PRIVATE ${CMAKE_SOURCE_DIR}/../wasm/stubs )
 endif()
 
 if( WIN32 )
@@ -95,7 +100,7 @@ target_link_libraries( gal
     ${Fontconfig_LIBRARIES}
 )
 
-# OpenGL libraries - not needed for Emscripten/WASM (using Cairo only)
+# OpenGL libraries - WASM uses Emscripten's built-in GL via -sLEGACY_GL_EMULATION
 if( NOT EMSCRIPTEN )
     target_link_libraries( gal
         ${GLEW_LIBRARIES}
@@ -138,41 +143,39 @@ if( APPLE )
     set_target_properties( gal PROPERTIES BUILD_WITH_INSTALL_RPATH 1 )
 endif()
 
-# OpenGL shaders - only needed when building with OpenGL support (not for Emscripten/WASM)
-if( NOT EMSCRIPTEN )
-    function( add_shader outTarget inFile shaderName )
-        set(outCppName "${shaderName}.cpp")
-        set(outHeaderName "${shaderName}.h")
+# OpenGL shaders - needed for all platforms including WASM (works with -sLEGACY_GL_EMULATION)
+function( add_shader outTarget inFile shaderName )
+    set(outCppName "${shaderName}.cpp")
+    set(outHeaderName "${shaderName}.h")
 
-        add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${outCppName}
-                    ${CMAKE_BINARY_DIR}/include/gal/shaders/${outHeaderName}
-            COMMAND ${CMAKE_COMMAND}
-                -DSOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}"
-                -DOUT_CPP_DIR="${CMAKE_CURRENT_BINARY_DIR}/"
-                -DOUT_HEADER_DIR="${CMAKE_BINARY_DIR}/include/gal/shaders/"
-                -DOUT_CPP_FILENAME="${outCppName}"
-                -DOUT_HEADER_FILENAME="${outHeaderName}"
-                -DOUT_VAR_NAME="${shaderName}"
-                -P ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}
-                    ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
-            )
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${outCppName}
+                ${CMAKE_BINARY_DIR}/include/gal/shaders/${outHeaderName}
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}"
+            -DOUT_CPP_DIR="${CMAKE_CURRENT_BINARY_DIR}/"
+            -DOUT_HEADER_DIR="${CMAKE_BINARY_DIR}/include/gal/shaders/"
+            -DOUT_CPP_FILENAME="${outCppName}"
+            -DOUT_HEADER_FILENAME="${outHeaderName}"
+            -DOUT_VAR_NAME="${shaderName}"
+            -P ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}
+                ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
+        )
 
-        target_sources( ${outTarget} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/${outCppName} )
-        target_include_directories( ${outTarget} PUBLIC ${CMAKE_BINARY_DIR}/include/gal/shaders/ )
-    endfunction()
+    target_sources( ${outTarget} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/${outCppName} )
+    target_include_directories( ${outTarget} PUBLIC ${CMAKE_BINARY_DIR}/include/gal/shaders/ )
+endfunction()
 
-    add_shader( gal kicad_frag.glsl glsl_kicad_frag )
-    add_shader( gal kicad_vert.glsl glsl_kicad_vert )
-    add_shader( gal smaa_base.glsl glsl_smaa_base )
-    add_shader( gal smaa_pass_1_frag_color.glsl glsl_smaa_pass_1_frag_color )
-    add_shader( gal smaa_pass_1_frag_luma.glsl glsl_smaa_pass_1_frag_luma )
-    add_shader( gal smaa_pass_1_vert.glsl glsl_smaa_pass_1_vert )
-    add_shader( gal smaa_pass_2_frag.glsl glsl_smaa_pass_2_frag )
-    add_shader( gal smaa_pass_2_vert.glsl glsl_smaa_pass_2_vert )
-    add_shader( gal smaa_pass_3_frag.glsl glsl_smaa_pass_3_frag )
-    add_shader( gal smaa_pass_3_vert.glsl glsl_smaa_pass_3_vert )
-    add_shader( gal xor_diff_frag.glsl glsl_xor_diff_frag )
-    add_shader( gal xor_diff_vert.glsl glsl_xor_diff_vert )
-endif()
+add_shader( gal kicad_frag.glsl glsl_kicad_frag )
+add_shader( gal kicad_vert.glsl glsl_kicad_vert )
+add_shader( gal smaa_base.glsl glsl_smaa_base )
+add_shader( gal smaa_pass_1_frag_color.glsl glsl_smaa_pass_1_frag_color )
+add_shader( gal smaa_pass_1_frag_luma.glsl glsl_smaa_pass_1_frag_luma )
+add_shader( gal smaa_pass_1_vert.glsl glsl_smaa_pass_1_vert )
+add_shader( gal smaa_pass_2_frag.glsl glsl_smaa_pass_2_frag )
+add_shader( gal smaa_pass_2_vert.glsl glsl_smaa_pass_2_vert )
+add_shader( gal smaa_pass_3_frag.glsl glsl_smaa_pass_3_frag )
+add_shader( gal smaa_pass_3_vert.glsl glsl_smaa_pass_3_vert )
+add_shader( gal xor_diff_frag.glsl glsl_xor_diff_frag )
+add_shader( gal xor_diff_vert.glsl glsl_xor_diff_vert )

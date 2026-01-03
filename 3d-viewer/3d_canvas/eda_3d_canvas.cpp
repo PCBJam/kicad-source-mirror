@@ -129,10 +129,16 @@ EDA_3D_CANVAS::EDA_3D_CANVAS( wxWindow* aParent, const wxGLAttributes& aGLAttrib
 
     m_is_currently_painting.clear();
 
+#ifndef __EMSCRIPTEN__
     m_3d_render_raytracing = new RENDER_3D_RAYTRACE_GL( this, m_boardAdapter, m_camera );
+#else
+    m_3d_render_raytracing = nullptr;  // Raytracing not supported in WASM
+#endif
     m_3d_render_opengl = new RENDER_3D_OPENGL( this, m_boardAdapter, m_camera );
 
+#ifndef __EMSCRIPTEN__
     wxASSERT( m_3d_render_raytracing != nullptr );
+#endif
     wxASSERT( m_3d_render_opengl != nullptr );
 
     auto busy_indicator_factory =
@@ -141,7 +147,9 @@ EDA_3D_CANVAS::EDA_3D_CANVAS( wxWindow* aParent, const wxGLAttributes& aGLAttrib
                 return std::make_unique<WX_BUSY_INDICATOR>();
             };
 
+#ifndef __EMSCRIPTEN__
     m_3d_render_raytracing->SetBusyIndicatorFactory( busy_indicator_factory );
+#endif
     m_3d_render_opengl->SetBusyIndicatorFactory( busy_indicator_factory );
 
     // We always start with the opengl engine (raytracing is avoided due to very
@@ -344,6 +352,10 @@ void EDA_3D_CANVAS::ReloadRequest( BOARD* aBoard , S3D_CACHE* aCachePointer )
 
 void EDA_3D_CANVAS::RenderRaytracingRequest()
 {
+#ifdef __EMSCRIPTEN__
+    // Raytracing not supported in WASM
+    return;
+#endif
     m_3d_render = m_3d_render_raytracing;
 
     if( m_3d_render )
@@ -553,11 +565,13 @@ void EDA_3D_CANVAS::DoRePaint()
             // cosmetic, so I'm not fixing that for now: I don't know how to do this without
             // reloading twice (maybe it's not too bad of an idea?) or doing a complicated
             // refactor.
+#ifndef __EMSCRIPTEN__
             if( reloadRaytracingForCalculations )
             {
                 m_reload_raytracing_hit_test = false;
                 m_3d_render_raytracing->Reload( nullptr, nullptr, true );
             }
+#endif
         }
         catch( std::runtime_error& )
         {
@@ -818,11 +832,13 @@ void EDA_3D_CANVAS::RenderToFrameBuffer( unsigned char* buffer, int width, int h
 
             requested_redraw = m_3d_render->Redraw( false, nullptr, nullptr );
 
+#ifndef __EMSCRIPTEN__
             if( reloadRaytracingForCalculations )
             {
                 m_reload_raytracing_hit_test = false;
                 m_3d_render_raytracing->Reload( nullptr, nullptr, true );
             }
+#endif
         }
         catch( std::runtime_error& )
         {
@@ -998,6 +1014,7 @@ void EDA_3D_CANVAS::OnMouseMove( wxMouseEvent& event )
         // OnMiddleUp() will do it at the end of mouse drag/move command
     }
 
+#ifndef __EMSCRIPTEN__
     if( !event.Dragging() && m_boardAdapter.m_Cfg->m_Render.engine == RENDER_ENGINE::OPENGL )
     {
         STATUSBAR_REPORTER reporter( m_parentStatusBar, EDA_3D_VIEWER_STATUSBAR::HOVERED_ITEM );
@@ -1092,6 +1109,7 @@ void EDA_3D_CANVAS::OnMouseMove( wxMouseEvent& event )
             m_currentRollOverItem = nullptr;
         }
     }
+#endif // __EMSCRIPTEN__
 }
 
 

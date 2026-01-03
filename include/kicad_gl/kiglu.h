@@ -31,7 +31,10 @@
 #include <kicad_gl/kiglad.h>
 
 // System GL headers (assumed to be loaded via wxGLCanvas or other dependencies)
-#ifdef __APPLE__
+#ifdef __EMSCRIPTEN__
+// For WASM, use kiglew.h which provides GL with our stubs and wrappers
+#include <gal/opengl/kiglew.h>
+#elif defined( __APPLE__ )
 #include <OpenGL/gl.h>
 #include <OpenGL/glu.h>
 #else
