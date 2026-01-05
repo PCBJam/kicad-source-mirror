@@ -63,8 +63,9 @@ include( CheckCXXCompilerFlag )
 set( CMAKE_EXPORT_COMPILE_COMMANDS ON )
 
 # Path to KiCad's CMake modules.
+# Preserve any custom CMAKE_MODULE_PATH passed via command line (e.g., for WASM cross-compilation)
 set( KICAD_CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake" )
-set( CMAKE_MODULE_PATH       "${KICAD_CMAKE_MODULE_PATH}" )
+set( CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${KICAD_CMAKE_MODULE_PATH}" )
 
 include( ConfigurePlatform )
 
