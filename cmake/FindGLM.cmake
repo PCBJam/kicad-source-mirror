@@ -5,20 +5,13 @@ find_path( GLM_INCLUDE_DIR glm/glm.hpp
 
 if( NOT ${GLM_INCLUDE_DIR} STREQUAL "GLM_INCLUDE_DIR-NOTFOUND" )
 
-    # For cross-compilation (WASM), find_file may fail, so use direct path check
-    if( EXISTS "${GLM_INCLUDE_DIR}/glm/detail/setup.hpp" )
-        set( GLM_SETUP "${GLM_INCLUDE_DIR}/glm/detail/setup.hpp" )
-    elseif( EXISTS "${GLM_INCLUDE_DIR}/glm/core/setup.hpp" )
-        set( GLM_SETUP "${GLM_INCLUDE_DIR}/glm/core/setup.hpp" )
-    else()
-        # Fallback to find_file for native builds
-        find_file( GLM_SETUP setup.hpp
-            PATHS ${GLM_INCLUDE_DIR}
-            PATH_SUFFIXES glm/core glm/detail
-            NO_DEFAULT_PATH )
-    endif()
+    # attempt to extract the GLM Version information from setup.hpp
+    find_file( GLM_SETUP setup.hpp
+        PATHS ${GLM_INCLUDE_DIR}
+        PATH_SUFFIXES glm/core glm/detail
+        NO_DEFAULT_PATH )
 
-    if( GLM_SETUP AND NOT ${GLM_SETUP} STREQUAL "GLM_SETUP-NOTFOUND" )
+    if( NOT ${GLM_SETUP} STREQUAL "GLM_SETUP-NOTFOUND" )
 
         # extract the "#define GLM_VERSION*" lines
         file( STRINGS ${GLM_SETUP} _version REGEX "^#define.*GLM_VERSION.*" )
