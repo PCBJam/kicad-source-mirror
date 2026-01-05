@@ -22,14 +22,6 @@
 # or you may write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
-# WASM: ngspice not available in browser
-if(EMSCRIPTEN)
-    set(NGSPICE_FOUND FALSE)
-    set(ngspice_FOUND FALSE)
-    message(STATUS "ngspice not available for WASM build (SPICE disabled)")
-    return()
-endif()
-
 # Usage:
 #
 # ngspice uses pkg-config to gather the configuration information so the pkg-config

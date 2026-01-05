@@ -1,13 +1,3 @@
-# WASM: nng (nanomsg) not available - IPC not supported in browser
-if(EMSCRIPTEN)
-    set(nng_FOUND FALSE)
-    set(NNG_FOUND FALSE)
-    set(NNG_INCLUDE_DIR "")
-    set(NNG_LIBRARY "")
-    message(STATUS "nng not available for WASM build (IPC not supported in browser)")
-    return()
-endif()
-
 find_package(PkgConfig)
 
 if(PKG_CONFIG_FOUND)

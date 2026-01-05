@@ -22,41 +22,6 @@
 # (To distribute this file outside of CMake, substitute the full
 #  License text for the above reference.)
 
-# WASM cross-compilation: use direct paths since find_library fails
-if(EMSCRIPTEN)
-    foreach(_path ${CMAKE_PREFIX_PATH})
-        if(EXISTS "${_path}/include/cairo/cairo.h")
-            set(CAIRO_INCLUDE_DIR "${_path}/include/cairo")
-        elseif(EXISTS "${_path}/include/cairo.h")
-            set(CAIRO_INCLUDE_DIR "${_path}/include")
-        endif()
-        if(EXISTS "${_path}/lib/libcairo.a")
-            set(CAIRO_LIBRARIES "${_path}/lib/libcairo.a")
-        endif()
-    endforeach()
-
-    if(CAIRO_INCLUDE_DIR AND CAIRO_LIBRARIES)
-        # Extract version from cairo-version.h
-        if(EXISTS "${CAIRO_INCLUDE_DIR}/cairo-version.h")
-            file(READ "${CAIRO_INCLUDE_DIR}/cairo-version.h" _CAIRO_VERSION_H_CONTENTS)
-            string(REGEX REPLACE "^(.*\n)?#define[ \t]+CAIRO_VERSION_MAJOR[ \t]+([0-9]+).*"
-                   "\\2" CAIRO_VERSION_MAJOR ${_CAIRO_VERSION_H_CONTENTS})
-            string(REGEX REPLACE "^(.*\n)?#define[ \t]+CAIRO_VERSION_MINOR[ \t]+([0-9]+).*"
-                   "\\2" CAIRO_VERSION_MINOR ${_CAIRO_VERSION_H_CONTENTS})
-            string(REGEX REPLACE "^(.*\n)?#define[ \t]+CAIRO_VERSION_MICRO[ \t]+([0-9]+).*"
-                   "\\2" CAIRO_VERSION_MICRO ${_CAIRO_VERSION_H_CONTENTS})
-            set(CAIRO_VERSION ${CAIRO_VERSION_MAJOR}.${CAIRO_VERSION_MINOR}.${CAIRO_VERSION_MICRO})
-        endif()
-
-        include(FindPackageHandleStandardArgs)
-        find_package_handle_standard_args(Cairo
-            REQUIRED_VARS CAIRO_LIBRARIES CAIRO_INCLUDE_DIR
-            VERSION_VAR CAIRO_VERSION)
-        message(STATUS "Found Cairo for WASM: ${CAIRO_LIBRARIES}")
-        return()
-    endif()
-endif()
-
 find_package(PkgConfig)
 
 if(PKG_CONFIG_FOUND)

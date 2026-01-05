@@ -24,19 +24,6 @@
 #   GLEW_LIBRARIES - libraries to link against GLEW
 #   GLEW_FOUND - true if GLEW has been found and can be used
 
-# WASM/WebGL: GLEW is not needed - Emscripten handles GL extensions
-if(EMSCRIPTEN)
-    set(GLEW_FOUND TRUE)
-    set(GLEW_INCLUDE_DIRS "")
-    set(GLEW_LIBRARIES "")
-    # Create empty GLEW::GLEW target
-    if(NOT TARGET GLEW::GLEW)
-        add_library(GLEW::GLEW INTERFACE IMPORTED)
-    endif()
-    message(STATUS "GLEW not needed for WASM (WebGL handles extensions)")
-    return()
-endif()
-
 find_path(GLEW_INCLUDE_DIR GL/glew.h)
 
 if(NOT GLEW_LIBRARY)
