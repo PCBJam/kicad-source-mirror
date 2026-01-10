@@ -38,7 +38,11 @@
 #include <base_screen.h>
 #include <gal/cursors.h>
 #include <gal/graphics_abstraction_layer.h>
+#ifdef __EMSCRIPTEN__
+#include <gal/webgl/webgl_gal.h>
+#else
 #include <gal/opengl/opengl_gal.h>
+#endif
 #include <gal/opengl/gpu_oom_error.h>
 #include <gal/cairo/cairo_gal.h>
 #include <math/vector2wx.h>
@@ -778,6 +782,11 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
         {
         case GAL_TYPE_OPENGL:
         {
+#ifdef __EMSCRIPTEN__
+            // Use WebGL GAL for Emscripten builds (pure WebGL 2.0, no LEGACY_GL_EMULATION)
+            new_gal = new KIGFX::WEBGL_GAL( GetVcSettings(), m_options, this, this, this );
+#else
+            // Use OpenGL GAL for native builds
             wxString errormsg = KIGFX::OPENGL_GAL::CheckFeatures( m_options );
 
             if( errormsg.empty() )
@@ -801,6 +810,7 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
                     DisplayInfoMessage( m_parent, _( "Could not use OpenGL" ), errormsg );
                 }
             }
+#endif
 
             break;
         }
