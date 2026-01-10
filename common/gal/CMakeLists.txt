@@ -34,32 +34,57 @@ set( GAL_SRCS
     cairo/cairo_print.cpp
     )
 
-# OpenGL GAL - enabled for all platforms including WASM
-list( APPEND GAL_SRCS
-    hidpi_gl_canvas.cpp
-    hidpi_gl_3D_canvas.cpp
+# OpenGL GAL - enabled for native platforms
+if( NOT EMSCRIPTEN )
+    list( APPEND GAL_SRCS
+        hidpi_gl_canvas.cpp
+        hidpi_gl_3D_canvas.cpp
 
-    # OpenGL GAL
-    opengl/opengl_gal.cpp
-    opengl/gl_resources.cpp
-    opengl/shader.cpp
-    opengl/vertex_item.cpp
-    opengl/vertex_container.cpp
-    opengl/cached_container.cpp
-    opengl/cached_container_gpu.cpp
-    opengl/cached_container_ram.cpp
-    opengl/noncached_container.cpp
-    opengl/vertex_manager.cpp
-    opengl/gpu_manager.cpp
-    opengl/antialiasing.cpp
-    opengl/opengl_compositor.cpp
-    opengl/utils.cpp
-)
+        # OpenGL GAL
+        opengl/opengl_gal.cpp
+        opengl/gl_resources.cpp
+        opengl/shader.cpp
+        opengl/vertex_item.cpp
+        opengl/vertex_container.cpp
+        opengl/cached_container.cpp
+        opengl/cached_container_gpu.cpp
+        opengl/cached_container_ram.cpp
+        opengl/noncached_container.cpp
+        opengl/vertex_manager.cpp
+        opengl/gpu_manager.cpp
+        opengl/antialiasing.cpp
+        opengl/opengl_compositor.cpp
+        opengl/utils.cpp
+    )
+endif()
 
-# For WASM: use earcut-based GLU tesselator implementation
+# WebGL GAL - Emscripten only (pure WebGL 2.0, no LEGACY_GL_EMULATION)
 if( EMSCRIPTEN )
     list( APPEND GAL_SRCS
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs/glu_wasm_impl.cpp
+        hidpi_gl_canvas.cpp
+        hidpi_gl_3D_canvas.cpp
+
+        # WebGL GAL (ported from OPENGL_GAL)
+        webgl/webgl_gal.cpp
+        webgl/webgl_compositor.cpp
+        webgl/shader.cpp
+        webgl/vertex_manager.cpp
+        webgl/vertex_container.cpp
+        webgl/vertex_item.cpp
+        webgl/gpu_manager.cpp
+        webgl/cached_container.cpp
+        webgl/cached_container_gpu.cpp
+        webgl/cached_container_ram.cpp
+        webgl/noncached_container.cpp
+        webgl/webgl_antialiasing.cpp
+        webgl/fullscreen_quad.cpp
+        webgl/gl_context_mgr.cpp
+        webgl/gl_resources.cpp
+        webgl/utils.cpp
+        # Note: bitmap_font_desc.c and bitmap_font_img.c are #included from gl_resources.cpp
+
+        # GLU tesselator (earcut-based, works for both native and WASM)
+        ${CMAKE_SOURCE_DIR}/libs/kimath/glu_tess/glu_tess_impl.cpp
     )
 endif()
 
@@ -76,9 +101,13 @@ if( KICAD_USE_PCH )
              )
 endif()
 
-# For WASM: include path for GL/glu.h stub headers
+# For WASM: include paths for WebGL and GLU stub headers
 if( EMSCRIPTEN )
-    target_include_directories( gal PRIVATE ${CMAKE_SOURCE_DIR}/../wasm/stubs )
+    target_include_directories( gal PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/webgl
+        ${CMAKE_SOURCE_DIR}/libs/kimath/glu_tess
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs
+    )
 endif()
 
 if( WIN32 )
