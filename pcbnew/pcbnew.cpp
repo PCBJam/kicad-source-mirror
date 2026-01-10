@@ -63,9 +63,11 @@
 #include <panel_pcbnew_color_settings.h>
 #include <panel_pcbnew_action_plugins.h>
 #include <panel_pcbnew_display_origin.h>
+#ifndef __EMSCRIPTEN__
 #include <panel_3D_display_options.h>
 #include <panel_3D_opengl_options.h>
 #include <panel_3D_raytracing_options.h>
+#endif
 #include <project_pcb.h>
 #ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
@@ -475,6 +477,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         case PANEL_PCB_ACTION_PLUGINS:
             return new PANEL_PCBNEW_ACTION_PLUGINS( aParent );
 
+#ifndef __EMSCRIPTEN__
         case PANEL_3DV_DISPLAY_OPTIONS:
             return new PANEL_3D_DISPLAY_OPTIONS( aParent );
 
@@ -500,6 +503,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
 
             return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_PCB_DISPLAY3D, actions, controls );
         }
+#endif  // __EMSCRIPTEN__
 
         default:
             return nullptr;
