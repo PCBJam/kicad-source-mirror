@@ -171,6 +171,10 @@ protected:
 
     ///< Size of the current VRANGE
     unsigned int m_curVrangeSize;
+
+    ///< Element buffer object for glDrawElements
+    ///< WebGL 2.0 does not support client-side index arrays
+    GLuint m_ebo;
 };
 
 
@@ -178,6 +182,7 @@ class GPU_NONCACHED_MANAGER : public GPU_MANAGER
 {
 public:
     GPU_NONCACHED_MANAGER( VERTEX_CONTAINER* aContainer );
+    ~GPU_NONCACHED_MANAGER();
 
     ///< @copydoc GPU_MANAGER::BeginDrawing()
     virtual void BeginDrawing() override;
@@ -187,6 +192,11 @@ public:
 
     ///< @copydoc GPU_MANAGER::EndDrawing()
     virtual void EndDrawing() override;
+
+private:
+    ///< VBO for uploading vertex data each frame
+    ///< WebGL 2.0 does not support client-side vertex arrays
+    GLuint m_vbo;
 };
 
 } // namespace KIGFX

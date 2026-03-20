@@ -66,8 +66,8 @@ void WEBGL_COMPOSITOR::initBlitShader()
         "#version 300 es\n"
         "precision highp float;\n"
         "\n"
-        "in vec4 a_vertex;\n"
-        "in vec4 a_texCoord0;\n"
+        "layout(location = 0) in vec4 a_vertex;\n"
+        "layout(location = 1) in vec4 a_texCoord0;\n"
         "\n"
         "out vec2 v_texCoord;\n"
         "\n"
@@ -84,7 +84,7 @@ void WEBGL_COMPOSITOR::initBlitShader()
         "uniform sampler2D u_texture;\n"
         "\n"
         "in vec2 v_texCoord;\n"
-        "out vec4 fragColor;\n"
+        "layout(location = 0) out vec4 fragColor;\n"
         "\n"
         "void main()\n"
         "{\n"
@@ -103,6 +103,53 @@ void WEBGL_COMPOSITOR::initBlitShader()
     m_blitShader->Use();
     m_blitShader->SetParameter( m_blitTexUniform, 0 );  // Texture unit 0
     m_blitShader->Deactivate();
+}
+
+
+bool WEBGL_COMPOSITOR::ValidateShaders()
+{
+    if( !m_initialized )
+        return true;  // Not initialized yet, nothing to validate
+
+    if( !m_blitShader || !m_blitShader->IsValid() )
+    {
+        fprintf( stderr, "[COMPOSITOR] Blit shader invalid (stale GL context?), "
+                 "hasShader=%d linked=%d — forcing full re-initialization\n",
+                 m_blitShader ? 1 : 0,
+                 m_blitShader ? (int) m_blitShader->IsLinked() : -1 );
+
+        // Don't call clean() — GL objects may already be invalid.
+        // Just reset our tracking state so Initialize() recreates everything.
+        m_buffers.clear();
+        m_mainFbo = 0;
+        m_depthBuffer = 0;
+        m_curFbo = DIRECT_RENDERING;
+        m_blitShader.reset();
+        m_blitTexUniform = -1;
+        m_initialized = false;
+
+        // Also reset the fullscreen quad — its VBOs/VAOs may be stale too
+        GetFullscreenQuad().Cleanup();
+
+        return false;
+    }
+
+    return true;
+}
+
+
+void WEBGL_COMPOSITOR::BlitFullscreenQuad()
+{
+    if( m_blitShader && m_blitShader->IsLinked() )
+    {
+        m_blitShader->Use();
+        GetFullscreenQuad().Draw();
+        m_blitShader->Deactivate();
+    }
+    else
+    {
+        fprintf( stderr, "[COMPOSITOR] BlitFullscreenQuad: blit shader not ready, skipping\n" );
+    }
 }
 
 
@@ -239,8 +286,12 @@ unsigned int WEBGL_COMPOSITOR::CreateBuffer( VECTOR2I aDimensions )
         throw std::runtime_error( "Requested texture size is not supported. Could not create a buffer." );
     }
 
-    // GL_COLOR_ATTACHMENTn are consecutive integers
-    GLuint attachmentPoint = GL_COLOR_ATTACHMENT0 + usedBuffers();
+    // WebGL 2.0: always use GL_COLOR_ATTACHMENT0 for all buffers.
+    // We swap which texture is attached to ATTACHMENT0 in SetBuffer().
+    // This avoids two WebGL 2.0 issues:
+    // 1. glDrawBuffers can't redirect fragment output 0 to a non-zero attachment index
+    // 2. Textures attached to any FBO attachment point can't be sampled (feedback loop)
+    GLuint attachmentPoint = GL_COLOR_ATTACHMENT0;
     GLuint textureTarget;
 
     // Generate the texture for the pixel storage
@@ -257,7 +308,7 @@ unsigned int WEBGL_COMPOSITOR::CreateBuffer( VECTOR2I aDimensions )
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
 
-    // Bind the texture to the specific attachment point, clear and rebind the screen
+    // Attach this texture to GL_COLOR_ATTACHMENT0 for creation/clear
     bindFb( m_mainFbo );
     glFramebufferTexture2DEXT( GL_FRAMEBUFFER_EXT, attachmentPoint, GL_TEXTURE_2D, textureTarget, 0 );
 
@@ -330,19 +381,24 @@ void WEBGL_COMPOSITOR::SetBuffer( unsigned int aBufferHandle )
     {
         m_curBuffer = aBufferHandle - 1;
 
-        // WebGL 2.0/OpenGL ES 3.0: use glDrawBuffers instead of glDrawBuffer
-        // In WebGL 2.0, the draw buffer array index must match the attachment index.
-        // So for GL_COLOR_ATTACHMENTn, we need array[n] = GL_COLOR_ATTACHMENTn
-        GLenum attachmentPoint = m_buffers[m_curBuffer].attachmentPoint;
-        unsigned int attachmentIndex = attachmentPoint - GL_COLOR_ATTACHMENT0;
+        // WebGL 2.0: re-attach the target texture to GL_COLOR_ATTACHMENT0.
+        // This avoids two WebGL 2.0 limitations:
+        // 1. glDrawBuffers[i] must be GL_NONE or GL_COLOR_ATTACHMENTi, so fragment
+        //    output 0 can't be redirected to a non-zero attachment index
+        // 2. Textures attached to ANY FBO attachment point can't be sampled
+        //    simultaneously (illegal feedback loop), even if glDrawBuffers routes
+        //    writes elsewhere — so all buffers must share ATTACHMENT0
 
-        // Create draw buffers array with GL_NONE for all entries except the target
-        GLenum drawBuffers[16];
-        for( unsigned int i = 0; i <= attachmentIndex && i < 16; i++ )
-            drawBuffers[i] = GL_NONE;
-        drawBuffers[attachmentIndex] = attachmentPoint;
+        // Clear stale GL errors from prior draw calls so they don't get attributed
+        // to this texture re-attachment (bindFb only clears when the FBO changes).
+        while( glGetError() != GL_NO_ERROR ) {}
 
-        glDrawBuffers( attachmentIndex + 1, drawBuffers );
+        glFramebufferTexture2DEXT( GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, m_buffers[m_curBuffer].textureTarget, 0 );
+        checkGlError( "reattaching buffer texture", __FILE__, __LINE__ );
+
+        GLenum drawBuffers[] = { GL_COLOR_ATTACHMENT0 };
+        glDrawBuffers( 1, drawBuffers );
         checkGlError( "setting draw buffer", __FILE__, __LINE__ );
 
         glViewport( 0, 0, m_buffers[m_curBuffer].dimensions.x, m_buffers[m_curBuffer].dimensions.y );
@@ -395,15 +451,21 @@ void WEBGL_COMPOSITOR::DrawBuffer( unsigned int aSourceHandle, unsigned int aDes
 
     // Depth test has to be disabled to make transparency working
     glDisable( GL_DEPTH_TEST );
-    // Use standard alpha blending for straight (non-premultiplied) alpha
-    // Note: GL_ONE would be for premultiplied alpha, but our FBOs use straight alpha
-    glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+    // Use premultiplied alpha blending, matching the OpenGL compositor path.
+    // FBOs are cleared with alpha=0, so GL_SRC_ALPHA would zero out FBO content.
+    glBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
 
     // Bind the source texture
     glActiveTexture( GL_TEXTURE0 );
     glBindTexture( GL_TEXTURE_2D, m_buffers[aSourceHandle - 1].textureTarget );
 
     // Use blit shader and draw fullscreen quad
+    if( !m_blitShader || !m_blitShader->IsLinked() )
+    {
+        fprintf( stderr, "[COMPOSITOR] DrawBuffer: blit shader not ready, skipping\n" );
+        return;
+    }
+
     m_blitShader->Use();
     GetFullscreenQuad().Draw();
     m_blitShader->Deactivate();
@@ -423,6 +485,11 @@ void WEBGL_COMPOSITOR::bindFb( unsigned int aFb )
 
     if( m_curFbo != aFb )
     {
+        // In WebGL 2.0, GL errors from draw calls can accumulate in the error queue
+        // (e.g. from rendering to buffers with mismatched draw buffer routing).
+        // Clear stale errors so they don't get falsely attributed to this FBO switch.
+        while( glGetError() != GL_NO_ERROR ) {}
+
         glBindFramebufferEXT( GL_FRAMEBUFFER, aFb );
         checkGlError( "switching framebuffer", __FILE__, __LINE__ );
         m_curFbo = aFb;

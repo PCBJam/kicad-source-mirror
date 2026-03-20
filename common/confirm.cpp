@@ -241,6 +241,8 @@ void DisplayErrorMessage( wxWindow* aParent, const wxString& aText, const wxStri
     if( !aExtraInfo.IsEmpty() )
         dlg->SetExtendedMessage( aExtraInfo );
 
+    wxFprintf( stderr, "DisplayErrorMessage: %s | Details: %s\n", aText, aExtraInfo );
+
     dlg->ShowModal();
     dlg->Destroy();
 }
@@ -269,6 +271,8 @@ void DisplayInfoMessage( wxWindow* aParent, const wxString& aMessage, const wxSt
 
     if( !aExtraInfo.IsEmpty() )
         dlg->SetExtendedMessage( aExtraInfo );
+
+    wxFprintf( stderr, "DisplayInfoMessage: %s | Details: %s\n", aMessage, aExtraInfo );
 
     dlg->ShowModal();
     dlg->Destroy();

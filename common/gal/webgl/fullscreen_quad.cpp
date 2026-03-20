@@ -24,6 +24,8 @@
 #include <gal/webgl/fullscreen_quad.h>
 #include <gal/webgl/utils.h>
 
+#include <cstdio>
+
 using namespace KIGFX;
 
 FULLSCREEN_QUAD::FULLSCREEN_QUAD() :
@@ -121,6 +123,15 @@ void FULLSCREEN_QUAD::Draw()
 {
     if( !m_initialized )
         Initialize();
+
+    // Temporary debug: detect draws with no shader program bound ("not linked" warnings)
+    GLint currentProgram = 0;
+    glGetIntegerv( GL_CURRENT_PROGRAM, &currentProgram );
+    if( currentProgram == 0 )
+    {
+        fprintf( stderr, "FULLSCREEN_QUAD::Draw() called with no shader program bound!\n" );
+        return;  // Skip the draw — it would produce a "not linked" WebGL warning
+    }
 
     glBindVertexArray( m_quadVAO );
     glDrawArrays( GL_TRIANGLES, 0, 6 );

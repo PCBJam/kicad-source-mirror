@@ -109,7 +109,6 @@ bool SHADER::Link()
     glGetProgramiv( programNumber, GL_LINK_STATUS, &tmp );
     isShaderLinked = !!tmp;
 
-#ifdef DEBUG
     if( !isShaderLinked )
     {
         int maxLength;
@@ -118,10 +117,9 @@ bool SHADER::Link()
         char* linkInfoLog = new char[maxLength];
         glGetProgramInfoLog( programNumber, maxLength, &maxLength, linkInfoLog );
         std::cerr << "Shader linking error:" << std::endl;
-        std::cerr << linkInfoLog;
+        std::cerr << linkInfoLog << std::endl;
         delete[] linkInfoLog;
     }
-#endif /* DEBUG */
 
     return isShaderLinked;
 }

@@ -108,13 +108,19 @@ GPU_CACHED_MANAGER::GPU_CACHED_MANAGER( VERTEX_CONTAINER* aContainer ) :
         m_totalNormal( 0 ),
         m_indexBufSize( 0 ),
         m_indexBufMaxSize( 0 ),
-        m_curVrangeSize( 0 )
+        m_curVrangeSize( 0 ),
+        m_ebo( 0 )
 {
 }
 
 
 GPU_CACHED_MANAGER::~GPU_CACHED_MANAGER()
 {
+    if( m_ebo )
+    {
+        glDeleteBuffers( 1, &m_ebo );
+        m_ebo = 0;
+    }
 }
 
 
@@ -211,6 +217,11 @@ void GPU_CACHED_MANAGER::EndDrawing()
 
     int drawCalls = 0;
 
+    // Lazily create element buffer object for indexed drawing
+    // WebGL 2.0 does not support client-side index arrays in glDrawElements
+    if( m_ebo == 0 )
+        glGenBuffers( 1, &m_ebo );
+
     while( n < n_ranges )
     {
         VRANGE* cur = &m_vranges[n];
@@ -219,7 +230,11 @@ void GPU_CACHED_MANAGER::EndDrawing()
         {
             if( icnt > 0 )
             {
-                glDrawElements( GL_TRIANGLES, icnt, GL_UNSIGNED_INT, m_indices.get() );
+                glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, m_ebo );
+                glBufferData( GL_ELEMENT_ARRAY_BUFFER, icnt * sizeof( GLuint ),
+                              m_indices.get(), GL_STREAM_DRAW );
+                glDrawElements( GL_TRIANGLES, icnt, GL_UNSIGNED_INT, (GLvoid*) 0 );
+                glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
                 drawCalls++;
             }
 
@@ -243,7 +258,11 @@ void GPU_CACHED_MANAGER::EndDrawing()
 
     if( icnt > 0 )
     {
-        glDrawElements( GL_TRIANGLES, icnt, GL_UNSIGNED_INT, m_indices.get() );
+        glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, m_ebo );
+        glBufferData( GL_ELEMENT_ARRAY_BUFFER, icnt * sizeof( GLuint ),
+                      m_indices.get(), GL_STREAM_DRAW );
+        glDrawElements( GL_TRIANGLES, icnt, GL_UNSIGNED_INT, (GLvoid*) 0 );
+        glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
         drawCalls++;
     }
 
@@ -286,8 +305,19 @@ void GPU_CACHED_MANAGER::resizeIndices( unsigned int aNewSize )
 
 // Noncached manager
 GPU_NONCACHED_MANAGER::GPU_NONCACHED_MANAGER( VERTEX_CONTAINER* aContainer ) :
-        GPU_MANAGER( aContainer )
+        GPU_MANAGER( aContainer ),
+        m_vbo( 0 )
 {
+}
+
+
+GPU_NONCACHED_MANAGER::~GPU_NONCACHED_MANAGER()
+{
+    if( m_vbo )
+    {
+        glDeleteBuffers( 1, &m_vbo );
+        m_vbo = 0;
+    }
 }
 
 
@@ -312,9 +342,7 @@ void GPU_NONCACHED_MANAGER::EndDrawing()
     if( m_container->GetSize() == 0 )
         return;
 
-    VERTEX*  vertices = m_container->GetAllVertices();
-    GLfloat* coordinates = (GLfloat*) ( vertices );
-    GLubyte* colors = (GLubyte*) ( vertices ) + COLOR_OFFSET;
+    VERTEX* vertices = m_container->GetAllVertices();
 
     if( m_enableDepthTest )
         glEnable( GL_DEPTH_TEST );
@@ -324,25 +352,31 @@ void GPU_NONCACHED_MANAGER::EndDrawing()
     // Bind VAO first (required for WebGL 2.0 / OpenGL ES 3.0)
     glBindVertexArray( m_vao );
 
-    // Modern vertex attributes (replacing legacy glEnableClientState/glVertexPointer/glColorPointer)
-    // Vertex position (a_vertex)
+    // Upload vertex data to VBO each frame
+    // WebGL 2.0 does not support client-side vertex arrays — a VBO must be bound
+    if( m_vbo == 0 )
+        glGenBuffers( 1, &m_vbo );
+
+    glBindBuffer( GL_ARRAY_BUFFER, m_vbo );
+    glBufferData( GL_ARRAY_BUFFER, m_container->GetSize() * VERTEX_SIZE,
+                  vertices, GL_STREAM_DRAW );
+
+    // Vertex position (a_vertex) — byte offsets into VBO, not raw pointers
     glEnableVertexAttribArray( m_vertexAttrib );
     glVertexAttribPointer( m_vertexAttrib, COORD_STRIDE, GL_FLOAT, GL_FALSE, VERTEX_SIZE,
-                           coordinates );
+                           (GLvoid*) COORD_OFFSET );
 
     // Vertex color (a_color) - note: normalize=GL_TRUE for unsigned bytes to [0,1]
     glEnableVertexAttribArray( m_colorAttrib );
     glVertexAttribPointer( m_colorAttrib, COLOR_STRIDE, GL_UNSIGNED_BYTE, GL_TRUE, VERTEX_SIZE,
-                           colors );
+                           (GLvoid*) COLOR_OFFSET );
 
     if( m_shader != nullptr ) // Use shader if applicable
     {
-        GLfloat* shaders = (GLfloat*) ( vertices ) + SHADER_OFFSET / sizeof( GLfloat );
-
         m_shader->Use();
         glEnableVertexAttribArray( m_shaderAttrib );
         glVertexAttribPointer( m_shaderAttrib, SHADER_STRIDE, GL_FLOAT, GL_FALSE, VERTEX_SIZE,
-                               shaders );
+                               (GLvoid*) SHADER_OFFSET );
     }
 
     glDrawArrays( GL_TRIANGLES, 0, m_container->GetSize() );
@@ -360,6 +394,8 @@ void GPU_NONCACHED_MANAGER::EndDrawing()
         glDisableVertexAttribArray( m_shaderAttrib );
         m_shader->Deactivate();
     }
+
+    glBindBuffer( GL_ARRAY_BUFFER, 0 );
 
     // Unbind VAO
     glBindVertexArray( 0 );

@@ -99,6 +99,20 @@ public:
     int GetAntialiasSupersamplingFactor() const;
     VECTOR2D GetAntialiasRenderingOffset() const;
 
+    /**
+     * Check if compositor shaders are still valid in the current GL context.
+     * After Asyncify modal transitions, shader programs can become stale.
+     * @return true if shaders are valid, false if re-initialization is needed.
+     */
+    bool ValidateShaders();
+
+    /**
+     * Draw a fullscreen quad with the blit shader bound.
+     * Use this for texture-to-screen blitting that previously relied on
+     * the fixed-function pipeline (e.g. supersampling downsample).
+     */
+    void BlitFullscreenQuad();
+
 protected:
     /// Binds a specific Framebuffer Object.
     void bindFb( unsigned int aFb );
