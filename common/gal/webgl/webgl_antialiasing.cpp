@@ -96,15 +96,6 @@ unsigned int ANTIALIASING_NONE::CreateBuffer()
 }
 
 
-namespace
-{
-void draw_fullscreen_primitive()
-{
-    // Use VBO-based fullscreen quad (replaces legacy immediate mode)
-    KIGFX::GetFullscreenQuad().Draw();
-}
-
-} // namespace
 
 // =========================
 // ANTIALIASING_SUPERSAMPLING
@@ -163,7 +154,8 @@ void ANTIALIASING_SUPERSAMPLING::Present()
 
     glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE );
 
-    draw_fullscreen_primitive();
+    // WebGL 2.0: must use blit shader — no fixed-function pipeline available
+    compositor->BlitFullscreenQuad();
 
     glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
 }
@@ -266,15 +258,15 @@ precision highp int;
 #define SMAA_INCLUDE_VS 1
 #define SMAA_INCLUDE_PS 0
 uniform vec4 SMAA_RT_METRICS;
-in vec4 a_vertex;
-in vec4 a_texCoord0;
+layout(location = 0) in vec4 a_vertex;
+layout(location = 1) in vec4 a_texCoord0;
 )SHADER" );
 
     std::string frag_preamble( R"SHADER(
 #version 300 es
 precision highp float;
 precision highp int;
-out vec4 fragColor;
+layout(location = 0) out vec4 fragColor;
 #define SMAA_GLSL_3
 #define SMAA_INCLUDE_VS 0
 #define SMAA_INCLUDE_PS 1

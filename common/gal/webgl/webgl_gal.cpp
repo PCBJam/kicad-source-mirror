@@ -660,6 +660,14 @@ void WEBGL_GAL::BeginDrawing()
                         static_cast<float>( -m_depthRange.x ),
                         static_cast<float>( -m_depthRange.y ) );
 
+    // Validate compositor shaders are still valid in the GL context.
+    // After Asyncify modal transitions, shader programs can become stale.
+    if( m_isFramebufferInitialized && !m_compositor->ValidateShaders() )
+    {
+        fprintf( stderr, "[GAL] BeginDrawing: compositor shaders stale, forcing re-init\n" );
+        m_isFramebufferInitialized = false;
+    }
+
     if( !m_isFramebufferInitialized )
     {
         // Prepare rendering target buffers
@@ -2057,11 +2065,12 @@ void WEBGL_GAL::Flush()
 
 void WEBGL_GAL::ClearScreen()
 {
-    // Clear screen with the configured clear color
+    // Clear screen to opaque black before compositing.
+    // The FBO blit (GL_ONE, GL_ONE_MINUS_SRC_ALPHA) adds FBO content directly,
+    // so screen must start at black to avoid doubling the background color.
+    // This matches the native OpenGL path (opengl_gal.cpp:1962).
     m_compositor->SetBuffer( WEBGL_COMPOSITOR::DIRECT_RENDERING );
-
-    // Use m_clearColor for background (set via SetClearColor())
-    glClearColor( m_clearColor.r, m_clearColor.g, m_clearColor.b, m_clearColor.a );
+    glClearColor( 0, 0, 0, 1 );
     glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT );
 }
 

@@ -43,14 +43,9 @@ VERTEX_CONTAINER* VERTEX_CONTAINER::MakeContainer( bool aCached )
 {
     if( aCached )
     {
-        const char* vendor = (const char*) glGetString( GL_VENDOR );
-
-        // Open source drivers do not cope well with GPU memory mapping,
-        // so the vertex data has to be kept in RAM
-        if( strstr( vendor, "X.Org" ) || strstr( vendor, "nouveau" ) )
-            return new CACHED_CONTAINER_RAM;
-        else
-            return new CACHED_CONTAINER_GPU;
+        // WebGL 2.0 does not support glMapBuffer (only available via FULL_ES3 emulation).
+        // Always use RAM container which uploads via glBufferData - native WebGL 2.0.
+        return new CACHED_CONTAINER_RAM;
     }
 
     return new NONCACHED_CONTAINER;
