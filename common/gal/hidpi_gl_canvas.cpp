@@ -65,5 +65,5 @@ wxPoint HIDPI_GL_CANVAS::GetNativePosition( const wxPoint& aPoint ) const
 
 double HIDPI_GL_CANVAS::GetScaleFactor() const
 {
-    return GetContentScaleFactor();
+    return GetDPIScaleFactor();
 }

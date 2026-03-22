@@ -821,7 +821,10 @@ void APPEARANCE_CONTROLS::createControls()
 wxSize APPEARANCE_CONTROLS::GetBestSize() const
 {
     DPI_SCALING_COMMON dpi( nullptr, m_frame );
-    wxSize      size( 220 * dpi.GetScaleFactor(), 480 * dpi.GetScaleFactor() );
+    // This pane width is part of KiCad's logical dock layout, so it should
+    // follow the content scale rather than the pixel scale used for bitmap
+    // asset selection on HiDPI displays.
+    wxSize      size( 220 * dpi.GetContentScaleFactor(), 480 * dpi.GetContentScaleFactor() );
     return size;
 }
 
