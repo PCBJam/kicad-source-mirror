@@ -17,28 +17,320 @@
 #include <cstdlib>
 #include <libcontext.h>
 
-// WASM/Emscripten: Stub implementations for context switching
-// KiCad uses libcontext for coroutines in the router, which we'll need to
-// handle differently in WASM (either via Asyncify or by disabling coroutines)
+// WASM/Emscripten: implement libcontext using Emscripten fibers so KiCad's
+// existing coroutine machinery can switch stacks on the web build too.
 #if defined(LIBCONTEXT_PLATFORM_wasm32)
+
+#include <emscripten/fiber.h>
+
+#include <cstring>
+#include <new>
 
 namespace libcontext {
 
-// Stub: WASM doesn't support the low-level stack manipulation required
-// Return nullptr to indicate failure - callers should handle gracefully
+namespace
+{
+
+constexpr size_t ASYNCIFY_STACK_SIZE = 64 * 1024;
+constexpr int MAX_WASM_FCONTEXT_LOGS = 220;
+
+struct invocation_args_probe
+{
+    int   type;
+    void* destination;
+    void* context;
+};
+
+
+const char* invocation_type_name( int aType )
+{
+    switch( aType )
+    {
+    case 0:
+        return "FROM_ROOT";
+
+    case 1:
+        return "FROM_ROUTINE";
+
+    case 2:
+        return "CONTINUE_AFTER_ROOT";
+
+    default:
+        return "UNKNOWN";
+    }
+}
+
+
+const char* describe_transfer_value( intptr_t aValue, char* aBuffer, size_t aBufferSize )
+{
+    if( !aValue || aValue < 0x10000 )
+    {
+        std::snprintf( aBuffer, aBufferSize, "raw=%p", reinterpret_cast<void*>( aValue ) );
+        return aBuffer;
+    }
+
+    auto* probe = reinterpret_cast<const invocation_args_probe*>( aValue );
+
+    std::snprintf( aBuffer, aBufferSize,
+                   "raw=%p type=%s(%d) dest=%p ctx=%p",
+                   reinterpret_cast<void*>( aValue ),
+                   invocation_type_name( probe->type ),
+                   probe->type,
+                   probe->destination,
+                   probe->context );
+    return aBuffer;
+}
+
+
+struct wasm_fcontext
+{
+    emscripten_fiber_t fiber {};
+    void (* entry )( intptr_t ) = nullptr;
+    wasm_fcontext* return_to = nullptr;
+    intptr_t transfer_value = 0;
+    bool initialized = false;
+    bool running = false;
+    bool finished = false;
+    bool releasable = true;
+    int refcount = 0;
+    uint32_t resume_epoch = 0;
+    uint32_t id = 0;
+    alignas( 16 ) char asyncify_stack[ASYNCIFY_STACK_SIZE] {};
+};
+
+
+wasm_fcontext* g_current_context = nullptr;
+wasm_fcontext g_main_context;
+bool g_main_initialized = false;
+int g_log_count = 0;
+uint32_t g_next_context_id = 1;
+uint32_t g_main_refresh_count = 0;
+
+
+uint32_t context_id( const wasm_fcontext* aCtx )
+{
+    return aCtx ? aCtx->id : 0;
+}
+
+
+void log_wasm_fcontext( const char* aLabel, wasm_fcontext* aCtx, wasm_fcontext* aOther,
+                        intptr_t aValue, fcontext_t* aSlot = nullptr,
+                        wasm_fcontext* aPrevious = nullptr )
+{
+    if( g_log_count >= MAX_WASM_FCONTEXT_LOGS )
+        return;
+
+    ++g_log_count;
+
+    char value_description[160];
+
+    std::fprintf( stderr,
+                  "[WASM_FCONTEXT] %s ctx=%p[#%u] other=%p[#%u] return_to=%p[#%u] slot=%p prev=%p[#%u] "
+                  "main_refresh=%u value=%s finished=%d running=%d epoch=%u\n",
+                  aLabel,
+                  static_cast<void*>( aCtx ),
+                  context_id( aCtx ),
+                  static_cast<void*>( aOther ),
+                  context_id( aOther ),
+                  aCtx ? static_cast<void*>( aCtx->return_to ) : nullptr,
+                  aCtx ? context_id( aCtx->return_to ) : 0,
+                  static_cast<void*>( aSlot ),
+                  static_cast<void*>( aPrevious ),
+                  context_id( aPrevious ),
+                  g_main_refresh_count,
+                  describe_transfer_value( aValue, value_description, sizeof( value_description ) ),
+                  aCtx ? aCtx->finished : 0,
+                  aCtx ? aCtx->running : 0,
+                  aCtx ? aCtx->resume_epoch : 0 );
+}
+
+
+void retain_context( wasm_fcontext* aCtx )
+{
+    if( aCtx && aCtx->releasable )
+        ++aCtx->refcount;
+}
+
+
+void release_context( wasm_fcontext* aCtx )
+{
+    if( !aCtx || !aCtx->releasable )
+        return;
+
+    if( aCtx->refcount <= 0 )
+        return;
+
+    --aCtx->refcount;
+
+    if( aCtx->refcount == 0 )
+    {
+        delete aCtx;
+    }
+}
+
+
+void assign_saved_context( fcontext_t* aSlot, wasm_fcontext* aCtx )
+{
+    if( !aSlot )
+        return;
+
+    auto* previous = static_cast<wasm_fcontext*>( *aSlot );
+    log_wasm_fcontext( "save-slot", aCtx, g_current_context, 0, aSlot, previous );
+
+    if( previous == aCtx )
+    {
+        *aSlot = aCtx;
+        return;
+    }
+
+    release_context( previous );
+    *aSlot = aCtx;
+    retain_context( aCtx );
+}
+
+
+void ensure_main_context()
+{
+    if( !g_main_initialized )
+    {
+        std::memset( &g_main_context, 0, sizeof( g_main_context ) );
+        g_main_context.initialized = true;
+        g_main_context.releasable = false;
+        g_main_context.id = g_next_context_id++;
+        emscripten_fiber_init_from_current_context( &g_main_context.fiber,
+                                                    g_main_context.asyncify_stack,
+                                                    sizeof( g_main_context.asyncify_stack ) );
+        ++g_main_refresh_count;
+        g_main_initialized = true;
+        g_main_context.running = true;
+        g_current_context = &g_main_context;
+        log_wasm_fcontext( "main-refresh", &g_main_context, &g_main_context, 0 );
+        return;
+    }
+
+    if( !g_current_context )
+        g_current_context = &g_main_context;
+
+    g_main_context.running = true;
+}
+
+
+// QEMU-style trampoline: the entry function NEVER returns.
+// Per Emscripten fiber.h: "If entry_func returns, the entire program will end."
+// The while(true) loop ensures we stay inside the fiber's stack frame forever.
+// After the coroutine body finishes, we swap back to the caller using the
+// coroutine's own heap-allocated fiber (not a stack-local temporary).
+[[noreturn]] void wasm_fcontext_entry( void* aArg )
+{
+    auto* ctx = static_cast<wasm_fcontext*>( aArg );
+
+    while( true )
+    {
+        log_wasm_fcontext( "entry-call", ctx, ctx->return_to, ctx->transfer_value );
+        ctx->entry( ctx->transfer_value );
+
+        ctx->finished = true;
+        ctx->running = false;
+        log_wasm_fcontext( "entry-returned", ctx, ctx->return_to, 0 );
+
+        if( !ctx->return_to )
+        {
+            log_wasm_fcontext( "entry-orphaned", ctx, nullptr, 0 );
+            std::abort();
+        }
+
+        // Swap back to whoever started us, using OUR OWN fiber (heap-allocated)
+        wasm_fcontext* return_to = ctx->return_to;
+        return_to->transfer_value = 0;
+        g_current_context = return_to;
+        return_to->running = true;
+        log_wasm_fcontext( "trampoline-swap", ctx, return_to, 0 );
+        emscripten_fiber_swap( &ctx->fiber, &return_to->fiber );
+
+        // If someone swaps back to us, the while(true) loops.
+        // Reset state so re-entry is safe (though unlikely in normal operation).
+        log_wasm_fcontext( "trampoline-reenter", ctx, ctx->return_to, ctx->transfer_value );
+        ctx->finished = false;
+        ctx->running = true;
+    }
+}
+
+} // namespace
+
+
 fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
         void (* fn)( intptr_t ) )
 {
-    // Cannot create contexts in WASM without Emscripten fibers/Asyncify
-    return nullptr;
+    auto* ctx = new( std::nothrow ) wasm_fcontext();
+
+    if( !ctx )
+        return nullptr;
+
+    std::memset( ctx, 0, sizeof( *ctx ) );
+    ctx->entry = fn;
+    ctx->initialized = true;
+    ctx->refcount = 1;
+    ctx->id = g_next_context_id++;
+
+    void* stack_bottom = static_cast<char*>( sp ) - size;
+
+    emscripten_fiber_init( &ctx->fiber, wasm_fcontext_entry, ctx, stack_bottom, size,
+                           ctx->asyncify_stack, sizeof( ctx->asyncify_stack ) );
+    return ctx;
 }
 
-// Stub: Return 0 and don't actually switch contexts
+
 intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t nfc,
         intptr_t vp, bool preserve_fpu )
 {
-    // Cannot switch contexts in WASM
-    return 0;
+    (void) preserve_fpu;
+
+    ensure_main_context();
+
+    auto* old_ctx = g_current_context;
+    auto* new_ctx = static_cast<wasm_fcontext*>( nfc );
+
+    if( !old_ctx || !new_ctx || !new_ctx->initialized )
+        return 0;
+
+    log_wasm_fcontext( "jump-enter", new_ctx, old_ctx, vp, ofc,
+                       ofc ? static_cast<wasm_fcontext*>( *ofc ) : nullptr );
+    assign_saved_context( ofc, old_ctx );
+
+    if( new_ctx->entry && !new_ctx->return_to )
+        new_ctx->return_to = old_ctx;
+
+    const uint32_t expected_resume_epoch = old_ctx->resume_epoch;
+    ++new_ctx->resume_epoch;
+    new_ctx->transfer_value = vp;
+    old_ctx->running = false;
+    new_ctx->running = true;
+    g_current_context = new_ctx;
+
+    log_wasm_fcontext( "jump-swap", new_ctx, old_ctx, vp );
+    emscripten_fiber_swap( &old_ctx->fiber, &new_ctx->fiber );
+
+    if( old_ctx->resume_epoch == expected_resume_epoch )
+    {
+        // Ghost resume: nobody officially swapped back to us (epoch unchanged).
+        // Instead of killing all WASM execution, log and return 0 so the caller
+        // sees a null INVOCATION_ARGS and handles it gracefully.
+        log_wasm_fcontext( "jump-ghost", old_ctx, new_ctx, old_ctx->transfer_value );
+        g_current_context = old_ctx;
+        old_ctx->running = true;
+        return 0;
+    }
+
+    g_current_context = old_ctx;
+    old_ctx->running = true;
+    log_wasm_fcontext( "jump-resume", old_ctx, new_ctx, old_ctx->transfer_value );
+    return old_ctx->transfer_value;
+}
+
+
+void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
+{
+    release_context( static_cast<wasm_fcontext*>( ctx ) );
 }
 
 } // namespace libcontext
@@ -1604,10 +1896,12 @@ extern "C" {
 namespace libcontext
 {
 
+#if !defined(LIBCONTEXT_PLATFORM_wasm32)
 void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
 {
 	// do nothing...
 }
+#endif
 
 }; // namespace libcontext
 
