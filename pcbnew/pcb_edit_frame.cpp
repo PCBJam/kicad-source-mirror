@@ -34,6 +34,7 @@
 #include <wx/wupdlock.h>
 
 #include <advanced_config.h>
+#include <kicad_wasm_diag.h>
 #include <connectivity/connectivity_data.h>
 #include <kiface_base.h>
 #include <kiway.h>
@@ -282,13 +283,16 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     setupTools();
     setupUIConditions();
+    KI_DIAG_CTOR( "[DIAG_CTOR] 1 tools setup done\n" );
 
     m_toolbarSettings = GetToolbarSettings<PCB_EDIT_TOOLBAR_SETTINGS>( "pcbnew-toolbars" );
     configureToolbars();
     RecreateToolbars();
     PrepareLayerIndicator( true );
+    KI_DIAG_CTOR( "[DIAG_CTOR] 2 toolbars done\n" );
 
     ReCreateMenuBar();
+    KI_DIAG_CTOR( "[DIAG_CTOR] 3 menubar done\n" );
 
 #ifdef KICAD_IPC_API
     wxTheApp->Bind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
@@ -308,6 +312,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_searchPane = new PCB_SEARCH_PANE( this );
     m_netInspectorPanel = new PCB_NET_INSPECTOR_PANEL( this, this );
     m_designBlocksPane = new PCB_DESIGN_BLOCK_PANE( this, nullptr, m_designBlockHistoryList );
+    KI_DIAG_CTOR( "[DIAG_CTOR] 4 side panels built\n" );
 
     m_auimgr.SetManagedWindow( this );
 
@@ -416,6 +421,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                       .CloseButton( true ) );
 
     RestoreAuiLayout();
+    KI_DIAG_CTOR( "[DIAG_CTOR] 5 AUI layout restored\n" );
 
     m_auimgr.GetPane( "LayersManager" ).Show( m_ShowLayerManagerTools );
     m_auimgr.GetPane( "SelectionFilter" ).Show( m_ShowLayerManagerTools );
@@ -432,6 +438,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     // wx 3.3.3 turns a -1 min height into 1, and a legacy perspective restores one
     selectionFilterPane.min_size.y = m_selectionFilterPanel->GetBestSize().y;
     FinishAUIInitialization();
+    KI_DIAG_CTOR( "[DIAG_CTOR] 6 AUI finalized\n" );
 
     // FinishAUIInitialization only hides the primary "InfoBar" pane; the
     // stacked load-notice bar has to be hidden explicitly.
@@ -502,6 +509,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     }
 
     GetToolManager()->PostAction( ACTIONS::zoomFitScreen );
+    KI_DIAG_CTOR( "[DIAG_CTOR] 7 zoomFit posted\n" );
 
     // This is used temporarily to fix a client size issue on GTK that causes zoom to fit
     // to calculate the wrong zoom size.  See PCB_EDIT_FRAME::onSize().
@@ -523,6 +531,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
           } );
 
     resolveCanvasType();
+    KI_DIAG_CTOR( "[DIAG_CTOR] 8 canvas type resolved=%d\n", (int) m_canvasType );
 
     setupUnits( config() );
 
@@ -535,6 +544,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     catch( PARSE_ERROR& )
     {
     }
+    KI_DIAG_CTOR( "[DIAG_CTOR] 9 DRC engine init done\n" );
 
 #ifdef KICAD_SCRIPTING
     // Ensure the Python interpreter is up to date with its environment variables
@@ -544,6 +554,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     // Sync action plugins in case they changed since the last time the frame opened
     GetToolManager()->RunAction( ACTIONS::pluginsReload );
+    KI_DIAG_CTOR( "[DIAG_CTOR] 10 plugins reloaded\n" );
 
 #ifdef KICAD_IPC_API
     m_apiHandler = std::make_unique<API_HANDLER_PCB>( this );
@@ -556,8 +567,11 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     }
 #endif
 
+    KI_DIAG_CTOR( "[DIAG_CTOR] 11 before SwitchBackend\n" );
     GetCanvas()->SwitchBackend( m_canvasType );
+    KI_DIAG_CTOR( "[DIAG_CTOR] 12 before ActivateGalCanvas\n" );
     ActivateGalCanvas();
+    KI_DIAG_CTOR( "[DIAG_CTOR] 13 after ActivateGalCanvas (ctor nearly done)\n" );
 
     // Default shutdown reason until a file is loaded
     KIPLATFORM::APP::SetShutdownBlockReason( this, _( "New PCB file is unsaved" ) );
@@ -1004,11 +1018,13 @@ void PCB_EDIT_FRAME::setupTools()
 
     // Run the selection tool, it is supposed to be always active
     m_toolManager->InvokeTool( "common.InteractiveSelection" );
+    KI_DIAG_CTOR( "[DIAG_CTOR] 0a setupTools: InvokeTool(InteractiveSelection) returned\n" );
 }
 
 
 void PCB_EDIT_FRAME::setupUIConditions()
 {
+    KI_DIAG_CTOR( "[DIAG_CTOR] 0b setupUIConditions entry\n" );
     PCB_BASE_EDIT_FRAME::setupUIConditions();
 
     ACTION_MANAGER*       mgr = m_toolManager->GetActionManager();

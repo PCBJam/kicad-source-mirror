@@ -32,7 +32,7 @@ namespace
 {
 
 constexpr size_t ASYNCIFY_STACK_SIZE = 64 * 1024;
-constexpr int MAX_WASM_FCONTEXT_LOGS = 220;
+[[maybe_unused]] constexpr int MAX_WASM_FCONTEXT_LOGS = 220;
 
 struct invocation_args_probe
 {
@@ -61,7 +61,7 @@ const char* invocation_type_name( int aType )
 }
 
 
-const char* describe_transfer_value( intptr_t aValue, char* aBuffer, size_t aBufferSize )
+[[maybe_unused]] const char* describe_transfer_value( intptr_t aValue, char* aBuffer, size_t aBufferSize )
 {
     if( !aValue || aValue < 0x10000 )
     {
@@ -102,12 +102,12 @@ struct wasm_fcontext
 wasm_fcontext* g_current_context = nullptr;
 wasm_fcontext g_main_context;
 bool g_main_initialized = false;
-int g_log_count = 0;
+[[maybe_unused]] int g_log_count = 0;
 uint32_t g_next_context_id = 1;
 uint32_t g_main_refresh_count = 0;
 
 
-uint32_t context_id( const wasm_fcontext* aCtx )
+[[maybe_unused]] uint32_t context_id( const wasm_fcontext* aCtx )
 {
     return aCtx ? aCtx->id : 0;
 }
@@ -117,6 +117,7 @@ void log_wasm_fcontext( const char* aLabel, wasm_fcontext* aCtx, wasm_fcontext* 
                         intptr_t aValue, fcontext_t* aSlot = nullptr,
                         wasm_fcontext* aPrevious = nullptr )
 {
+#if defined( KICAD_DIAG_COROUTINE )
     if( g_log_count >= MAX_WASM_FCONTEXT_LOGS )
         return;
 
@@ -124,24 +125,33 @@ void log_wasm_fcontext( const char* aLabel, wasm_fcontext* aCtx, wasm_fcontext* 
 
     char value_description[160];
 
-    std::fprintf( stderr,
-                  "[WASM_FCONTEXT] %s ctx=%p[#%u] other=%p[#%u] return_to=%p[#%u] slot=%p prev=%p[#%u] "
-                  "main_refresh=%u value=%s finished=%d running=%d epoch=%u\n",
-                  aLabel,
-                  static_cast<void*>( aCtx ),
-                  context_id( aCtx ),
-                  static_cast<void*>( aOther ),
-                  context_id( aOther ),
-                  aCtx ? static_cast<void*>( aCtx->return_to ) : nullptr,
-                  aCtx ? context_id( aCtx->return_to ) : 0,
-                  static_cast<void*>( aSlot ),
-                  static_cast<void*>( aPrevious ),
-                  context_id( aPrevious ),
-                  g_main_refresh_count,
-                  describe_transfer_value( aValue, value_description, sizeof( value_description ) ),
-                  aCtx ? aCtx->finished : 0,
-                  aCtx ? aCtx->running : 0,
-                  aCtx ? aCtx->resume_epoch : 0 );
+    // stdout (not stderr) so this shows as a [KICAD_OUT] log, not an error.
+    std::printf( "[WASM_FCONTEXT] %s ctx=%p[#%u] other=%p[#%u] return_to=%p[#%u] slot=%p prev=%p[#%u] "
+                 "main_refresh=%u value=%s finished=%d running=%d epoch=%u\n",
+                 aLabel,
+                 static_cast<void*>( aCtx ),
+                 context_id( aCtx ),
+                 static_cast<void*>( aOther ),
+                 context_id( aOther ),
+                 aCtx ? static_cast<void*>( aCtx->return_to ) : nullptr,
+                 aCtx ? context_id( aCtx->return_to ) : 0,
+                 static_cast<void*>( aSlot ),
+                 static_cast<void*>( aPrevious ),
+                 context_id( aPrevious ),
+                 g_main_refresh_count,
+                 describe_transfer_value( aValue, value_description, sizeof( value_description ) ),
+                 aCtx ? aCtx->finished : 0,
+                 aCtx ? aCtx->running : 0,
+                 aCtx ? aCtx->resume_epoch : 0 );
+    std::fflush( stdout );
+#else
+    (void) aLabel;
+    (void) aCtx;
+    (void) aOther;
+    (void) aValue;
+    (void) aSlot;
+    (void) aPrevious;
+#endif
 }
 
 
