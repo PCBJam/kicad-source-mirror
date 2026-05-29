@@ -1925,7 +1925,15 @@ void SHAPE_POLY_SET::splitCollinearOutlines()
             SHAPE_LINE_CHAIN& outline = m_polys[polyIdx][0];
             intptr_t count = outline.PointCount();
 
-            RTree<intptr_t, intptr_t, 2, intptr_t> rtree;
+            // ELEMTYPEREAL must be a wide floating-point type: RectSphericalVolume's
+            // sumOfSquares grows quadratically with extents, easily exceeding 2^31 for
+            // KiCad nanometer coordinates (~10^8 per axis -> ~10^14 area). All other
+            // RTree instantiations in KiCad use `double` for that fourth argument; this
+            // one was using `intptr_t`, which silently overflowed on wasm32 (where
+            // intptr_t is 32-bit) and tripped an assertion deep in PickSeeds during
+            // PCB load. See features/fix-asyncify-O2-and-modal-promise-rejection/
+            // rtree-debug-findings.md for the full diagnosis trail.
+            RTree<intptr_t, intptr_t, 2, double> rtree;
 
             for( intptr_t i = 0; i < count; ++i )
             {
