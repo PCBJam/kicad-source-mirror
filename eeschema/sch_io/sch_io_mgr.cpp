@@ -24,10 +24,15 @@
 #include <wx/uri.h>
 
 #include <sch_io/sch_io_mgr.h>
-#include <sch_io/eagle/sch_io_eagle.h>
 #include <sch_io/kicad_legacy/sch_io_kicad_legacy.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
+#include <sch_io/http_lib/sch_io_http_lib.h>
 
+// Third-party importers and the database plugin are excluded from the WASM
+// build (see kicad/eeschema/CMakeLists.txt). Their FindPlugin cases below
+// return nullptr on WASM.
+#ifndef __EMSCRIPTEN__
+#include <sch_io/eagle/sch_io_eagle.h>
 #include <sch_io/altium/sch_io_altium.h>
 #include <sch_io/cadstar/sch_io_cadstar_archive.h>
 #include <sch_io/easyeda/sch_io_easyeda.h>
@@ -35,8 +40,8 @@
 #include <sch_io/geda/sch_io_geda.h>
 #include <sch_io/database/sch_io_database.h>
 #include <sch_io/ltspice/sch_io_ltspice.h>
-#include <sch_io/http_lib/sch_io_http_lib.h>
 #include <sch_io/pads/sch_io_pads.h>
+#endif
 #include <common.h>     // for ExpandEnvVarSubstitutions
 
 #include <wildcards_and_files_ext.h>
@@ -70,6 +75,8 @@ SCH_IO* SCH_IO_MGR::FindPlugin( SCH_FILE_T aFileType )
     {
     case SCH_KICAD:           return new SCH_IO_KICAD_SEXPR();
     case SCH_LEGACY:          return new SCH_IO_KICAD_LEGACY();
+    case SCH_HTTP:            return new SCH_IO_HTTP_LIB();
+#ifndef __EMSCRIPTEN__
     case SCH_ALTIUM:          return new SCH_IO_ALTIUM();
     case SCH_CADSTAR_ARCHIVE: return new SCH_IO_CADSTAR_ARCHIVE();
     case SCH_DATABASE:        return new SCH_IO_DATABASE();
@@ -78,8 +85,8 @@ SCH_IO* SCH_IO_MGR::FindPlugin( SCH_FILE_T aFileType )
     case SCH_EASYEDAPRO:      return new SCH_IO_EASYEDAPRO();
     case SCH_GEDA:            return new SCH_IO_GEDA();
     case SCH_LTSPICE:         return new SCH_IO_LTSPICE();
-    case SCH_HTTP:            return new SCH_IO_HTTP_LIB();
     case SCH_PADS:            return new SCH_IO_PADS();
+#endif
     default:                  return nullptr;
     }
 }

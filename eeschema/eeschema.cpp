@@ -204,7 +204,13 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         }
 
         case FRAME_SCH_SYMBOL_EDITOR:
+#ifdef __EMSCRIPTEN__
+            // WASM build: symbol library editor is not supported (see
+            // features/schematic/0001-eeschema-iface-stubs.md).
+            return nullptr;
+#else
             return new SYMBOL_EDIT_FRAME( aKiway, aParent );
+#endif
 
         case FRAME_SIMULATOR:
         {
@@ -222,10 +228,19 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         }
 
         case FRAME_SCH_VIEWER:
+#ifdef __EMSCRIPTEN__
+            // WASM build: symbol viewer is not supported.
+            return nullptr;
+#else
             return new SYMBOL_VIEWER_FRAME( aKiway, aParent );
+#endif
 
         case FRAME_SYMBOL_CHOOSER:
         {
+#ifdef __EMSCRIPTEN__
+            // WASM build: symbol chooser is not supported (no bundled libs).
+            return nullptr;
+#else
             bool cancelled = false;
             SYMBOL_CHOOSER_FRAME* chooser = new SYMBOL_CHOOSER_FRAME( aKiway, aParent, cancelled );
 
@@ -236,6 +251,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             }
 
             return chooser;
+#endif
         }
 
         case DIALOG_SCH_LIBRARY_TABLE:

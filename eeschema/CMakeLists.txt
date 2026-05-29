@@ -60,44 +60,57 @@ set( EESCHEMA_SCH_IO
 
     # HTTP IO plugin
     sch_io/http_lib/sch_io_http_lib.cpp
-
-    # Database IO plugin
-    sch_io/database/sch_io_database.cpp
-
-    # gEDA IO plugin
-    sch_io/geda/sch_io_geda.cpp
-
-    # Eagle IO plugin
-    sch_io/eagle/sch_io_eagle.cpp
-
-    # Altium IO plugin
-    sch_io/altium/altium_parser_sch.cpp
-    sch_io/altium/sch_io_altium.cpp
-
-    # Cadstar IO plugin
-    sch_io/cadstar/cadstar_sch_archive_loader.cpp
-    sch_io/cadstar/cadstar_sch_archive_parser.cpp
-    sch_io/cadstar/sch_io_cadstar_archive.cpp
-
-    # LTSpice IO plugin
-    sch_io/ltspice/ltspice_schematic.cpp
-    sch_io/ltspice/sch_io_ltspice.cpp
-    sch_io/ltspice/sch_io_ltspice_parser.cpp
-
-    # EasyEDA IO plugin
-    sch_io/easyeda/sch_easyeda_parser.cpp
-    sch_io/easyeda/sch_io_easyeda.cpp
-
-    # EasyEDA Pro IO plugin
-    sch_io/easyedapro/sch_easyedapro_parser.cpp
-    sch_io/easyedapro/sch_io_easyedapro.cpp
-
-    # PADS Logic IO plugin
-    sch_io/pads/sch_io_pads.cpp
-    sch_io/pads/pads_sch_parser.cpp
-    sch_io/pads/pads_sch_symbol_builder.cpp
-    sch_io/pads/pads_sch_schematic_builder.cpp
     )
+
+# Third-party importers and database plugin are not built for WASM:
+# - Database needs nanodbc/ODBC (common/database/database_connection.cpp
+#   is also gated on NOT EMSCRIPTEN in common/CMakeLists.txt).
+# - Altium pulls in pcbnew/pcb_io/altium common code which pcbnew itself
+#   excludes for WASM (third-party uses std::basic_string<unsigned short>
+#   that the current Emscripten libc++ rejects).
+# - Eagle/Cadstar/LTspice/EasyEDA are cross-tool importers we don't need
+#   for the MVP and they bring transitive incompatible dependencies in.
+# sch_io_mgr.cpp's factory cases are guarded with __EMSCRIPTEN__ to match.
+if( NOT EMSCRIPTEN )
+    list( APPEND EESCHEMA_SCH_IO
+        # Database IO plugin
+        sch_io/database/sch_io_database.cpp
+
+        # gEDA IO plugin
+        sch_io/geda/sch_io_geda.cpp
+
+        # Eagle IO plugin
+        sch_io/eagle/sch_io_eagle.cpp
+
+        # Altium IO plugin
+        sch_io/altium/altium_parser_sch.cpp
+        sch_io/altium/sch_io_altium.cpp
+
+        # Cadstar IO plugin
+        sch_io/cadstar/cadstar_sch_archive_loader.cpp
+        sch_io/cadstar/cadstar_sch_archive_parser.cpp
+        sch_io/cadstar/sch_io_cadstar_archive.cpp
+
+        # LTSpice IO plugin
+        sch_io/ltspice/ltspice_schematic.cpp
+        sch_io/ltspice/sch_io_ltspice.cpp
+        sch_io/ltspice/sch_io_ltspice_parser.cpp
+
+        # EasyEDA IO plugin
+        sch_io/easyeda/sch_easyeda_parser.cpp
+        sch_io/easyeda/sch_io_easyeda.cpp
+
+        # EasyEDA Pro IO plugin
+        sch_io/easyedapro/sch_easyedapro_parser.cpp
+        sch_io/easyedapro/sch_io_easyedapro.cpp
+
+        # PADS Logic IO plugin
+        sch_io/pads/sch_io_pads.cpp
+        sch_io/pads/pads_sch_parser.cpp
+        sch_io/pads/pads_sch_symbol_builder.cpp
+        sch_io/pads/pads_sch_schematic_builder.cpp
+    )
+endif()
 
 set( EESCHEMA_DLGS
     dialogs/dialog_annotate.cpp
@@ -291,6 +304,22 @@ set( EESCHEMA_SIM_SRCS
     widgets/tuner_slider.cpp
     widgets/tuner_slider_base.cpp
     )
+
+# WASM: the four largest BSIM/SOI/HSIM data initializer functions exceed the
+# V8/SpiderMonkey limit on locals per function ("too many locals") once
+# compiled. Replace them with empty stubs — the simulator UI is unreachable
+# in WASM anyway (see wasm/stubs/ngspice/sharedspice.h).
+if( EMSCRIPTEN )
+    list( REMOVE_ITEM EESCHEMA_SIM_SRCS
+        sim/sim_model_ngspice_data_bsim4.cpp
+        sim/sim_model_ngspice_data_b3soi.cpp
+        sim/sim_model_ngspice_data_b4soi.cpp
+        sim/sim_model_ngspice_data_hsim.cpp
+    )
+    list( APPEND EESCHEMA_SIM_SRCS
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs/eeschema_ngspice_data_stubs.cpp
+    )
+endif()
 
 set( EESCHEMA_WIDGETS
     widgets/hierarchy_pane.cpp
@@ -581,15 +610,26 @@ add_executable( eeschema WIN32 MACOSX_BUNDLE
     ${EESCHEMA_RESOURCES}
     )
 
-set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
-    COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\";BUILD_KIWAY_DLL"
-    )
+if( EMSCRIPTEN )
+    # WASM: Static kiface linking - don't define BUILD_KIWAY_DLL
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\""
+        )
+else()
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\";BUILD_KIWAY_DLL"
+        )
+endif()
 
-target_link_libraries( eeschema
-    kicommon
-    pcm
-    ${wxWidgets_LIBRARIES}
-    )
+if( NOT EMSCRIPTEN )
+    # Native: minimal link, kiface loaded dynamically
+    target_link_libraries( eeschema
+        kicommon
+        pcm
+        ${wxWidgets_LIBRARIES}
+        )
+endif()
+# WASM linking is done after EESCHEMA_KIFACE_LIBRARIES is defined
 
 # the main Eeschema program, in DSO form.
 add_library( eeschema_kiface_objects OBJECT
@@ -597,6 +637,15 @@ add_library( eeschema_kiface_objects OBJECT
     ${EESCHEMA_PRINTING}
     ${EESCHEMA_COMMON_SRCS}
     )
+
+# WASM: Bring eeschema.cpp (the KIFACE entry point) and stub sources into the
+# kiface_objects translation unit so static linking finds KIFACE_GETTER.
+if( EMSCRIPTEN )
+    target_sources( eeschema_kiface_objects PRIVATE
+        eeschema.cpp
+        ${CMAKE_SOURCE_DIR}/../wasm/stubs/eeschema_frame_stub.cpp
+    )
+endif()
 
 if( KICAD_USE_PCH )
     target_precompile_headers( eeschema_kiface_objects
@@ -637,22 +686,52 @@ target_link_libraries( eeschema_kiface_objects PUBLIC eeschema_navlib)
 
 add_dependencies( eeschema_kiface_objects eeschema_navlib )
 
-add_library( eeschema_kiface MODULE
-    eeschema.cpp
+if( EMSCRIPTEN )
+    # WASM: empty MODULE - eeschema.cpp was hoisted into kiface_objects above
+    # so the executable can link KIFACE_GETTER statically. The empty MODULE
+    # target is kept so post-build steps that reference it still resolve.
+    add_library( eeschema_kiface MODULE )
+else()
+    add_library( eeschema_kiface MODULE
+        eeschema.cpp
+        )
+endif()
+
+set( EESCHEMA_KIFACE_LIBRARIES
+    eeschema_kiface_objects
+    common
+    eeschema_navlib
+    # Native-only: pads/database importers + plugin content manager are not built for WASM
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:pads_common>
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:pcm>
+    kicommon
+    kiplatform
+    gal
+    scripting
+    sexpr
+    core
+    markdown_lib
+    ${wxWidgets_LIBRARIES}
+    ${NGSPICE_LIBRARY}
+    Boost::headers
     )
+
+# WASM: Link kiface objects directly into eeschema executable (static linking)
+if( EMSCRIPTEN )
+    target_link_libraries( eeschema
+        PRIVATE
+            ${EESCHEMA_KIFACE_LIBRARIES}
+        )
+    # WASM: Allow multiple definitions of symbols that exist in both
+    # KiCad and wxWidgets (matches the pcbnew WASM pattern).
+    target_link_options( eeschema PRIVATE
+        "LINKER:--allow-multiple-definition"
+        )
+endif()
 
 target_link_libraries( eeschema_kiface
     PRIVATE
-        common
-        eeschema_kiface_objects
-        pads_common
-        pcm
-        markdown_lib
-        scripting
-        core
-        Boost::headers
-        ${wxWidgets_LIBRARIES}
-        ${NGSPICE_LIBRARY}
+        ${EESCHEMA_KIFACE_LIBRARIES}
     )
 
 if( MSVC )
@@ -675,9 +754,17 @@ set_target_properties( eeschema_kiface PROPERTIES
     )
 
 # The KIFACE is in eeschema.cpp, export it:
-set_source_files_properties( eeschema.cpp PROPERTIES
-    COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
-    )
+if( EMSCRIPTEN )
+    # WASM: Static linking - don't define BUILD_KIWAY_DLL so KIFACE_GETTER
+    # is exported with its statically-linkable name (KIFACE_1).
+    set_source_files_properties( eeschema.cpp PROPERTIES
+        COMPILE_DEFINITIONS     "COMPILING_DLL"
+        )
+else()
+    set_source_files_properties( eeschema.cpp PROPERTIES
+        COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
+        )
+endif()
 
 # if building eeschema, then also build eeschema_kiface if out of date.
 add_dependencies( eeschema eeschema_kiface )
