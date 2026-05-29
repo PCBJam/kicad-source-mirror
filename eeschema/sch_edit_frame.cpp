@@ -58,7 +58,9 @@
 #include <core/profile.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <sch_edit_frame.h>
 #include <symbol_chooser_frame.h>
 #include <sch_painter.h>
