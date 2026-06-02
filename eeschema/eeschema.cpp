@@ -204,13 +204,9 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         }
 
         case FRAME_SCH_SYMBOL_EDITOR:
-#ifdef __EMSCRIPTEN__
-            // WASM build: symbol library editor is not supported (see
-            // features/schematic/0001-eeschema-iface-stubs.md).
-            return nullptr;
-#else
+            // WASM: the symbol editor is now a ported target (symbol_editor.html);
+            // construct the frame like the native build. See features/symbol-editor/.
             return new SYMBOL_EDIT_FRAME( aKiway, aParent );
-#endif
 
         case FRAME_SIMULATOR:
         {
