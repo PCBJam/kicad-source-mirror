@@ -858,7 +858,13 @@ KIGFX::VC_SETTINGS EDA_DRAW_PANEL_GAL::GetVcSettings()
     COMMON_SETTINGS* cfg = Pgm().GetCommonSettings();
 
     KIGFX::VC_SETTINGS vcSettings;
+#ifdef __EMSCRIPTEN__
+    // Browsers can't warp the OS pointer; use zoom-to-cursor instead of
+    // center-on-zoom (see WX_VIEW_CONTROLS::LoadSettings).
+    vcSettings.m_warpCursor = false;
+#else
     vcSettings.m_warpCursor = cfg->m_Input.center_on_zoom;
+#endif
     vcSettings.m_focusFollowSchPcb = cfg->m_Input.focus_follow_sch_pcb;
     vcSettings.m_autoPanSettingEnabled = cfg->m_Input.auto_pan;
     vcSettings.m_autoPanAcceleration = cfg->m_Input.auto_pan_acceleration;

@@ -174,7 +174,16 @@ void WX_VIEW_CONTROLS::LoadSettings()
 {
     COMMON_SETTINGS* cfg = Pgm().GetCommonSettings();
 
+#ifdef __EMSCRIPTEN__
+    // The browser cannot warp the OS pointer, which KiCad's "center on zoom"
+    // (CenterOnCursor -> KIPLATFORM::UI::WarpPointer) depends on. Faithfully
+    // reproducing it makes the canvas recenter while the real cursor stays put,
+    // which is a poor fit for the web. Force zoom-to-cursor (the anchored branch
+    // of onWheel) instead: the point under the cursor stays fixed, like web maps.
+    m_settings.m_warpCursor            = false;
+#else
     m_settings.m_warpCursor            = cfg->m_Input.center_on_zoom;
+#endif
     m_settings.m_focusFollowSchPcb     = cfg->m_Input.focus_follow_sch_pcb;
     m_settings.m_autoPanSettingEnabled = cfg->m_Input.auto_pan;
     m_settings.m_autoPanAcceleration   = cfg->m_Input.auto_pan_acceleration;
