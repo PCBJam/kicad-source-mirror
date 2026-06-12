@@ -60,6 +60,9 @@ set( EESCHEMA_SCH_IO
 
     # HTTP IO plugin
     sch_io/http_lib/sch_io_http_lib.cpp
+
+    # pcbjam remote library plugin (JS bridge; only functional on WASM)
+    sch_io/pcbjam_lib/sch_io_pcbjam_lib.cpp
     )
 
 # Third-party importers and database plugin are not built for WASM:
