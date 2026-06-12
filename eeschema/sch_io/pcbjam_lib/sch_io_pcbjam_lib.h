@@ -27,8 +27,12 @@
 
 /**
  * A read-only symbol library plugin backed by a JS-side provider
- * (globalThis.kicadLibs) in the WASM build.  Library URIs look like
- * "pcbjam://<source>/<lib>"; the provider answers two operations:
+ * (globalThis.kicadLibs) in the WASM build.  Library URIs are absolute POSIX
+ * paths under "/mnt/pcbjam/<lib>" — an absolute path so KiCad's lib-table
+ * URI expansion (LIBRARY_MANAGER::ExpandURI -> wxFileName::MakeAbsolute) is a
+ * no-op and the path reaches the plugin/provider unmangled (a "scheme://"
+ * URI gets rewritten to "/scheme:/..." against the cwd).  The provider
+ * answers two operations:
  *
  *   request( "list", uri, "" )      -> JSON {"symbols":["R","C",...]}
  *   request( "get",  uri, name )    -> a complete kicad_symbol_lib s-expr
