@@ -17,6 +17,8 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <mutex>
+
 #include <nlohmann/json.hpp>
 
 #include <ki_exception.h>
@@ -128,6 +130,18 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
 }
 
 
+// Serialize worker-thread proxied requests. The symbol chooser enumerates every
+// library concurrently (SYMBOL_LIBRARY_ADAPTER::AsyncLoad submits one thread-pool
+// task per lib), so multiple pthreads would proxy into the main thread at once.
+// Each proxied task runs a tiny C function on the main thread (pcbjam_libs_
+// request_on_main) — and the main thread is typically Asyncify-suspended in the
+// chooser's modal pump at that moment. Concurrent C reentry into a suspended
+// runtime corrupts the Asyncify/function-table state (observed as "table index
+// out of bounds"). Sequential reentry is fine (proven with a single lib), so a
+// global lock held across the whole proxy+fetch round-trip serializes them. The
+// lock parks extra worker threads (not the main thread), so the UI stays live.
+static std::mutex g_pcbjamProxyMutex;
+
 // Dispatch on the calling thread.  Library loads come in on KiCad thread-pool
 // pthreads (SYMBOL_LIBRARY_ADAPTER::AsyncLoad); there we proxy to the main
 // thread and futex-block until the fetch settles — legal on a worker.  Calls
@@ -141,6 +155,10 @@ static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, co
     PCBJAM_LIBS_REQ req{ aOp, aLib, aArg, nullptr };
 
     em_proxying_queue* queue = emscripten_proxy_get_system_queue();
+
+    // Held across the blocking proxy call (which returns only after the JS fetch
+    // resolves and calls emscripten_proxy_finish) → one in-flight request at a time.
+    std::lock_guard<std::mutex> serialize( g_pcbjamProxyMutex );
 
     if( !emscripten_proxy_sync_with_ctx( queue, emscripten_main_runtime_thread_id(),
                                          pcbjam_libs_request_on_main, &req ) )
