@@ -988,6 +988,14 @@ void SCH_EDIT_FRAME::OnImportProject()
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/eeschema_embind.cpp): notifies the
+// web app after a successful save so it can persist the MEMFS bytes. Same pattern
+// as the kicadCollabOnModify hook.
+extern "C" void kicadCollabOnSave( const char* aPath );
+#endif
+
+
 bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath )
 {
     wxString msg;
@@ -1077,6 +1085,10 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 
         msg.Printf( _( "File '%s' saved." ),  screen->GetFileName() );
         SetStatusText( msg, 0 );
+
+#ifdef __EMSCRIPTEN__
+        kicadCollabOnSave( schematicFileName.GetFullPath().utf8_str() );
+#endif
     }
 
     return success;
