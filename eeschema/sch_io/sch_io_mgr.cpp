@@ -27,6 +27,7 @@
 #include <sch_io/kicad_legacy/sch_io_kicad_legacy.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 #include <sch_io/http_lib/sch_io_http_lib.h>
+#include <sch_io/pcbjam_lib/sch_io_pcbjam_lib.h>
 
 // Third-party importers and the database plugin are excluded from the WASM
 // build (see kicad/eeschema/CMakeLists.txt). Their FindPlugin cases below
@@ -76,6 +77,7 @@ SCH_IO* SCH_IO_MGR::FindPlugin( SCH_FILE_T aFileType )
     case SCH_KICAD:           return new SCH_IO_KICAD_SEXPR();
     case SCH_LEGACY:          return new SCH_IO_KICAD_LEGACY();
     case SCH_HTTP:            return new SCH_IO_HTTP_LIB();
+    case SCH_PCBJAM:          return new SCH_IO_PCBJAM_LIB();
 #ifndef __EMSCRIPTEN__
     case SCH_ALTIUM:          return new SCH_IO_ALTIUM();
     case SCH_CADSTAR_ARCHIVE: return new SCH_IO_CADSTAR_ARCHIVE();
@@ -112,6 +114,7 @@ const wxString SCH_IO_MGR::ShowType( SCH_FILE_T aType )
     case SCH_LTSPICE:         return wxString( wxT( "LTspice" ) );
     case SCH_HTTP:            return wxString( wxT( "HTTP" ) );
     case SCH_PADS:            return wxString( wxT( "PADS Logic" ) );
+    case SCH_PCBJAM:          return wxString( wxT( "PCBJAM" ) );
     case SCH_NESTED_TABLE:    return LIBRARY_TABLE_ROW::TABLE_TYPE_NAME;
     default:                  return wxString::Format( _( "Unknown SCH_FILE_T value: %d" ), aType );
     }
@@ -148,6 +151,8 @@ SCH_IO_MGR::SCH_FILE_T SCH_IO_MGR::EnumFromStr( const wxString& aType )
         return SCH_HTTP;
     else if( aType == wxT( "PADS Logic" ) )
         return SCH_PADS;
+    else if( aType == wxT( "PCBJAM" ) )
+        return SCH_PCBJAM;
     else if( aType == LIBRARY_TABLE_ROW::TABLE_TYPE_NAME )
         return SCH_NESTED_TABLE;
 
