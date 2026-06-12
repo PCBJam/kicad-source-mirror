@@ -166,7 +166,7 @@ SCH_IO_PCBJAM_LIB::~SCH_IO_PCBJAM_LIB()
 
 bool SCH_IO_PCBJAM_LIB::CanReadLibrary( const wxString& aFileName ) const
 {
-    return aFileName.StartsWith( wxS( "pcbjam://" ) );
+    return aFileName.StartsWith( wxS( "/mnt/pcbjam/" ) );
 }
 
 
