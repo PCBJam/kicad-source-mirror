@@ -31,11 +31,10 @@
  * in the WASM build.  Library URIs are absolute POSIX paths so KiCad's
  * lib-table URI expansion (LIBRARY_MANAGER::ExpandURI -> wxFileName::
  * MakeAbsolute) is a no-op and the path reaches the plugin/provider unmangled
- * (a "scheme://" URI gets rewritten to "/scheme:/..." against the cwd).  Two
- * mount roots distinguish writability without an extra bridge round-trip:
- *
- *   /mnt/pcbjam/<lib>      read-only origins
- *   /mnt/pcbjam-rw/<lib>   user libs (IsLibraryWritable -> true)
+ * (a "scheme://" URI gets rewritten to "/scheme:/..." against the cwd).  Every
+ * lib mounts under a single root "/mnt/pcbjam/<lib>" and reports writable; what
+ * a save MEANS (write a user lib, mirror an origin, or reject) is decided
+ * entirely by the provider/server — the fork stays agnostic to origin/user.
  *
  * The provider answers:
  *
@@ -83,10 +82,10 @@ public:
     void SaveLibrary( const wxString& aFileName,
                       const std::map<std::string, UTF8>* aProperties = nullptr ) override;
 
-    /// User libs mount under "/mnt/pcbjam-rw/"; origins under "/mnt/pcbjam/".
+    /// Every pcbjam lib is writable; save semantics are server-side policy.
     bool IsLibraryWritable( const wxString& aLibraryPath ) override
     {
-        return aLibraryPath.StartsWith( wxS( "/mnt/pcbjam-rw/" ) );
+        return aLibraryPath.StartsWith( wxS( "/mnt/pcbjam/" ) );
     }
 
     const wxString& GetError() const override { return m_lastError; }

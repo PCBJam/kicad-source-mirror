@@ -187,12 +187,11 @@ SCH_IO_PCBJAM_LIB::~SCH_IO_PCBJAM_LIB()
 
 bool SCH_IO_PCBJAM_LIB::CanReadLibrary( const wxString& aFileName ) const
 {
-    // Matches both mount roots: "/mnt/pcbjam/" (origins) and "/mnt/pcbjam-rw/"
-    // (user libs).  This is also how SCH_IO_MGR::GuessPluginTypeFromLibPath
-    // routes a save to this plugin (it probes each plugin's CanReadLibrary), so
-    // the type is selected from the URI without touching sch_io_mgr.
-    return aFileName.StartsWith( wxS( "/mnt/pcbjam/" ) )
-           || aFileName.StartsWith( wxS( "/mnt/pcbjam-rw/" ) );
+    // Single mount root for every pcbjam lib.  This is also how SCH_IO_MGR::
+    // GuessPluginTypeFromLibPath routes a save to this plugin (it probes each
+    // plugin's CanReadLibrary), so the type is selected from the URI without
+    // touching sch_io_mgr.
+    return aFileName.StartsWith( wxS( "/mnt/pcbjam/" ) );
 }
 
 
