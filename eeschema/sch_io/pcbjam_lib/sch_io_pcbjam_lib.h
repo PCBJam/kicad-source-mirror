@@ -20,27 +20,36 @@
 #pragma once
 
 #include <map>
+#include <optional>
 
 #include <sch_io/sch_io.h>
 #include <sch_io/sch_io_mgr.h>
 #include <symbol_library_common.h>
 
 /**
- * A read-only symbol library plugin backed by a JS-side provider
- * (globalThis.kicadLibs) in the WASM build.  Library URIs are absolute POSIX
- * paths under "/mnt/pcbjam/<lib>" — an absolute path so KiCad's lib-table
- * URI expansion (LIBRARY_MANAGER::ExpandURI -> wxFileName::MakeAbsolute) is a
- * no-op and the path reaches the plugin/provider unmangled (a "scheme://"
- * URI gets rewritten to "/scheme:/..." against the cwd).  The provider
- * answers two operations:
+ * A symbol library plugin backed by a JS-side provider (globalThis.kicadLibs)
+ * in the WASM build.  Library URIs are absolute POSIX paths so KiCad's
+ * lib-table URI expansion (LIBRARY_MANAGER::ExpandURI -> wxFileName::
+ * MakeAbsolute) is a no-op and the path reaches the plugin/provider unmangled
+ * (a "scheme://" URI gets rewritten to "/scheme:/..." against the cwd).  Two
+ * mount roots distinguish writability without an extra bridge round-trip:
+ *
+ *   /mnt/pcbjam/<lib>      read-only origins
+ *   /mnt/pcbjam-rw/<lib>   user libs (IsLibraryWritable -> true)
+ *
+ * The provider answers:
  *
  *   request( "list", uri, "" )      -> JSON {"symbols":["R","C",...]}
  *   request( "get",  uri, name )    -> a complete kicad_symbol_lib s-expr
  *                                      document containing that one symbol
- *                                      (plus any `extends` parents)
+ *                                      (plus any `extends` parents), or null
+ *                                      if the symbol does not exist
+ *   request( "save", uri, json )    -> persist one symbol; json is
+ *                                      {"name":..,"body":<kicad_symbol_lib>}
  *
- * The call suspends via Asyncify (EM_ASYNC_JS) until the provider's promise
- * resolves.  Outside Emscripten builds every operation throws IO_ERROR.
+ * The call suspends via Asyncify (EM_ASYNC_JS) on the main thread, or proxies
+ * to the main thread and futex-blocks on a worker, until the provider's
+ * promise resolves.  Outside Emscripten builds every operation throws IO_ERROR.
  */
 class SCH_IO_PCBJAM_LIB : public SCH_IO
 {
@@ -66,7 +75,19 @@ public:
     LIB_SYMBOL* LoadSymbol( const wxString& aLibraryPath, const wxString& aAliasName,
                             const std::map<std::string, UTF8>* aProperties = nullptr ) override;
 
-    bool IsLibraryWritable( const wxString& aLibraryPath ) override { return false; }
+    void SaveSymbol( const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol,
+                     const std::map<std::string, UTF8>* aProperties = nullptr ) override;
+
+    /// Per-item plugin: SaveSymbol persists immediately, so this is a no-op.
+    /// (Override so the base class's NOT_IMPLEMENTED throw doesn't fail saves.)
+    void SaveLibrary( const wxString& aFileName,
+                      const std::map<std::string, UTF8>* aProperties = nullptr ) override;
+
+    /// User libs mount under "/mnt/pcbjam-rw/"; origins under "/mnt/pcbjam/".
+    bool IsLibraryWritable( const wxString& aLibraryPath ) override
+    {
+        return aLibraryPath.StartsWith( wxS( "/mnt/pcbjam-rw/" ) );
+    }
 
     const wxString& GetError() const override { return m_lastError; }
 
@@ -74,6 +95,12 @@ private:
     /// Perform a provider request; returns the response or throws IO_ERROR.
     std::string request( const std::string& aOp, const wxString& aLibraryPath,
                          const wxString& aArg );
+
+    /// Like request() but returns nullopt (instead of throwing) when the
+    /// provider yields null — used by "get" so a missing symbol reads as
+    /// "not found" (the save flow's existence checks rely on this).
+    std::optional<std::string> requestOpt( const std::string& aOp, const wxString& aLibraryPath,
+                                           const wxString& aArg );
 
     /// Load (or return cached) master copy of one symbol.
     LIB_SYMBOL* loadOne( const wxString& aLibraryPath, const wxString& aName );

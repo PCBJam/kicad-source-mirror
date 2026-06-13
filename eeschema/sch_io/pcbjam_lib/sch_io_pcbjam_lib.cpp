@@ -18,6 +18,7 @@
  */
 
 #include <mutex>
+#include <optional>
 
 #include <nlohmann/json.hpp>
 
@@ -26,6 +27,8 @@
 #include <richio.h>
 #include <wx/log.h>
 
+#include <sch_file_versions.h>
+#include <sch_io/kicad_sexpr/sch_io_kicad_sexpr_lib_cache.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr_parser.h>
 #include <sch_io/pcbjam_lib/sch_io_pcbjam_lib.h>
 
@@ -184,31 +187,44 @@ SCH_IO_PCBJAM_LIB::~SCH_IO_PCBJAM_LIB()
 
 bool SCH_IO_PCBJAM_LIB::CanReadLibrary( const wxString& aFileName ) const
 {
-    return aFileName.StartsWith( wxS( "/mnt/pcbjam/" ) );
+    // Matches both mount roots: "/mnt/pcbjam/" (origins) and "/mnt/pcbjam-rw/"
+    // (user libs).  This is also how SCH_IO_MGR::GuessPluginTypeFromLibPath
+    // routes a save to this plugin (it probes each plugin's CanReadLibrary), so
+    // the type is selected from the URI without touching sch_io_mgr.
+    return aFileName.StartsWith( wxS( "/mnt/pcbjam/" ) )
+           || aFileName.StartsWith( wxS( "/mnt/pcbjam-rw/" ) );
 }
 
 
-std::string SCH_IO_PCBJAM_LIB::request( const std::string& aOp, const wxString& aLibraryPath,
-                                        const wxString& aArg )
+std::optional<std::string> SCH_IO_PCBJAM_LIB::requestOpt( const std::string& aOp,
+                                                          const wxString& aLibraryPath,
+                                                          const wxString& aArg )
 {
 #ifdef __EMSCRIPTEN__
     char* res = pcbjam_libs_request_dispatch( aOp.c_str(), aLibraryPath.utf8_str().data(),
                                               aArg.utf8_str().data() );
 
     if( !res )
-    {
-        m_lastError = wxString::Format( _( "pcbjam library provider failed: %s %s %s" ),
-                                        wxString( aOp ), aLibraryPath, aArg );
-        THROW_IO_ERROR( m_lastError );
-    }
+        return std::nullopt;
 
     std::string out( res );
     free( res );
     return out;
 #else
-    m_lastError = _( "pcbjam libraries are only available in the web build" );
-    THROW_IO_ERROR( m_lastError );
+    return std::nullopt;
 #endif
+}
+
+
+std::string SCH_IO_PCBJAM_LIB::request( const std::string& aOp, const wxString& aLibraryPath,
+                                        const wxString& aArg )
+{
+    if( std::optional<std::string> out = requestOpt( aOp, aLibraryPath, aArg ) )
+        return *out;
+
+    m_lastError = wxString::Format( _( "pcbjam library provider failed: %s %s" ),
+                                    wxString( aOp ), aLibraryPath );
+    THROW_IO_ERROR( m_lastError );
 }
 
 
@@ -266,8 +282,15 @@ LIB_SYMBOL* SCH_IO_PCBJAM_LIB::loadOne( const wxString& aLibraryPath, const wxSt
     if( auto it = m_cache.find( cacheKey ); it != m_cache.end() )
         return it->second;
 
-    std::string body = request( "get", aLibraryPath, aName );
+    // A missing symbol comes back as nullopt (not an exception): the symbol-save
+    // flow probes LoadSymbol to test existence before writing, and must see a
+    // clean "not found" rather than a thrown IO_ERROR.
+    std::optional<std::string> got = requestOpt( "get", aLibraryPath, aName );
 
+    if( !got )
+        return nullptr;
+
+    std::string               body = *got;
     STRING_LINE_READER        reader( body, aLibraryPath + wxS( ":" ) + aName );
     SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
     LIB_SYMBOL_MAP            map;
@@ -299,4 +322,53 @@ LIB_SYMBOL* SCH_IO_PCBJAM_LIB::loadOne( const wxString& aLibraryPath, const wxSt
     }
 
     return found;
+}
+
+
+void SCH_IO_PCBJAM_LIB::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol,
+                                    const std::map<std::string, UTF8>* aProperties )
+{
+    wxCHECK_RET( aSymbol, wxS( "null symbol passed to SCH_IO_PCBJAM_LIB::SaveSymbol" ) );
+
+    // The cache serializer mutates the symbol (font embedding), so format a copy.
+    // Wrap the single (symbol …) block in a kicad_symbol_lib header at the fork's
+    // native version — this is exactly what the on-device parser reads back, so
+    // user-saved bodies round-trip without the origin-data version shim.
+    LIB_SYMBOL       copy( *aSymbol );
+    STRING_FORMATTER formatter;
+
+    formatter.Print( "(kicad_symbol_lib (version %d) (generator \"pcbjam\") "
+                     "(generator_version \"1.0\")\n",
+                     SEXPR_SYMBOL_LIB_FILE_VERSION );
+    SCH_IO_KICAD_SEXPR_LIB_CACHE::SaveSymbol( &copy, formatter );
+    formatter.Print( ")\n" );
+
+    // The bridge carries one string arg, so pass {name, body} as JSON.
+    nlohmann::json payload;
+    payload["name"] = std::string( aSymbol->GetName().utf8_str() );
+    payload["body"] = formatter.GetString();
+    std::string payloadStr = payload.dump();
+
+    // Throws IO_ERROR if the provider rejects the write (the library manager
+    // catches it and reports the save as failed).
+    request( "save", aLibraryPath,
+             wxString::FromUTF8( payloadStr.c_str(), payloadStr.size() ) );
+
+    // Drop any stale cached master so the next load reflects the saved body.
+    wxString key = aLibraryPath + wxS( "|" ) + aSymbol->GetName();
+
+    if( auto it = m_cache.find( key ); it != m_cache.end() )
+    {
+        delete it->second;
+        m_cache.erase( it );
+    }
+}
+
+
+void SCH_IO_PCBJAM_LIB::SaveLibrary( const wxString& aFileName,
+                                     const std::map<std::string, UTF8>* aProperties )
+{
+    // No-op: each SaveSymbol already persisted its item through the bridge, and
+    // there is no aggregate library file to flush.  Overridden purely so the
+    // base class's NOT_IMPLEMENTED throw doesn't fail the save.
 }
