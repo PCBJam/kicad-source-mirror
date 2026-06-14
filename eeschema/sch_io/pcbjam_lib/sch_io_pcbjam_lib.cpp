@@ -52,7 +52,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libs_finish( em_proxying_ctx* aCtx )
 // frees) or 0 on failure.  globalThis here is the window, where the
 // standalone installs the provider.
 EM_ASYNC_JS( char*, pcbjam_libs_request_js,
-             ( const char* aOp, const char* aLib, const char* aArg ), {
+             ( const char* aOp, const char* aLib, const char* aArg, const char* aKind ), {
     const hook = globalThis.kicadLibs;
 
     if( !hook || !hook.request )
@@ -61,7 +61,7 @@ EM_ASYNC_JS( char*, pcbjam_libs_request_js,
     try
     {
         const res = await hook.request( UTF8ToString( aOp ), UTF8ToString( aLib ),
-                                        UTF8ToString( aArg ) );
+                                        UTF8ToString( aArg ), UTF8ToString( aKind ) );
 
         if( res == null )
             return 0;
@@ -84,6 +84,7 @@ struct PCBJAM_LIBS_REQ
     const char* op;
     const char* lib;
     const char* arg;
+    const char* kind;
     char*       result;
 };
 
@@ -98,8 +99,8 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
 
     EM_ASM( {
         const hook = globalThis.kicadLibs;
-        const resultPtr = $3;
-        const ctx = $4;
+        const resultPtr = $4;
+        const ctx = $5;
 
         const done = ( ptr ) => {
             HEAPU32[resultPtr >> 2] = ptr;
@@ -112,7 +113,8 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
             return;
         }
 
-        hook.request( UTF8ToString( $0 ), UTF8ToString( $1 ), UTF8ToString( $2 ) )
+        hook.request( UTF8ToString( $0 ), UTF8ToString( $1 ), UTF8ToString( $2 ),
+                      UTF8ToString( $3 ) )
             .then( ( res ) => {
                 if( res == null )
                 {
@@ -129,7 +131,7 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
                 console.error( 'kicadLibs.request failed:', e );
                 done( 0 );
             } );
-    }, req->op, req->lib, req->arg, &req->result, aCtx );
+    }, req->op, req->lib, req->arg, req->kind, &req->result, aCtx );
 }
 
 
@@ -150,12 +152,13 @@ static std::mutex g_pcbjamProxyMutex;
 // thread and futex-block until the fetch settles — legal on a worker.  Calls
 // already on the main thread use the Asyncify suspension instead (blocking
 // the main thread is not an option, and proxy-to-self would deadlock).
-static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, const char* aArg )
+static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, const char* aArg,
+                                           const char* aKind )
 {
     if( emscripten_is_main_runtime_thread() )
-        return pcbjam_libs_request_js( aOp, aLib, aArg );
+        return pcbjam_libs_request_js( aOp, aLib, aArg, aKind );
 
-    PCBJAM_LIBS_REQ req{ aOp, aLib, aArg, nullptr };
+    PCBJAM_LIBS_REQ req{ aOp, aLib, aArg, aKind, nullptr };
 
     em_proxying_queue* queue = emscripten_proxy_get_system_queue();
 
@@ -200,8 +203,10 @@ std::optional<std::string> SCH_IO_PCBJAM_LIB::requestOpt( const std::string& aOp
                                                           const wxString& aArg )
 {
 #ifdef __EMSCRIPTEN__
+    // The bridge carries the item kind as a 4th arg (the JS provider defaults it
+    // to "symbol", so this is also forward-compatible); this plugin is symbols.
     char* res = pcbjam_libs_request_dispatch( aOp.c_str(), aLibraryPath.utf8_str().data(),
-                                              aArg.utf8_str().data() );
+                                              aArg.utf8_str().data(), "symbol" );
 
     if( !res )
         return std::nullopt;

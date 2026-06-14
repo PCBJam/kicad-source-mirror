@@ -967,6 +967,44 @@ target_link_libraries( pcbnew_kiface
     )
 
 if( EMSCRIPTEN )
+    # WASM: Footprint Editor launcher. The footprint editor (FRAME_FOOTPRINT_EDITOR)
+    # is served by the pcbnew kiface and its sources are already compiled into the
+    # pcbnew kiface objects, so we only need a second single_top launcher that opens
+    # that frame instead of FRAME_PCB_EDITOR. Mirrors eeschema's symbol_editor target.
+    #
+    # single_top.cpp's COMPILE_DEFINITIONS are directory-scoped and already pinned to
+    # TOP_FRAME=FRAME_PCB_EDITOR for the pcbnew executable above; copy it to a private
+    # translation unit so it can carry its own TOP_FRAME without colliding.
+    configure_file(
+        ${CMAKE_SOURCE_DIR}/common/single_top.cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/footprint_editor_single_top.cpp
+        COPYONLY )
+
+    add_executable( footprint_editor
+        ${CMAKE_CURRENT_BINARY_DIR}/footprint_editor_single_top.cpp )
+
+    set_source_files_properties(
+        ${CMAKE_CURRENT_BINARY_DIR}/footprint_editor_single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_FOOTPRINT_EDITOR;PGM_DATA_FILE_EXT=\"kicad_mod\""
+        )
+
+    target_link_libraries( footprint_editor
+        PRIVATE
+            ${PCBNEW_KIFACE_LIBRARIES}
+        )
+    # Match pcbnew's WASM link options: allow multi-def, plus --whole-archive
+    # pcbcommon so RTTI-only-referenced vtables/typeinfo are pulled in.
+    target_link_options( footprint_editor PRIVATE
+        "LINKER:--allow-multiple-definition"
+        "LINKER:--whole-archive"
+        "$<TARGET_FILE:pcbcommon>"
+        "LINKER:--no-whole-archive"
+        )
+
+    add_dependencies( footprint_editor pcbnew_kiface )
+endif()
+
+if( EMSCRIPTEN )
     # WASM: Static linking - don't define BUILD_KIWAY_DLL
     set_source_files_properties( pcbnew.cpp PROPERTIES
         COMPILE_DEFINITIONS     "COMPILING_DLL"

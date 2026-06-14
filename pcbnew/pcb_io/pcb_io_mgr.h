@@ -72,6 +72,7 @@ public:
         IPC2581,
         ODBPP,
         PADS,
+        PCBJAM_FP,              ///< pcbjam remote footprint library (WASM JS bridge).
         // add your type here.
 
         // etc.
