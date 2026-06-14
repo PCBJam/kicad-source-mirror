@@ -51,6 +51,7 @@
 #include <pcb_io/ipc2581/pcb_io_ipc2581.h>
 #include <pcb_io/odbpp/pcb_io_odbpp.h>
 #include <pcb_io/pads/pcb_io_pads.h>
+#include <pcb_io/pcbjam_fp/pcb_io_pcbjam_fp.h>
 #include <reporter.h>
 #include <libraries/library_table_parser.h>
 
@@ -377,4 +378,12 @@ static PCB_IO_MGR::REGISTER_PLUGIN registerPadsPlugin(
         PCB_IO_MGR::PADS,
         wxT( "PADS" ),
         []() -> PCB_IO* { return new PCB_IO_PADS(); } );
+
+// pcbjam remote footprint library (WASM JS bridge). The name string is the
+// fp-lib-table row "type" the boot-generated table uses to select this plugin
+// (PCB_IO_MGR::EnumFromStr is registry-driven, case-insensitive).
+static PCB_IO_MGR::REGISTER_PLUGIN registerPcbjamFpPlugin(
+        PCB_IO_MGR::PCBJAM_FP,
+        wxT( "PCBJAM_FP" ),
+        []() -> PCB_IO* { return new PCB_IO_PCBJAM_FP; } );
 // clang-format on
