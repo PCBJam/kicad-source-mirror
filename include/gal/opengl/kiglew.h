@@ -31,7 +31,44 @@
 // Pull in the configuration options for wxWidgets
 #include <wx/platform.h>
 
-#if defined( __unix__ ) and not defined( __APPLE__ )
+#if defined( __EMSCRIPTEN__ )
+
+    // WASM: the 3D viewer's renderer is legacy fixed-function OpenGL. Route it
+    // through Emscripten's desktop-GL emulation: <GL/gl.h> declares the
+    // fixed-function pipeline (glBegin/glMatrixMode/glLight*/glVertexPointer/...)
+    // and, with GL_GLEXT_PROTOTYPES, pulls <GL/glext.h> for the modern VBO/shader
+    // entry points the renderer also uses. The runtime is supplied by
+    // -sLEGACY_GL_EMULATION (see scripts/kicad/build-kicad-target.sh). The 2D GAL
+    // keeps its pure-GLES3 path in gal/webgl/kiglew.h; the two never share a TU.
+    #ifndef __glew_h__
+    #define __glew_h__   // keep Emscripten's bundled GL/glew.h out
+    #endif
+
+    #define GL_GLEXT_PROTOTYPES
+    #include <GL/gl.h>
+    #include <GL/glu.h>  // GLU tesselator stub (wasm/stubs/GL/glu.h, earcut-based)
+
+    // GLEW compatibility shims — the GL backend probes GLEW at init time.
+    #define GLEW_OK 0
+    #define GLEW_VERSION 1
+    #define GLEW_VERSION_1_2 1
+    #define GLEW_VERSION_1_3 1
+    #define GLEW_VERSION_1_4 1
+    #define GLEW_VERSION_1_5 1
+    #define GLEW_VERSION_2_0 1
+    #define GLEW_VERSION_2_1 1
+    #define GLEW_ARB_vertex_array_object 1
+    #define GLEW_ARB_vertex_buffer_object 1
+    #define GLEW_ARB_framebuffer_object 1
+    #define GLEW_EXT_framebuffer_object 1
+    #define GLEW_ARB_texture_non_power_of_two 1
+
+    inline int glewInit() { return GLEW_OK; }
+    inline const unsigned char* glewGetString( int ) { return (const unsigned char*) "WebGL"; }
+    inline const char* glewGetErrorString( int ) { return ""; }
+    inline int glewIsSupported( const char* ) { return 1; }
+
+#elif defined( __unix__ ) and not defined( __APPLE__ )
 
     #ifdef KICAD_USE_EGL
 
