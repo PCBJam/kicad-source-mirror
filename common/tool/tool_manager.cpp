@@ -25,7 +25,6 @@
  */
 
 #include <core/kicad_algo.h>
-#include <kicad_wasm_diag.h>
 #include <optional>
 #include <map>
 #include <stack>
@@ -858,16 +857,7 @@ bool TOOL_MANAGER::dispatchInternal( TOOL_EVENT& aEvent )
                     setActiveState( st );
                     st->idle = false;
                     st->initialEvent = aEvent;
-                    // [DIAG_TOOL] TEMPORARY debug logging: identify which tool's coroutine is
-                    // activated (and the event) so we can correlate the Chrome Asyncify-rewind
-                    // crash with a specific tool/scenario. Remove once the crash is fixed.
-                    KI_DIAG_COROUTINE( "[DIAG_TOOL] coroutine Call: tool='%s' event='%s'\n",
-                            st->theTool->GetName().c_str(),
-                            aEvent.Format().c_str() );
                     st->cofunc->Call( st->initialEvent );
-                    KI_DIAG_COROUTINE( "[DIAG_TOOL] coroutine Call returned: tool='%s' running=%d\n",
-                            st->theTool->GetName().c_str(),
-                            (int) st->cofunc->Running() );
                     handled = true;
 
                     if( !st->cofunc->Running() )
@@ -889,7 +879,6 @@ bool TOOL_MANAGER::dispatchInternal( TOOL_EVENT& aEvent )
     wxLogTrace( kicadTraceToolStack, wxS( "TOOL_MANAGER::dispatchInternal - %s handle event: %s" ),
                 ( handled ? wxS( "Did" ) : wxS( "Did not" ) ), aEvent.Format() );
 
-    if( handled ) { KI_DIAG_COROUTINE( "[DIAG_DISP] dispatchInternal returning handled=1\n" ); }
     return handled;
 }
 

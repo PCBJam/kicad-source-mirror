@@ -21,19 +21,6 @@
 #ifndef KICAD_API_UTILS_H
 #define KICAD_API_UTILS_H
 
-#include <kicommon.h>
-
-/**
- * Flag to enable debug output related to the IPC API and its plugin system
- *
- * Use "KICAD_API" to enable.
- *
- * @ingroup trace_env_vars
- */
-extern const KICOMMON_API wxChar* const traceApi;
-
-#ifdef KICAD_IPC_API
-
 #include <optional>
 #include <google/protobuf/any.pb.h>
 
@@ -50,6 +37,15 @@ class SHAPE_LINE_CHAIN;
 class STROKE_PARAMS;
 class TEXT_ATTRIBUTES;
 class KIID_PATH;
+
+/**
+ * Flag to enable debug output related to the IPC API and its plugin system
+ *
+ * Use "KICAD_API" to enable.
+ *
+ * @ingroup trace_env_vars
+ */
+extern const KICOMMON_API wxChar* const traceApi;
 
 namespace kiapi::common
 {
@@ -99,7 +95,5 @@ void PackTextAttributes( kiapi::common::types::TextAttributes& aOutput, const TE
 void UnpackTextAttributes( TEXT_ATTRIBUTES& aOutput, const kiapi::common::types::TextAttributes& aInput );
 
 } // namespace kiapi::common
-
-#endif // KICAD_IPC_API
 
 #endif //KICAD_API_UTILS_H
