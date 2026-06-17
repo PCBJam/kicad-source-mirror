@@ -56,12 +56,10 @@
 #include <properties/property.h>
 #include <properties/property_mgr.h>
 #include <wx/log.h>
-#ifdef KICAD_IPC_API
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/api_pcb_utils.h>
 #include <api/board/board_types.pb.h>
-#endif
 
 #include <memory>
 #include <macros.h>
@@ -182,7 +180,6 @@ std::optional<std::pair<ELECTRICAL_PINTYPE, bool>> parsePinType( const wxString&
 }
 
 
-#ifdef KICAD_IPC_API
 void PAD::Serialize( google::protobuf::Any &aContainer ) const
 {
     using namespace kiapi::board::types;
@@ -262,7 +259,6 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
 
     return true;
 }
-#endif // KICAD_IPC_API
 
 
 void PAD::ClearZoneLayerOverrides()

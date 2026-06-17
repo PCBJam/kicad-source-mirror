@@ -53,13 +53,11 @@
 #include <properties/property.h>
 #include <properties/property_mgr.h>
 
-#ifdef KICAD_IPC_API
 #include <google/protobuf/any.pb.h>
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/api_pcb_utils.h>
 #include <api/board/board_types.pb.h>
-#endif
 
 using KIGFX::PCB_PAINTER;
 using KIGFX::PCB_RENDER_SETTINGS;
@@ -402,7 +400,6 @@ int PCB_VIA::GetWidth( PCB_LAYER_ID aLayer ) const
 }
 
 
-#ifdef KICAD_IPC_API
 void PCB_TRACK::Serialize( google::protobuf::Any &aContainer ) const
 {
     kiapi::board::types::Track track;
@@ -550,7 +547,6 @@ bool PCB_VIA::Deserialize( const google::protobuf::Any &aContainer )
 
     return true;
 }
-#endif // KICAD_IPC_API
 
 
 bool PCB_TRACK::ApproxCollinear( const PCB_TRACK& aTrack )

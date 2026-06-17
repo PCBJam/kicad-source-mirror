@@ -22,12 +22,10 @@
 
 #include <convert_basic_shapes_to_polygon.h> // RECT_CHAMFER_POSITIONS
 #include "padstack.h"
-#ifdef KICAD_IPC_API
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/api_pcb_utils.h>
 #include <api/board/board_types.pb.h>
-#endif
 #include <layer_range.h>
 #include <macros.h>
 #include <magic_enum.hpp>
@@ -186,7 +184,6 @@ bool PADSTACK::operator==( const PADSTACK& aOther ) const
 }
 
 
-#ifdef KICAD_IPC_API
 bool PADSTACK::unpackCopperLayer( const kiapi::board::types::PadStackLayer& aProto )
 {
     using namespace kiapi::board::types;
@@ -838,7 +835,6 @@ void PADSTACK::Serialize( google::protobuf::Any& aContainer ) const
 
     aContainer.PackFrom( padstack );
 }
-#endif // KICAD_IPC_API
 
 
 void PADSTACK::SetSize( const VECTOR2I& aSize, PCB_LAYER_ID aLayer )

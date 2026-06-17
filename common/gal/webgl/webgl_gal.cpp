@@ -28,7 +28,6 @@
 
 #include <advanced_config.h>
 #include <build_version.h>
-#include <kicad_wasm_diag.h>
 #include <gal/webgl/webgl_gal.h>
 #include <gal/webgl/utils.h>
 #include <gal/definitions.h>
@@ -417,13 +416,9 @@ WEBGL_GAL::WEBGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIONS
         m_isContextLocked( false ),
         m_lockClientCookie( 0 )
 {
-    KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL ctor body entered (wxGLCanvas base built), mainCtx=%p\n",
-            (void*) m_glMainContext );
     if( m_glMainContext == nullptr )
     {
-        KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL ctor: CreateCtx(this) [first instance]\n" );
         m_glMainContext = Pgm().GetGLContextManager()->CreateCtx( this );
-        KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL ctor: CreateCtx returned %p\n", (void*) m_glMainContext );
 
         if( !m_glMainContext )
             throw std::runtime_error( "Could not create the main OpenGL context" );
@@ -432,7 +427,6 @@ WEBGL_GAL::WEBGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIONS
     }
     else
     {
-        KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL ctor: CreateCtx(this, shared) [later instance]\n" );
         m_glPrivContext = Pgm().GetGLContextManager()->CreateCtx( this, m_glMainContext );
 
         if( !m_glPrivContext )
@@ -645,7 +639,6 @@ VECTOR2D WEBGL_GAL::getScreenPixelSize() const
 
 void WEBGL_GAL::BeginDrawing()
 {
-    KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL::BeginDrawing enter isInit=%d\n", (int) m_isInitialized );
 #ifdef KICAD_GAL_PROFILE
     PROF_TIMER totalRealTime( "WEBGL_GAL::beginDrawing()", true );
 #endif /* KICAD_GAL_PROFILE */
@@ -659,9 +652,7 @@ void WEBGL_GAL::BeginDrawing()
 
     if( !m_isInitialized )
     {
-        KI_DIAG_GAL( "[DIAG_GAL] BeginDrawing -> init()\n" );
         init();
-        KI_DIAG_GAL( "[DIAG_GAL] BeginDrawing init() returned\n" );
     }
 
     // Set up the projection matrix (replacing legacy glMatrixMode/glOrtho)
@@ -890,9 +881,7 @@ void WEBGL_GAL::LockContext( int aClientCookie )
     m_isContextLocked = true;
     m_lockClientCookie = aClientCookie;
 
-    KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL::LockContext -> LockCtx ctx=%p\n", (void*) m_glPrivContext );
     Pgm().GetGLContextManager()->LockCtx( m_glPrivContext, this );
-    KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL::LockContext LockCtx returned\n" );
 }
 
 
@@ -2873,7 +2862,6 @@ unsigned int WEBGL_GAL::getNewGroupNumber()
 
 void WEBGL_GAL::init()
 {
-    KI_DIAG_GAL( "[DIAG_GAL] WEBGL_GAL::init enter (glewInit/shaders/VBOs)\n" );
 #ifndef KICAD_USE_EGL
     wxASSERT( IsShownOnScreen() );
 #endif // KICAD_USE_EGL

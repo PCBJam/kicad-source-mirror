@@ -29,9 +29,7 @@
 #include <board_design_settings.h>
 #include <i18n_utility.h>
 #include <pcb_painter.h>
-#ifdef KICAD_IPC_API
 #include <api/board/board_types.pb.h>
-#endif
 #include <string_utils.h>
 #include <board.h>
 #include <properties/property.h>
@@ -59,7 +57,6 @@ PCB_FIELD::PCB_FIELD( const PCB_TEXT& aText, FIELD_T aFieldId, const wxString& a
 }
 
 
-#ifdef KICAD_IPC_API
 void PCB_FIELD::Serialize( google::protobuf::Any &aContainer ) const
 {
     kiapi::board::types::Field field;
@@ -104,7 +101,6 @@ bool PCB_FIELD::Deserialize( const google::protobuf::Any &aContainer )
 
     return true;
 }
-#endif // KICAD_IPC_API
 
 
 wxString PCB_FIELD::GetName( bool aUseDefaultName ) const

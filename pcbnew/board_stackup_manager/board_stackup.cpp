@@ -29,12 +29,10 @@
 #include <io/kicad/kicad_io_utils.h>
 #include "stackup_predefined_prms.h"
 #include <richio.h>
-#ifdef KICAD_IPC_API
 #include <google/protobuf/any.pb.h>
 #include <api/board/board.pb.h>
 #include <api/api_enums.h>
 #include <api/api_utils.h>
-#endif
 
 
 bool DIELECTRIC_PRMS::operator==( const DIELECTRIC_PRMS& aOther ) const
@@ -422,7 +420,6 @@ bool BOARD_STACKUP::operator==( const BOARD_STACKUP& aOther ) const
 }
 
 
-#ifdef KICAD_IPC_API
 void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
 {
     using namespace kiapi::board;
@@ -523,7 +520,6 @@ bool BOARD_STACKUP::Deserialize( const google::protobuf::Any& aContainer )
     // Read-only for now
     return false;
 }
-#endif // KICAD_IPC_API
 
 
 void BOARD_STACKUP::RemoveAll()

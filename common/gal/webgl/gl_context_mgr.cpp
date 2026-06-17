@@ -25,15 +25,11 @@
 
 #include <gal/webgl/gl_context_mgr.h>
 #include <wx/debug.h>
-#include <kicad_wasm_diag.h>
 
 
 wxGLContext* GL_CONTEXT_MANAGER::CreateCtx( wxGLCanvas* aCanvas, const wxGLContext* aOther )
 {
-    KI_DIAG_GAL( "[DIAG_GAL] CreateCtx: before new wxGLContext (triggers getContext webgl2) canvas=%p other=%p\n",
-            (void*) aCanvas, (void*) aOther );
     wxGLContext* context = new wxGLContext( aCanvas, aOther );
-    KI_DIAG_GAL( "[DIAG_GAL] CreateCtx: new wxGLContext returned %p\n", (void*) context );
     wxCHECK( context, nullptr );
 
     if( !context->IsOK() )
@@ -97,10 +93,7 @@ void GL_CONTEXT_MANAGER::LockCtx( wxGLContext* aContext, wxGLCanvas* aCanvas )
 
 #endif // __WXGTK__
     {
-        KI_DIAG_GAL( "[DIAG_GAL] LockCtx about to SetCurrent canvas=%p (triggers getContext webgl2)\n",
-                (void*) canvas );
         canvas->SetCurrent( *aContext );
-        KI_DIAG_GAL( "[DIAG_GAL] LockCtx SetCurrent returned (GL context current)\n" );
     }
 
     m_glCtx = aContext;

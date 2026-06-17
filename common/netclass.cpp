@@ -27,11 +27,9 @@
 #include <netclass.h>
 #include <macros.h>
 #include <base_units.h>
-#ifdef KICAD_IPC_API
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/common/types/project_settings.pb.h>
-#endif
 
 // This will get mapped to "kicad_default" in the specctra_export.
 const char NETCLASS::Default[] = "Default";
@@ -135,7 +133,6 @@ bool NETCLASS::operator==( const NETCLASS& other ) const
 }
 
 
-#ifdef KICAD_IPC_API
 void NETCLASS::Serialize( google::protobuf::Any &aContainer ) const
 {
     using namespace kiapi::common;
@@ -270,19 +267,6 @@ bool NETCLASS::Deserialize( const google::protobuf::Any &aContainer )
 
     return true;
 }
-#else
-// Stub implementations when IPC API is disabled
-void NETCLASS::Serialize( google::protobuf::Any &aContainer ) const
-{
-    // IPC API not available
-}
-
-bool NETCLASS::Deserialize( const google::protobuf::Any &aContainer )
-{
-    // IPC API not available
-    return false;
-}
-#endif // KICAD_IPC_API
 
 
 const std::vector<NETCLASS*>& NETCLASS::GetConstituentNetclasses() const

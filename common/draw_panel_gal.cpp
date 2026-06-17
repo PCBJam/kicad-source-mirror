@@ -25,7 +25,6 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 #include <eda_draw_frame.h>
-#include <kicad_wasm_diag.h>
 #include <kiface_base.h>
 #include <macros.h>
 #include <scoped_set_reset.h>
@@ -266,8 +265,6 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
     if( m_drawing )
         return false;
 
-    KI_DIAG_GAL( "[DIAG_GAL] DoRePaint proceeding (passed init/visible/locked/drawing guards)\n" );
-
     m_lastRepaintStart = std::chrono::steady_clock::now();
 
     // Repaint the canvas, and fix scrollbar cursors
@@ -359,7 +356,6 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
         // the full lifetime inside the try block
         {
             cntCtx.Start();
-            KI_DIAG_GAL( "[DIAG_GAL] DoRePaint creating GAL_DRAWING_CONTEXT (->LockContext->BeginDrawing)\n" );
             KIGFX::GAL_DRAWING_CONTEXT ctx( m_gal );
             cntCtx.Stop();
 
@@ -534,9 +530,6 @@ void EDA_DRAW_PANEL_GAL::Refresh( bool aEraseBackground, const wxRect* aRect )
 
 void EDA_DRAW_PANEL_GAL::ForceRefresh()
 {
-    // [DIAG_GAL] TEMPORARY — bracket the first-paint path to locate the Chrome crash.
-    KI_DIAG_GAL( "[DIAG_GAL] ForceRefresh enter drawingEnabled=%d gal=%p isInit=%d\n",
-            (int) m_drawingEnabled, (void*) m_gal, ( m_gal ? (int) m_gal->IsInitialized() : -1 ) );
     if( !m_drawingEnabled )
     {
         if( m_gal && m_gal->IsInitialized() )
@@ -556,7 +549,6 @@ void EDA_DRAW_PANEL_GAL::ForceRefresh()
         }
     }
 
-    KI_DIAG_GAL( "[DIAG_GAL] ForceRefresh -> DoRePaint\n" );
     DoRePaint( false );
 }
 
@@ -641,9 +633,7 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
         {
 #ifdef __EMSCRIPTEN__
             // Use WebGL GAL for Emscripten builds (pure WebGL 2.0, no LEGACY_GL_EMULATION)
-            KI_DIAG_GAL( "[DIAG_GAL] SwitchBackend OPENGL: before new WEBGL_GAL\n" );
             new_gal = new KIGFX::WEBGL_GAL( GetVcSettings(), m_options, this, this, this );
-            KI_DIAG_GAL( "[DIAG_GAL] SwitchBackend OPENGL: WEBGL_GAL constructed=%p\n", (void*) new_gal );
 #else
             // Use OpenGL GAL for native builds
             wxString errormsg = KIGFX::OPENGL_GAL::CheckFeatures( m_options );
