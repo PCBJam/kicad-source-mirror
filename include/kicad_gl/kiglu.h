@@ -33,7 +33,7 @@
 // System GL headers (assumed to be loaded via wxGLCanvas or other dependencies)
 #ifdef __EMSCRIPTEN__
 // For WASM, use kiglew.h which provides GL with our stubs and wrappers
-#include <gal/opengl/kiglew.h>
+#include <gal/webgl/kiglew.h>
 #elif defined( __APPLE__ )
 #include <OpenGL/gl.h>
 #include <OpenGL/glu.h>
