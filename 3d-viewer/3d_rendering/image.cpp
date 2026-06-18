@@ -483,10 +483,8 @@ void IMAGE::EfxFilter( IMAGE* aInImg, IMAGE_FILTER aFilterType )
 
     size_t parallelThreadCount = std::max<size_t>( std::thread::hardware_concurrency(), 2 );
 
-    for( size_t ii = 0; ii < parallelThreadCount; ++ii )
+    auto filterWorker = [&]()
     {
-        std::thread t = std::thread( [&]()
-        {
             for( size_t iy = nextRow.fetch_add( 1 ); iy < m_height; iy = nextRow.fetch_add( 1 ) )
             {
                 for( size_t ix = 0; ix < m_width; ix++ )
@@ -514,13 +512,23 @@ void IMAGE::EfxFilter( IMAGE* aInImg, IMAGE_FILTER aFilterType )
             }
 
             threadsFinished++;
-        } );
+    };
 
+#ifdef __EMSCRIPTEN__
+    // WASM: detached threads + a main-thread sleep_for busy-wait deadlock under
+    // Asyncify; run the filter serially on the calling thread instead.
+    (void) parallelThreadCount;
+    filterWorker();
+#else
+    for( size_t ii = 0; ii < parallelThreadCount; ++ii )
+    {
+        std::thread t = std::thread( filterWorker );
         t.detach();
     }
 
     while( threadsFinished < parallelThreadCount )
         std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+#endif
 }
 
 
