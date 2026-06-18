@@ -287,6 +287,21 @@ void RENDER_3D_RAYTRACE_BASE::renderTracing( uint8_t* ptrPBO, REPORTER* aStatusR
     // blocks the browser main thread and deadlocks under Asyncify; processBlocks()
     // drains blocks up to the time limit on its own, so a single call is enough
     // (rendering stays progressive across frames via the render-state machine).
+    //
+    // TODO(wasm-multicore / asyncify-nesting): this path (and the post-process /
+    // preview passes below) is SINGLE-CORE. A multi-core version was built and verified
+    // at ~6-7x on 10 cores, but is PARKED:
+    //   * Naive fix (spawn workers + emscripten_sleep to yield instead of busy-waiting)
+    //     ABORTS the real 3D viewer with `Aborted(invalid state: 1)`: the viewer renders
+    //     inside the wx modal/event-pump, which is ALREADY mid-Asyncify-unwind, and a
+    //     second emscripten_sleep cannot nest on the same (already-unwinding) context.
+    //   * A persistent worker pool + busy-wait (no emscripten_sleep) avoided the abort and
+    //     worked, but it busy-waits the main thread; parked pending a cleaner approach.
+    //   * OPEN QUESTION: is a *nestable* yield possible here? This build ships
+    //     `emscripten_fiber_swap`, so fibers (or JSPI) may allow nested suspension —
+    //     needs research before re-landing.
+    //   * Repro + parked pool design: tests/apps/standalone/raytrace-threads/ +
+    //     tests/e2e/coroutine-raytrace.spec.ts; pool code is in `git -C kicad stash`.
     processBlocks();
 #else
     BS::multi_future<void> futures;
@@ -732,6 +747,7 @@ void RENDER_3D_RAYTRACE_BASE::postProcessShading( uint8_t* /* ptrPBO */, REPORTE
 #ifdef __EMSCRIPTEN__
         // WASM: detached threads + a main-thread sleep_for busy-wait deadlock under
         // Asyncify; run the shading serially on the calling thread instead.
+        // TODO(wasm-multicore): single-core — see renderTracing() (multi-core parked: Asyncify nesting).
         (void) parallelThreadCount;
         shadeWorker();
 #else
@@ -802,6 +818,7 @@ void RENDER_3D_RAYTRACE_BASE::postProcessBlurFinish( uint8_t* ptrPBO,
 #ifdef __EMSCRIPTEN__
         // WASM: detached threads + a main-thread sleep_for busy-wait deadlock under
         // Asyncify; run the blur/finish serially on the calling thread instead.
+        // TODO(wasm-multicore): single-core — see renderTracing() (multi-core parked: Asyncify nesting).
         (void) parallelThreadCount;
         blurWorker();
 #else
@@ -1422,6 +1439,7 @@ void RENDER_3D_RAYTRACE_BASE::renderPreview( uint8_t* ptrPBO )
 #ifdef __EMSCRIPTEN__
     // WASM: detached threads + a main-thread sleep_for busy-wait deadlock under
     // Asyncify; run the preview serially on the calling thread instead.
+    // TODO(wasm-multicore): single-core — see renderTracing() (multi-core parked: Asyncify nesting).
     (void) parallelThreadCount;
     previewWorker();
 #else
