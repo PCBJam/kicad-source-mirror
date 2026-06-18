@@ -33,7 +33,11 @@
 #include "../common_ogl/ogl_utils.h"
 #include "eda_3d_canvas.h"
 #include <eda_3d_viewer_frame.h>
+#ifdef __EMSCRIPTEN__
+#include <3d_rendering/raytracing/render_3d_raytrace_ram.h>
+#else
 #include <3d_rendering/raytracing/render_3d_raytrace_gl.h>
+#endif
 #include <3d_rendering/opengl/render_3d_opengl.h>
 #include <3d_viewer_id.h>
 #include <advanced_config.h>
@@ -125,16 +129,26 @@ EDA_3D_CANVAS::EDA_3D_CANVAS( wxWindow* aParent, const wxGLAttributes& aGLAttrib
 
     m_is_currently_painting.clear();
 
+#ifdef __EMSCRIPTEN__
+    // Match EDA_DRAW_PANEL_GAL (draw_panel_gal.cpp): a custom background style tells
+    // the wx DOM port this window paints its own surface, so it keeps the canvas
+    // region TRANSPARENT on the shared 2D #canvas instead of filling it with the
+    // frame's background colour. Without this the secondary 3D-viewer frame's grey
+    // background is painted over the region and occludes our WebGL canvas (the board
+    // renders into the GL buffer but is hidden behind #canvas).
+    SetBackgroundStyle( wxBG_STYLE_CUSTOM );
+#endif
+
 #ifndef __EMSCRIPTEN__
     m_3d_render_raytracing = new RENDER_3D_RAYTRACE_GL( this, m_boardAdapter, m_camera );
 #else
-    m_3d_render_raytracing = nullptr;  // Raytracing not supported in WASM
+    // WASM: the GL-free CPU raytracer renders into a RAM RGBA buffer that we blit
+    // to the canvas with a WebGL2 quad (no fixed-function GL / LEGACY_GL_EMULATION).
+    m_3d_render_raytracing = new RENDER_3D_RAYTRACE_RAM( m_boardAdapter, m_camera );
 #endif
     m_3d_render_opengl = new RENDER_3D_OPENGL( this, m_boardAdapter, m_camera );
 
-#ifndef __EMSCRIPTEN__
     wxASSERT( m_3d_render_raytracing != nullptr );
-#endif
     wxASSERT( m_3d_render_opengl != nullptr );
 
     auto busy_indicator_factory =
@@ -148,9 +162,16 @@ EDA_3D_CANVAS::EDA_3D_CANVAS( wxWindow* aParent, const wxGLAttributes& aGLAttrib
 #endif
     m_3d_render_opengl->SetBusyIndicatorFactory( busy_indicator_factory );
 
+#ifdef __EMSCRIPTEN__
+    // WASM has no fixed-function GL renderer; the CPU raytracer is the only engine.
+    // (m_boardAdapter.m_Cfg is still null here — the engine is pinned to RAYTRACING
+    // in DoRePaint where m_Cfg is valid.)
+    m_3d_render = m_3d_render_raytracing;
+#else
     // We always start with the opengl engine (raytracing is avoided due to very
     // long calculation time)
     m_3d_render = m_3d_render_opengl;
+#endif
 
     m_boardAdapter.ReloadColorSettings();
 
@@ -285,6 +306,10 @@ bool  EDA_3D_CANVAS::initializeOpenGL()
         if( tokenizer.HasMoreTokens() )
             tokenizer.GetNextToken().ToLong( &minor );
 
+#ifndef __EMSCRIPTEN__
+        // On WASM the raytracer is a GL-free CPU renderer and is the only 3D engine,
+        // so the desktop "GL too old for raytracing" downgrade must not run (WebGL
+        // reports "OpenGL ES 3.0", which would otherwise trip this and disable it).
         if( major < 2 || ( ( major == 2 ) && ( minor < 1 ) ) )
         {
             wxLogTrace( m_logTrace, wxT( "EDA_3D_CANVAS::%s OpenGL ray tracing not supported." ),
@@ -298,6 +323,7 @@ bool  EDA_3D_CANVAS::initializeOpenGL()
 
             m_opengl_supports_raytracing = false;
         }
+#endif
 
         if( ( major == 1 ) && ( minor < 5 ) )
         {
@@ -480,6 +506,13 @@ void EDA_3D_CANVAS::DoRePaint()
         return;
     }
 
+#ifdef __EMSCRIPTEN__
+    // WASM: the GL-free CPU raytracer is the only 3D engine. Pin it every frame so
+    // none of the desktop OpenGL fallbacks can switch us to the fixed-function
+    // renderer. (m_Cfg is valid here, unlike at construction time.)
+    m_3d_render = m_3d_render_raytracing;
+    m_boardAdapter.m_Cfg->m_Render.engine = RENDER_ENGINE::RAYTRACING;
+#else
     // Don't attempt to ray trace if OpenGL doesn't support it.
     if( !m_opengl_supports_raytracing )
     {
@@ -503,6 +536,7 @@ void EDA_3D_CANVAS::DoRePaint()
             m_3d_render = m_3d_render_opengl;
         }
     }
+#endif
 
     float curtime_delta_s = 0.0f;
 
@@ -570,6 +604,12 @@ void EDA_3D_CANVAS::DoRePaint()
             m_is_currently_painting.clear();
             return;
         }
+
+#ifdef __EMSCRIPTEN__
+        // The CPU raytracer just filled its RAM RGBA buffer; present it on the
+        // (otherwise empty) WebGL2 canvas via a textured fullscreen quad.
+        blitRaytracerImage();
+#endif
     }
 
     if( m_render_pivot )
@@ -631,6 +671,142 @@ void EDA_3D_CANVAS::DoRePaint()
 
     m_is_currently_painting.clear();
 }
+
+
+#ifdef __EMSCRIPTEN__
+static GLuint compileBlitShader( GLenum aType, const char* aSrc )
+{
+    GLuint sh = glCreateShader( aType );
+    glShaderSource( sh, 1, &aSrc, nullptr );
+    glCompileShader( sh );
+
+    GLint ok = GL_FALSE;
+    glGetShaderiv( sh, GL_COMPILE_STATUS, &ok );
+
+    if( !ok )
+    {
+        char log[512] = { 0 };
+        glGetShaderInfoLog( sh, sizeof( log ), nullptr, log );
+        wxLogError( wxT( "3D raytracer blit shader compile failed: %s" ), log );
+        glDeleteShader( sh );
+        return 0;
+    }
+
+    return sh;
+}
+
+
+void EDA_3D_CANVAS::blitRaytracerImage()
+{
+    uint8_t* buffer = m_3d_render_raytracing->GetBuffer();
+
+    if( !buffer )
+        return;
+
+    const wxSize bufSize = m_3d_render_raytracing->GetRealBufferSize();
+
+    if( bufSize.x <= 0 || bufSize.y <= 0 )
+        return;
+
+    // Lazily build the blit program + fullscreen-quad VAO (once per GL context).
+    if( m_rtBlitProgram == 0 )
+    {
+        const char* vtxSrc =
+                "#version 300 es\n"
+                "layout(location = 0) in vec2 a_pos;\n"
+                "out vec2 v_uv;\n"
+                "void main() {\n"
+                "    v_uv = a_pos * 0.5 + 0.5;\n"
+                "    gl_Position = vec4( a_pos, 0.0, 1.0 );\n"
+                "}\n";
+        const char* frgSrc =
+                "#version 300 es\n"
+                "precision mediump float;\n"
+                "in vec2 v_uv;\n"
+                "uniform sampler2D u_tex;\n"
+                "out vec4 o_color;\n"
+                "void main() {\n"
+                // Force opaque: the canvas is alpha=true/premultiplied, and the
+                // raytracer's background alpha is 0 — passing it through would
+                // composite the page (grey) through the canvas.
+                "    o_color = vec4( texture( u_tex, v_uv ).rgb, 1.0 );\n"
+                "}\n";
+
+        GLuint vs = compileBlitShader( GL_VERTEX_SHADER, vtxSrc );
+        GLuint fs = compileBlitShader( GL_FRAGMENT_SHADER, frgSrc );
+
+        if( vs == 0 || fs == 0 )
+            return;
+
+        GLuint prog = glCreateProgram();
+        glAttachShader( prog, vs );
+        glAttachShader( prog, fs );
+        glLinkProgram( prog );
+        glDeleteShader( vs );
+        glDeleteShader( fs );
+
+        GLint linked = GL_FALSE;
+        glGetProgramiv( prog, GL_LINK_STATUS, &linked );
+
+        if( !linked )
+        {
+            char log[512] = { 0 };
+            glGetProgramInfoLog( prog, sizeof( log ), nullptr, log );
+            wxLogError( wxT( "3D raytracer blit program link failed: %s" ), log );
+            glDeleteProgram( prog );
+            return;
+        }
+
+        m_rtBlitProgram = prog;
+        m_rtBlitTexLoc  = glGetUniformLocation( prog, "u_tex" );
+
+        // Two triangles covering the clip-space viewport; UVs derived in the VS.
+        static const float quad[] = { -1.f, -1.f,  1.f, -1.f, -1.f,  1.f,
+                                      -1.f,  1.f,  1.f, -1.f,  1.f,  1.f };
+
+        glGenVertexArrays( 1, &m_rtBlitVAO );
+        glBindVertexArray( m_rtBlitVAO );
+        glGenBuffers( 1, &m_rtBlitVBO );
+        glBindBuffer( GL_ARRAY_BUFFER, m_rtBlitVBO );
+        glBufferData( GL_ARRAY_BUFFER, sizeof( quad ), quad, GL_STATIC_DRAW );
+        glEnableVertexAttribArray( 0 );
+        glVertexAttribPointer( 0, 2, GL_FLOAT, GL_FALSE, 0, nullptr );
+        glBindVertexArray( 0 );
+
+        glGenTextures( 1, &m_rtBlitTexture );
+    }
+
+    // Upload the raytraced RGBA image (rows are bottom-up, matching GL textures).
+    glBindTexture( GL_TEXTURE_2D, m_rtBlitTexture );
+    glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+    glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, bufSize.x, bufSize.y, 0, GL_RGBA,
+                  GL_UNSIGNED_BYTE, buffer );
+
+    // Draw it across the whole canvas. Reset any GL state left bound by other
+    // rendering so the quad actually reaches the visible default framebuffer.
+    const wxSize clientSize = GetNativePixelSize();
+    glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+    glViewport( 0, 0, clientSize.x, clientSize.y );
+    glDisable( GL_DEPTH_TEST );
+    glDisable( GL_BLEND );
+    glDisable( GL_SCISSOR_TEST );
+    glDisable( GL_CULL_FACE );
+    glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+    glDepthMask( GL_TRUE );
+    glUseProgram( m_rtBlitProgram );
+    glActiveTexture( GL_TEXTURE0 );
+    glBindTexture( GL_TEXTURE_2D, m_rtBlitTexture );
+    glUniform1i( m_rtBlitTexLoc, 0 );
+    glBindVertexArray( m_rtBlitVAO );
+    glDrawArrays( GL_TRIANGLES, 0, 6 );
+    glBindVertexArray( 0 );
+    glUseProgram( 0 );
+}
+#endif // __EMSCRIPTEN__
 
 
 void EDA_3D_CANVAS::RenderToFrameBuffer( unsigned char* buffer, int width, int height )
@@ -1442,6 +1618,10 @@ bool EDA_3D_CANVAS::SetView3D( VIEW3D_TYPE aRequestedView )
 
 void EDA_3D_CANVAS::RenderEngineChanged()
 {
+#ifdef __EMSCRIPTEN__
+    // WASM only offers the CPU raytracer; ignore any OpenGL engine selection.
+    m_3d_render = m_3d_render_raytracing;
+#else
     if( EDA_3D_VIEWER_SETTINGS* cfg = GetAppSettings<EDA_3D_VIEWER_SETTINGS>( "3d_viewer" ) )
     {
         switch( cfg->m_Render.engine )
@@ -1451,6 +1631,7 @@ void EDA_3D_CANVAS::RenderEngineChanged()
         default:                        m_3d_render = nullptr;                break;
         }
     }
+#endif
 
     if( m_3d_render )
         m_3d_render->ReloadRequest();
