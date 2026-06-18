@@ -76,8 +76,13 @@ SCH_IO* SCH_IO_MGR::FindPlugin( SCH_FILE_T aFileType )
     {
     case SCH_KICAD:           return new SCH_IO_KICAD_SEXPR();
     case SCH_LEGACY:          return new SCH_IO_KICAD_LEGACY();
+#if !defined( KICAD_SYM_CONVERTER_WASM )
+    // The standalone .lib -> .kicad_sym converter only needs the two KiCad
+    // plugins above. Excluding the HTTP (curl) and PCBJAM (JS-bridge) plugins
+    // keeps it free of any JS host / network dependency.
     case SCH_HTTP:            return new SCH_IO_HTTP_LIB();
     case SCH_PCBJAM:          return new SCH_IO_PCBJAM_LIB();
+#endif
 #ifndef __EMSCRIPTEN__
     case SCH_ALTIUM:          return new SCH_IO_ALTIUM();
     case SCH_CADSTAR_ARCHIVE: return new SCH_IO_CADSTAR_ARCHIVE();

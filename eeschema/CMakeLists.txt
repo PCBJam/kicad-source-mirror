@@ -769,6 +769,48 @@ if( EMSCRIPTEN )
         )
 endif()
 
+# WASM: standalone legacy(.lib) -> S-expression(.kicad_sym) symbol-library
+# converter. A headless CLI that drives SCH_IO_MGR::ConvertLibrary from main()
+# (source lives in the wasm compatibility layer, not the KiCad tree). Gated so
+# normal builds are unaffected; a tree configured with KICAD_SYM_CONVERTER_WASM=ON
+# yields a converter-only SCH_IO factory (no pcbjam/http) — build it in its own
+# tree, separate from the editor build.
+option( KICAD_SYM_CONVERTER_WASM
+    "WASM only: also build the standalone .lib -> .kicad_sym converter (sym_convert)" OFF )
+
+if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
+    # Scope the factory guard to the one TU that holds it, so toggling the option
+    # only recompiles sch_io_mgr.cpp rather than the whole kiface object library.
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/sch_io/sch_io_mgr.cpp PROPERTIES
+        COMPILE_DEFINITIONS KICAD_SYM_CONVERTER_WASM )
+
+    add_executable( sym_convert
+        ${CMAKE_SOURCE_DIR}/../wasm/cli/sym_convert_main.cpp )
+
+    target_link_libraries( sym_convert
+        PRIVATE
+            ${EESCHEMA_KIFACE_LIBRARIES}
+        )
+    target_link_options( sym_convert PRIVATE
+        "LINKER:--allow-multiple-definition"
+        )
+
+    # Run as a Node CLI: real FS, auto-run main(), exit when done; no embind
+    # entry, no asyncify (the conversion path is synchronous). -g0 strips debug
+    # info so wasm-emscripten-finalize doesn't OOM on DWARF (the editor build
+    # defers finalize to the host for that reason; the converter has no such
+    # need). These override the browser-oriented values inherited from
+    # CMAKE_EXE_LINKER_FLAGS.
+    # --pre-js supplies the wxConfig JS hooks (getConfigEntryLength, …) that the
+    # web editor gets from wx.js, backed by an in-memory store (no browser here).
+    # -Oz runs wasm-opt -Oz at link: whole-module dead-code elimination strips the
+    # unreachable editor code (the converter only reaches SCH_IO_MGR::ConvertLibrary)
+    # plus size optimization. -g0 drops debug info (also keeps finalize from OOMing).
+    set_target_properties( sym_convert PROPERTIES
+        LINK_FLAGS "-Oz -g0 -sENVIRONMENT=node -sNODERAWFS=1 -sINVOKE_RUN=1 -sEXIT_RUNTIME=1 -sASYNCIFY=0 -sPTHREAD_POOL_SIZE=2 --pre-js ${CMAKE_SOURCE_DIR}/../wasm/cli/sym_convert_pre.js" )
+endif()
+
 if( MSVC )
     # Allow for MSVC to debug ngspice from the build directory
     add_custom_command( TARGET eeschema_kiface POST_BUILD
