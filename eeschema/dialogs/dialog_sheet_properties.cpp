@@ -90,9 +90,7 @@ DIALOG_SHEET_PROPERTIES::DIALOG_SHEET_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH_S
 
     m_pageNumberTextCtrl->SetMinSize( wxSize( minWidth, minSize.GetHeight() ) );
 
-#ifndef __EMSCRIPTEN__
     wxToolTip::Enable( true );
-#endif
     SetupStandardButtons();
 
     // Configure button logos
