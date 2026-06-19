@@ -520,14 +520,11 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aSkipPyInit, bool aIsUnitTest )
 
     // This sets the maximum tooltip display duration to 10s (up from 5) but only affects
     // Windows as other platforms display tooltips while the mouse is not moving
-#ifndef __EMSCRIPTEN__
-    // wxToolTip not available in wxUniversal/WASM
     if( !aHeadless )
     {
         wxToolTip::Enable( true );
         wxToolTip::SetAutoPop( 10000 );
     }
-#endif
 
     if( ADVANCED_CFG::GetCfg().m_UpdateUIEventInterval != 0 )
         wxUpdateUIEvent::SetUpdateInterval( ADVANCED_CFG::GetCfg().m_UpdateUIEventInterval );

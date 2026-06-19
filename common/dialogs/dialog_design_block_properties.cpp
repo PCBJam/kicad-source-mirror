@@ -41,9 +41,7 @@ DIALOG_DESIGN_BLOCK_PROPERTIES::DIALOG_DESIGN_BLOCK_PROPERTIES( wxWindow*     aP
 {
     m_textName->SetEditable( !aDisableName );
 
-#ifndef __EMSCRIPTEN__
     wxToolTip::Enable( true );
-#endif
     SetupStandardButtons();
 
     // Configure button logos

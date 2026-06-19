@@ -383,9 +383,7 @@ DIALOG_SYMBOL_PROPERTIES::DIALOG_SYMBOL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH
     m_tcLibraryID->SetFont( infoFont );
     m_tcLibraryID->SetBackgroundColour( KIPLATFORM::UI::GetDialogBGColour() );
 
-#ifndef __EMSCRIPTEN__
     wxToolTip::Enable( true );
-#endif
     SetupStandardButtons();
 
     // Configure button logos
