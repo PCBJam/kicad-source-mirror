@@ -106,14 +106,13 @@ add_executable( gerbview WIN32 MACOSX_BUNDLE
     ${GERBVIEW_RESOURCES}
     )
 
+set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+    COMPILE_DEFINITIONS "TOP_FRAME=FRAME_GERBER;BUILD_KIWAY_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static kiface linking - don't define BUILD_KIWAY_DLL
+    # WASM: static kiface linking — single_top.cpp must NOT export the kiway DLL symbols.
     set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
         COMPILE_DEFINITIONS "TOP_FRAME=FRAME_GERBER"
-        )
-else()
-    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
-        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_GERBER;BUILD_KIWAY_DLL"
         )
 endif()
 
@@ -195,16 +194,15 @@ if( MINGW )
     target_link_libraries( gerbview_kiface PUBLIC gerbview_navlib)
 endif()
 
+set_source_files_properties( gerbview.cpp PROPERTIES
+    # The KIFACE is in gerbview.cpp, export it:
+    COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static linking - don't define BUILD_KIWAY_DLL so KIFACE_GETTER
-    # is exported with its statically-linkable name.
+    # WASM: static kiface linking — gerbview.cpp must NOT export the kiway DLL symbols, so
+    # KIFACE_GETTER keeps its statically-linkable name.
     set_source_files_properties( gerbview.cpp PROPERTIES
         COMPILE_DEFINITIONS     "COMPILING_DLL"
-        )
-else()
-    set_source_files_properties( gerbview.cpp PROPERTIES
-        # The KIFACE is in gerbview.cpp, export it:
-        COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
         )
 endif()
 

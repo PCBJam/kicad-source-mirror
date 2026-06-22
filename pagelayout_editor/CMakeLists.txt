@@ -77,14 +77,13 @@ add_executable( pl_editor WIN32 MACOSX_BUNDLE
     ${PL_EDITOR_RESOURCES}
     )
 
+set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+    COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PL_EDITOR;PGM_DATA_FILE_EXT=\"kicad_wks\";BUILD_KIWAY_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static kiface linking - don't define BUILD_KIWAY_DLL
+    # WASM: static kiface linking — single_top.cpp must NOT export the kiway DLL symbols.
     set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
         COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PL_EDITOR;PGM_DATA_FILE_EXT=\"kicad_wks\""
-        )
-else()
-    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
-        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PL_EDITOR;PGM_DATA_FILE_EXT=\"kicad_wks\";BUILD_KIWAY_DLL"
         )
 endif()
 
@@ -124,15 +123,14 @@ set_target_properties( pl_editor_kiface PROPERTIES
     SUFFIX          ${KIFACE_SUFFIX}
     )
 
+set_source_files_properties( pl_editor.cpp PROPERTIES
+    # The KIFACE is in pl_editor.cpp, export it:
+    COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static linking - don't define BUILD_KIWAY_DLL
+    # WASM: static kiface linking — pl_editor.cpp must NOT export the kiway DLL symbols.
     set_source_files_properties( pl_editor.cpp PROPERTIES
         COMPILE_DEFINITIONS     "COMPILING_DLL"
-        )
-else()
-    set_source_files_properties( pl_editor.cpp PROPERTIES
-        # The KIFACE is in pl_editor.cpp, export it:
-        COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
         )
 endif()
 
