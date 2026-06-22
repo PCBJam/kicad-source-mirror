@@ -67,6 +67,11 @@ set( CMAKE_EXPORT_COMPILE_COMMANDS ON )
 set( KICAD_CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake" )
 set( CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${KICAD_CMAKE_MODULE_PATH}" )
 
+# Path to the WASM compatibility layer (stubs, kiplatform shims, cli sources). Defaulted to the
+# sibling ../wasm dir; override with -DKICAD_WASM_LAYER for out-of-tree layouts. Used in place of
+# hardcoded ${CMAKE_SOURCE_DIR}/../wasm reach-outs in the EMSCRIPTEN build branches below.
+set( KICAD_WASM_LAYER "${CMAKE_SOURCE_DIR}/../wasm" CACHE PATH "Path to the WASM compatibility layer" )
+
 include( ConfigurePlatform )
 
 if( WIN32 )

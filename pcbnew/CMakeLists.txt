@@ -792,10 +792,12 @@ add_subdirectory( pcb_io/ipc2581 )
 add_subdirectory( pcb_io/odbpp )
 add_subdirectory( pcb_io/pads )
 
+set( PCBNEW_IO_LIBRARIES pcad2kicadpcb allegro2pcbnew altium2pcbnew cadstar2pcbnew easyeda easyedapro fabmaster ipc2581 odbpp pads2pcbnew CACHE INTERNAL "")
 if( EMSCRIPTEN )
-    set( PCBNEW_IO_LIBRARIES pcad2kicadpcb cadstar2pcbnew easyeda easyedapro fabmaster ipc2581 odbpp pads2pcbnew CACHE INTERNAL "")
-else()
-    set( PCBNEW_IO_LIBRARIES pcad2kicadpcb allegro2pcbnew altium2pcbnew cadstar2pcbnew easyeda easyedapro fabmaster ipc2581 odbpp pads2pcbnew CACHE INTERNAL "")
+    # Altium/Allegro use std::basic_string<unsigned short>, which Emscripten's libc++ doesn't
+    # support; drop them from the (cross-directory) cache so cvpcb/qa consumers stay correct.
+    list( REMOVE_ITEM PCBNEW_IO_LIBRARIES altium2pcbnew allegro2pcbnew )
+    set( PCBNEW_IO_LIBRARIES "${PCBNEW_IO_LIBRARIES}" CACHE INTERNAL "" FORCE )
 endif()
 
 #a very small program launcher for pcbnew_kiface
@@ -803,17 +805,16 @@ add_executable( pcbnew WIN32 MACOSX_BUNDLE
     ${CMAKE_SOURCE_DIR}/common/single_top.cpp
     ${PCBNEW_RESOURCES}
     )
+set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp pcbnew.cpp PROPERTIES
+    COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\";BUILD_KIWAY_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static kiface linking - don't define BUILD_KIWAY_DLL
+    # WASM: static kiface linking — single_top.cpp must NOT export the kiway DLL symbols.
+    # (pcbnew.cpp's WASM defs are likewise re-set without BUILD_KIWAY_DLL after the kiface target.)
     set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
         COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\""
         )
-else()
-    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
-        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\";BUILD_KIWAY_DLL"
-        )
 endif()
-# pcbnew.cpp COMPILE_DEFINITIONS are set after pcbnew_kiface target
 
 if( NOT EMSCRIPTEN )
     # Native: minimal link, kiface loaded dynamically
@@ -842,15 +843,15 @@ endif()
 if( EMSCRIPTEN )
     # Stub sources for pcbnew scripting/plugin features
     set( PCBNEW_WASM_STUBS
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs/scripting_stub.cpp
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs/pcb_frame_stub.cpp
+        ${KICAD_WASM_LAYER}/stubs/scripting_stub.cpp
+        ${KICAD_WASM_LAYER}/stubs/pcb_frame_stub.cpp
     )
     # Add 3D viewer stubs when 3D viewer is disabled
     if( NOT KICAD_BUILD_3D_VIEWER_WASM )
         list( APPEND PCBNEW_WASM_STUBS
-            ${CMAKE_SOURCE_DIR}/../wasm/stubs/3d_viewer_stub.cpp
-            ${CMAKE_SOURCE_DIR}/../wasm/stubs/3d_scenegraph_stub.cpp
-            ${CMAKE_SOURCE_DIR}/../wasm/stubs/3d_canvas_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/3d_viewer_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/3d_scenegraph_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/3d_canvas_stub.cpp
         )
     endif()
     target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_WASM_STUBS} )
@@ -1004,15 +1005,14 @@ if( EMSCRIPTEN )
     add_dependencies( footprint_editor pcbnew_kiface )
 endif()
 
+set_source_files_properties( pcbnew.cpp PROPERTIES
+    # The KIFACE is in pcbnew.cpp, export it:
+    COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static linking - don't define BUILD_KIWAY_DLL
+    # WASM: static kiface linking — pcbnew.cpp must NOT export the kiway DLL symbols.
     set_source_files_properties( pcbnew.cpp PROPERTIES
         COMPILE_DEFINITIONS     "COMPILING_DLL"
-        )
-else()
-    set_source_files_properties( pcbnew.cpp PROPERTIES
-        # The KIFACE is in pcbnew.cpp, export it:
-        COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
         )
 endif()
 
@@ -1096,108 +1096,109 @@ if( KICAD_WIN32_INSTALL_PDBS )
     install(FILES $<TARGET_PDB_FILE:pcbnew_kiface> DESTINATION ${KICAD_KIFACE})
 endif()
 
-if( KICAD_SCRIPTING )
-    if( NOT APPLE )
-        install( FILES ${CMAKE_BINARY_DIR}/pcbnew/pcbnew.py DESTINATION ${PYTHON_DEST} )
-    else()
-        # put into bundle at build time, it is relocated at install
-        add_custom_target( ScriptingPcbnewPyCopy ALL
-            COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/pcbnew/pcbnew.py" "${PYTHON_DEST}/"
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/pcbnew.py
-            COMMENT "Copying pcbnew.py into ${PYTHON_DEST}"
-            )
-        add_dependencies( ScriptingPcbnewPyCopy ScriptingPythonDirectoryCreation )
-    endif()
-
-    # python plugins
-    install( DIRECTORY ${PROJECT_SOURCE_DIR}/pcbnew/python/plugins/
-        DESTINATION ${KICAD_DATA}/scripting/plugins
-        FILE_PERMISSIONS OWNER_EXECUTE OWNER_READ OWNER_WRITE GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
-    )
+if( NOT KICAD_SCRIPTING )
+    return()
 endif()
+
+if( NOT APPLE )
+    install( FILES ${CMAKE_BINARY_DIR}/pcbnew/pcbnew.py DESTINATION ${PYTHON_DEST} )
+else()
+    # put into bundle at build time, it is relocated at install
+    add_custom_target( ScriptingPcbnewPyCopy ALL
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/pcbnew/pcbnew.py" "${PYTHON_DEST}/"
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/pcbnew.py
+        COMMENT "Copying pcbnew.py into ${PYTHON_DEST}"
+        )
+    add_dependencies( ScriptingPcbnewPyCopy ScriptingPythonDirectoryCreation )
+endif()
+
+# python plugins
+install( DIRECTORY ${PROJECT_SOURCE_DIR}/pcbnew/python/plugins/
+    DESTINATION ${KICAD_DATA}/scripting/plugins
+    FILE_PERMISSIONS OWNER_EXECUTE OWNER_READ OWNER_WRITE GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
+)
 
 
 # Here is built the _pcbnew.{so,pyd} which is the native part of the pcbnew Python library
 # when Python is used from the command line.
-if( KICAD_SCRIPTING )
-    if( WIN32 )
-        install( FILES ${CMAKE_BINARY_DIR}/pcbnew/_pcbnew.pyd DESTINATION ${PYTHON_DEST} )
-        set( PYMOD_EXT "pyd" )
-    elseif( APPLE )
-         # put everything into bundle at build time, it is relocated at install
-        add_custom_target( ScriptingModulesPcbnewSoCopy ALL
-            COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/${KICMAKE_CFG_INTDIR}//pcbnew/_pcbnew.so" "${PYTHON_DEST}/"
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/_pcbnew.so
-            COMMENT "Copying _pcbnew.so into ${PYTHON_DEST}"
-            )
-        add_dependencies( ScriptingModulesPcbnewSoCopy ScriptingPythonDirectoryCreation )
-        set( PYMOD_EXT "so" )
-    else()
-        # Linux is the remaining platform, and all that has to be installed is the created symlink.
-        set( PYMOD_EXT "so" )
 
-        install( FILES ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT} DESTINATION ${PYTHON_DEST} )
-    endif()
+if( WIN32 )
+    install( FILES ${CMAKE_BINARY_DIR}/pcbnew/_pcbnew.pyd DESTINATION ${PYTHON_DEST} )
+    set( PYMOD_EXT "pyd" )
+elseif( APPLE )
+     # put everything into bundle at build time, it is relocated at install
+    add_custom_target( ScriptingModulesPcbnewSoCopy ALL
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/${KICMAKE_CFG_INTDIR}//pcbnew/_pcbnew.so" "${PYTHON_DEST}/"
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/_pcbnew.so
+        COMMENT "Copying _pcbnew.so into ${PYTHON_DEST}"
+        )
+    add_dependencies( ScriptingModulesPcbnewSoCopy ScriptingPythonDirectoryCreation )
+    set( PYMOD_EXT "so" )
+else()
+    # Linux is the remaining platform, and all that has to be installed is the created symlink.
+    set( PYMOD_EXT "so" )
 
-    if( APPLE )
-         add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
-            DEPENDS pcbnew_kiface
-            COMMAND ${CMAKE_COMMAND} -E copy  ${OSX_BUNDLE_BUILD_KIFACE_DIR}/_pcbnew.kiface _pcbnew.${PYMOD_EXT}
-            COMMENT "Creating python's pcbnew native module _pcbnew.${PYMOD_EXT} for command line use."
-            )
+    install( FILES ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT} DESTINATION ${PYTHON_DEST} )
+endif()
 
-         set( PYTHON_FILES ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT} )
-    elseif( WIN32 )
-        # For phase 1, copy _pcbnew.kiface to the python module.
-        add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
-            DEPENDS pcbnew_kiface
-            COMMAND ${CMAKE_COMMAND} -E copy _pcbnew${KIFACE_SUFFIX} _pcbnew.${PYMOD_EXT}
-            COMMENT "Creating python's pcbnew native module _pcbnew.${PYMOD_EXT} for command line use."
-            )
-
-        set( PYTHON_FILES ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT} )
-    else()
-        # For linux, just create a symlink in the build directory to ensure the unit tests can find the library
-        # We don't actually do anything with this symlink though, since we create the proper one for the install
-        # later.
-        add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
-            DEPENDS pcbnew_kiface
-            COMMAND ${CMAKE_COMMAND} -E create_symlink _pcbnew${KIFACE_SUFFIX} _pcbnew.${PYMOD_EXT}
-            COMMENT "Symlinking _pcbnew.${PYMOD_EXT} to _pcbnew${KIFACE_SUFFIX}."
-            )
-
-        if( IS_ABSOLUTE ${KICAD_KIFACE} )
-            file( RELATIVE_PATH PCBNEW_PYTHON_SYMLINK ${PYTHON_FULL_DEST} ${KICAD_KIFACE}/_pcbnew${KIFACE_SUFFIX} )
-        else()
-            file( RELATIVE_PATH PCBNEW_PYTHON_SYMLINK ${PYTHON_FULL_DEST} ${CMAKE_INSTALL_PREFIX}/${KICAD_KIFACE}/_pcbnew${KIFACE_SUFFIX} )
-        endif()
-
-        file( MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/python )
-
-        # This is the symlink we use in the installation directory, so it will not resolve in the build directory.
-        add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT}
-            DEPENDS pcbnew_kiface
-            COMMAND ln -sf "${PCBNEW_PYTHON_SYMLINK}" "${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT}"
-            COMMENT "Creating install symlink from _pcbnew.${PYMOD_EXT} to _pcbnew${KIFACE_SUFFIX}."
-            )
-
-        set( PYTHON_FILES
-             ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
-             ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT}
-            )
-    endif()
-
-    add_custom_target(
-        pcbnew_python_module ALL
-        DEPENDS ${PYTHON_FILES}
+if( APPLE )
+     add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
+        DEPENDS pcbnew_kiface
+        COMMAND ${CMAKE_COMMAND} -E copy  ${OSX_BUNDLE_BUILD_KIFACE_DIR}/_pcbnew.kiface _pcbnew.${PYMOD_EXT}
+        COMMENT "Creating python's pcbnew native module _pcbnew.${PYMOD_EXT} for command line use."
         )
 
+     set( PYTHON_FILES ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT} )
+elseif( WIN32 )
+    # For phase 1, copy _pcbnew.kiface to the python module.
+    add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
+        DEPENDS pcbnew_kiface
+        COMMAND ${CMAKE_COMMAND} -E copy _pcbnew${KIFACE_SUFFIX} _pcbnew.${PYMOD_EXT}
+        COMMENT "Creating python's pcbnew native module _pcbnew.${PYMOD_EXT} for command line use."
+        )
 
-    if( APPLE )
-        # If we don't have wxPython, then we must create the site-packages directory
-        add_custom_target( ScriptingPythonDirectoryCreation ALL
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${PYTHON_DEST}"
-            COMMENT "Creating Python library directory ${PYTHON_DEST}"
-            )
+    set( PYTHON_FILES ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT} )
+else()
+    # For linux, just create a symlink in the build directory to ensure the unit tests can find the library
+    # We don't actually do anything with this symlink though, since we create the proper one for the install
+    # later.
+    add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
+        DEPENDS pcbnew_kiface
+        COMMAND ${CMAKE_COMMAND} -E create_symlink _pcbnew${KIFACE_SUFFIX} _pcbnew.${PYMOD_EXT}
+        COMMENT "Symlinking _pcbnew.${PYMOD_EXT} to _pcbnew${KIFACE_SUFFIX}."
+        )
+
+    if( IS_ABSOLUTE ${KICAD_KIFACE} )
+        file( RELATIVE_PATH PCBNEW_PYTHON_SYMLINK ${PYTHON_FULL_DEST} ${KICAD_KIFACE}/_pcbnew${KIFACE_SUFFIX} )
+    else()
+        file( RELATIVE_PATH PCBNEW_PYTHON_SYMLINK ${PYTHON_FULL_DEST} ${CMAKE_INSTALL_PREFIX}/${KICAD_KIFACE}/_pcbnew${KIFACE_SUFFIX} )
     endif()
-endif() # KICAD_SCRIPTING
+
+    file( MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/python )
+
+    # This is the symlink we use in the installation directory, so it will not resolve in the build directory.
+    add_custom_command( OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT}
+        DEPENDS pcbnew_kiface
+        COMMAND ln -sf "${PCBNEW_PYTHON_SYMLINK}" "${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT}"
+        COMMENT "Creating install symlink from _pcbnew.${PYMOD_EXT} to _pcbnew${KIFACE_SUFFIX}."
+        )
+
+    set( PYTHON_FILES
+         ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/_pcbnew.${PYMOD_EXT}
+         ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT}
+        )
+endif()
+
+add_custom_target(
+    pcbnew_python_module ALL
+    DEPENDS ${PYTHON_FILES}
+    )
+
+
+if( APPLE )
+    # If we don't have wxPython, then we must create the site-packages directory
+    add_custom_target( ScriptingPythonDirectoryCreation ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PYTHON_DEST}"
+        COMMENT "Creating Python library directory ${PYTHON_DEST}"
+        )
+endif()

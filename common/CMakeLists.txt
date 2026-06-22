@@ -356,8 +356,8 @@ if( KICAD_IPC_API )
     else()
         # WASM: Add stubs for API server and plugin manager
         list( APPEND KICOMMON_SRCS
-            ${CMAKE_SOURCE_DIR}/../wasm/stubs/api_plugin_stub.cpp
-            ${CMAKE_SOURCE_DIR}/../wasm/stubs/python_manager_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/api_plugin_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/python_manager_stub.cpp
         )
     endif()
 endif()
@@ -365,7 +365,7 @@ endif()
 # WASM: Python manager is used by panel_plugin_settings even without IPC API
 if( EMSCRIPTEN AND NOT KICAD_IPC_API )
     list( APPEND KICOMMON_SRCS
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs/python_manager_stub.cpp
+        ${KICAD_WASM_LAYER}/stubs/python_manager_stub.cpp
     )
 endif()
 

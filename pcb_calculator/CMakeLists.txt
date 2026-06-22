@@ -116,115 +116,115 @@ if( EMSCRIPTEN )
         "LINKER:--allow-multiple-definition"
         $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=pcb_calculator.map>
         )
-else()
-    add_executable( pcb_calculator WIN32 MACOSX_BUNDLE
-        ${CMAKE_SOURCE_DIR}/common/single_top.cpp
-        ${PCB_CALCULATOR_RESOURCES}
-        )
-
-    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
-        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_CALC;BUILD_KIWAY_DLL"
-        )
-    target_link_libraries( pcb_calculator
-        kicommon
-        ${wxWidgets_LIBRARIES}
-        )
-
-    target_link_options( pcb_calculator PRIVATE
-        $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=pcb_calculator.map>
-        )
-
-    # the main pcb_calculator program, in DSO form.
-    add_library( pcb_calculator_kiface MODULE
-        pcb_calculator.cpp
-        ${PCB_CALCULATOR_SRCS}
-        )
-
-    set_target_properties( pcb_calculator_kiface PROPERTIES
-        OUTPUT_NAME     pcb_calculator
-        PREFIX          ${KIFACE_PREFIX}
-        SUFFIX          ${KIFACE_SUFFIX}
-        )
-    target_link_libraries( pcb_calculator_kiface
-        common
-        markdown_lib
-        ${wxWidgets_LIBRARIES}
-        )
-    set_source_files_properties( pcb_calculator.cpp PROPERTIES
-        # The KIFACE is in pcb_calculator.cpp, export it:
-        COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
-        )
-
-    target_link_options( pcb_calculator_kiface PRIVATE
-        $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=_pcb_calculator.kiface.map>
-        )
-
-    # if building pcb_calculator, then also build pcb_calculator_kiface if out of date.
-    add_dependencies( pcb_calculator pcb_calculator_kiface )
 endif()
 
-# these 2 binaries are a matched set, keep them together
-# WASM build has no kiface MODULE and no install step; skip on EMSCRIPTEN.
+# Native: a launcher executable + the pcb_calculator_kiface MODULE (loaded dynamically).
 if( NOT EMSCRIPTEN )
-    if( APPLE )
-        set_target_properties( pcb_calculator PROPERTIES
-            MACOSX_BUNDLE_INFO_PLIST ${PROJECT_BINARY_DIR}/pcb_calculator/Info.plist
+add_executable( pcb_calculator WIN32 MACOSX_BUNDLE
+    ${CMAKE_SOURCE_DIR}/common/single_top.cpp
+    ${PCB_CALCULATOR_RESOURCES}
+    )
+
+set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+    COMPILE_DEFINITIONS "TOP_FRAME=FRAME_CALC;BUILD_KIWAY_DLL"
+    )
+target_link_libraries( pcb_calculator
+    kicommon
+    ${wxWidgets_LIBRARIES}
+    )
+
+target_link_options( pcb_calculator PRIVATE
+    $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=pcb_calculator.map>
+    )
+
+# the main pcb_calculator program, in DSO form.
+add_library( pcb_calculator_kiface MODULE
+    pcb_calculator.cpp
+    ${PCB_CALCULATOR_SRCS}
+    )
+
+set_target_properties( pcb_calculator_kiface PROPERTIES
+    OUTPUT_NAME     pcb_calculator
+    PREFIX          ${KIFACE_PREFIX}
+    SUFFIX          ${KIFACE_SUFFIX}
+    )
+target_link_libraries( pcb_calculator_kiface
+    common
+    markdown_lib
+    ${wxWidgets_LIBRARIES}
+    )
+set_source_files_properties( pcb_calculator.cpp PROPERTIES
+    # The KIFACE is in pcb_calculator.cpp, export it:
+    COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
+    )
+
+target_link_options( pcb_calculator_kiface PRIVATE
+    $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=_pcb_calculator.kiface.map>
+    )
+
+# if building pcb_calculator, then also build pcb_calculator_kiface if out of date.
+add_dependencies( pcb_calculator pcb_calculator_kiface )
+
+# these 2 binaries are a matched set, keep them together
+if( APPLE )
+    set_target_properties( pcb_calculator PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST ${PROJECT_BINARY_DIR}/pcb_calculator/Info.plist
+        )
+
+    # puts binaries into the *.app bundle while linking
+    set_target_properties( pcb_calculator_kiface PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${OSX_BUNDLE_BUILD_KIFACE_DIR}
+        )
+
+    set_target_properties( pcb_calculator PROPERTIES INSTALL_RPATH
+            "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
+    set_target_properties( pcb_calculator_kiface PROPERTIES INSTALL_RPATH
+            "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
+    set_target_properties( pcb_calculator_kiface PROPERTIES BUILD_WITH_INSTALL_RPATH 1 )
+
+    # put individual bundle outside of main bundle as a first step
+    # will be pulled into the main bundle when creating main bundle
+    install( TARGETS pcb_calculator
+        DESTINATION ${KICAD_BIN}
+        COMPONENT binary
+        )
+
+    install( CODE "
+        set( KICAD_CMAKE_MODULE_PATH \"${KICAD_CMAKE_MODULE_PATH}\" )
+        set( KICAD_BIN \"${KICAD_BIN}\" )
+        set( OSX_BUNDLE_INSTALL_BIN_DIR \"${OSX_BUNDLE_INSTALL_BIN_DIR}\" )
+        set( OSX_BUNDLE_INSTALL_LIB_DIR \"${OSX_BUNDLE_INSTALL_LIB_DIR}\" )
+    " )
+
+    install( CODE [[
+        include( ${KICAD_CMAKE_MODULE_PATH}/InstallSteps/InstallMacOS.cmake )
+
+        # Install any dependencies (this will generally duplicate kicad.app but we can't be sure)
+        install_runtime_deps( "${KICAD_BIN}/pcb_calculator.app/Contents/MacOS/pcb_calculator"
+            ""
+            ""
             )
-
-        # puts binaries into the *.app bundle while linking
-        set_target_properties( pcb_calculator_kiface PROPERTIES
-            LIBRARY_OUTPUT_DIRECTORY ${OSX_BUNDLE_BUILD_KIFACE_DIR}
-            )
-
-        set_target_properties( pcb_calculator PROPERTIES INSTALL_RPATH
-                "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
-        set_target_properties( pcb_calculator_kiface PROPERTIES INSTALL_RPATH
-                "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
-        set_target_properties( pcb_calculator_kiface PROPERTIES BUILD_WITH_INSTALL_RPATH 1 )
-
-        # put individual bundle outside of main bundle as a first step
-        # will be pulled into the main bundle when creating main bundle
-        install( TARGETS pcb_calculator
-            DESTINATION ${KICAD_BIN}
-            COMPONENT binary
-            )
-
-        install( CODE "
-            set( KICAD_CMAKE_MODULE_PATH \"${KICAD_CMAKE_MODULE_PATH}\" )
-            set( KICAD_BIN \"${KICAD_BIN}\" )
-            set( OSX_BUNDLE_INSTALL_BIN_DIR \"${OSX_BUNDLE_INSTALL_BIN_DIR}\" )
-            set( OSX_BUNDLE_INSTALL_LIB_DIR \"${OSX_BUNDLE_INSTALL_LIB_DIR}\" )
-        " )
-
-        install( CODE [[
-            include( ${KICAD_CMAKE_MODULE_PATH}/InstallSteps/InstallMacOS.cmake )
-
-            # Install any dependencies (this will generally duplicate kicad.app but we can't be sure)
-            install_runtime_deps( "${KICAD_BIN}/pcb_calculator.app/Contents/MacOS/pcb_calculator"
-                ""
-                ""
-                )
-        ]] )
-    else()
-        if( MSVC )
-            target_sources( pcb_calculator_kiface PRIVATE ${CMAKE_SOURCE_DIR}/resources/msw/pcb_calculator-dll.rc  )
-        endif()
-
-        install( TARGETS pcb_calculator
-            DESTINATION ${KICAD_BIN}
-            COMPONENT binary
-            )
-        install( TARGETS pcb_calculator_kiface
-            DESTINATION ${KICAD_KIFACE}
-            COMPONENT binary
-            )
+    ]] )
+else()
+    if( MSVC )
+        target_sources( pcb_calculator_kiface PRIVATE ${CMAKE_SOURCE_DIR}/resources/msw/pcb_calculator-dll.rc  )
     endif()
 
-    if( KICAD_WIN32_INSTALL_PDBS )
-        # Get the PDBs to copy over for MSVC
-        install(FILES $<TARGET_PDB_FILE:pcb_calculator> DESTINATION ${KICAD_BIN})
-        install(FILES $<TARGET_PDB_FILE:pcb_calculator_kiface> DESTINATION ${KICAD_KIFACE})
-    endif()
+    install( TARGETS pcb_calculator
+        DESTINATION ${KICAD_BIN}
+        COMPONENT binary
+        )
+    install( TARGETS pcb_calculator_kiface
+        DESTINATION ${KICAD_KIFACE}
+        COMPONENT binary
+        )
+endif()
+
+if( KICAD_WIN32_INSTALL_PDBS )
+    # Get the PDBs to copy over for MSVC
+    install(FILES $<TARGET_PDB_FILE:pcb_calculator> DESTINATION ${KICAD_BIN})
+    install(FILES $<TARGET_PDB_FILE:pcb_calculator_kiface> DESTINATION ${KICAD_KIFACE})
+endif()
 endif()
 
 # auto-generate pcb_calculator_datafile.h and pcb_calculator_datafile_keywords.cpp
