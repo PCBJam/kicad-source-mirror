@@ -129,10 +129,8 @@ DIALOG_BOARD_REANNOTATE::DIALOG_BOARD_REANNOTATE( PCB_EDIT_FRAME* aParentFrame )
     else
         m_GridChoice->SetSelection( 0 );
 
-#if wxUSE_TOOLTIPS
     m_ExcludeList->SetToolTip( m_ExcludeListText->GetToolTipText() );
     m_GridChoice->SetToolTip( m_SortGridText->GetToolTipText() );
-#endif
 
     m_MessageWindow->SetFileName( Prj().GetProjectPath() + wxT( "report.txt" ) );
 
