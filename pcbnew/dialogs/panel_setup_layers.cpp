@@ -801,7 +801,7 @@ bool PANEL_SETUP_LAYERS::transferDataFromWindow()
         {
             LAYER_T t;
 
-            switch( getChoice( layer )->GetSelection() )
+            switch( getChoice( layer )->GetCurrentSelection() )
             {
             case 0:  t = LT_SIGNAL;    break;
             case 1:  t = LT_POWER;     break;
@@ -820,7 +820,7 @@ bool PANEL_SETUP_LAYERS::transferDataFromWindow()
         {
             LAYER_T t;
 
-            switch( getChoice( layer )->GetSelection() )
+            switch( getChoice( layer )->GetCurrentSelection() )
             {
             case 0:  t = LT_AUX;       break;
             case 1:  t = LT_FRONT;     break;
