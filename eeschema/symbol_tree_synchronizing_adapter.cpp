@@ -25,9 +25,13 @@
 
 #include "symbol_tree_synchronizing_adapter.h"
 
+#include <memory>
+#include <vector>
+
 #include <wx/settings.h>
 
 #include <core/throttle.h>
+#include <eda_pattern_match.h>
 #include <pgm_base.h>
 #include <project/project_file.h>
 #include <lib_symbol_library_manager.h>
@@ -69,6 +73,36 @@ bool SYMBOL_TREE_SYNCHRONIZING_ADAPTER::IsContainer( const wxDataViewItem& aItem
 {
     const LIB_TREE_NODE* node = ToNode( aItem );
     return node ? node->m_Type == LIB_TREE_NODE::TYPE::LIBRARY : true;
+}
+
+
+void SYMBOL_TREE_SYNCHRONIZING_ADAPTER::OnExpanding( const wxDataViewItem& aItem )
+{
+    LIB_TREE_NODE* node = ToNode( aItem );
+
+    if( !node || node->m_Type != LIB_TREE_NODE::TYPE::LIBRARY )
+        return;
+
+    // Each library's symbols are enumerated once, on its first expand.
+    if( m_populatedLibs.count( node->m_Name ) )
+        return;
+
+    LIB_TREE_NODE_LIBRARY& libNode = static_cast<LIB_TREE_NODE_LIBRARY&>( *node );
+
+    for( LIB_SYMBOL* symbol : m_libMgr->EnumerateSymbols( libNode.m_Name ) )
+        libNode.AddItem( symbol );
+
+    libNode.AssignIntrinsicRanks( m_shownColumns );
+    m_libHashes[libNode.m_Name] = m_libMgr->GetLibraryHash( libNode.m_Name );
+    m_populatedLibs.insert( libNode.m_Name );
+
+    // Score the freshly-added children so GetChildren() — which hides nodes whose
+    // m_Score is 0 — returns them. In the normal browse-and-expand flow there's no
+    // active search term, so empty matchers give every item a positive score; the
+    // adapter's filter (e.g. power-symbols-only) is still applied. The control
+    // builds this node's child rows immediately after this hook returns.
+    std::vector<std::unique_ptr<EDA_COMBINED_MATCHER>> noMatchers;
+    libNode.UpdateScore( noMatchers, GetFilter() );
 }
 
 
@@ -150,9 +184,14 @@ void SYMBOL_TREE_SYNCHRONIZING_ADAPTER::Sync( const wxString& aForceRefresh,
             bool pinned = alg::contains( cfg->m_Session.pinned_symbol_libs, libName )
                             || alg::contains( project.m_PinnedSymbolLibs, libName );
 
-            LIB_TREE_NODE_LIBRARY& lib_node = DoAddLibraryNode( libName, ( *optRow )->Description(), pinned );
+            DoAddLibraryNode( libName, ( *optRow )->Description(), pinned );
 
-            updateLibrary( lib_node );
+            // Lazy load: register the library node so its name shows immediately
+            // with a "+" expander (IsContainer() is always true for libraries),
+            // but defer enumerating its symbols until the user expands it (see
+            // OnExpanding()). Record its hash so it isn't treated as "new" again;
+            // GetLibraryHash() is cheap (no enumeration) for an unbuffered library.
+            m_libHashes[libName] = m_libMgr->GetLibraryHash( libName );
         }
     }
 
@@ -176,6 +215,13 @@ int SYMBOL_TREE_SYNCHRONIZING_ADAPTER::GetLibrariesCount() const
 
 void SYMBOL_TREE_SYNCHRONIZING_ADAPTER::updateLibrary( LIB_TREE_NODE_LIBRARY& aLibNode )
 {
+    // Libraries are populated lazily on first expand (see OnExpanding()). Until a
+    // library has been expanded it is an empty node, so there's nothing to update
+    // here — and enumerating it would defeat lazy loading (for network/CDN libs
+    // it would fetch the whole library on every Sync).
+    if( !m_populatedLibs.count( aLibNode.m_Name ) )
+        return;
+
     auto hashIt = m_libHashes.find( aLibNode.m_Name );
 
     if( hashIt == m_libHashes.end() )
