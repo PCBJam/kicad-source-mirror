@@ -61,49 +61,69 @@ set( EESCHEMA_SCH_IO
     # HTTP IO plugin
     sch_io/http_lib/sch_io_http_lib.cpp
 
-    # pcbjam remote library plugin (JS bridge; only functional on WASM)
+    # Database IO plugin
+    sch_io/database/sch_io_database.cpp
+
+    # gEDA IO plugin
+    sch_io/geda/sch_io_geda.cpp
+
+    # Eagle IO plugin
+    sch_io/eagle/sch_io_eagle.cpp
+
+    # Altium IO plugin
+    sch_io/altium/altium_parser_sch.cpp
+    sch_io/altium/sch_io_altium.cpp
+
+    # Cadstar IO plugin
+    sch_io/cadstar/cadstar_sch_archive_loader.cpp
+    sch_io/cadstar/cadstar_sch_archive_parser.cpp
+    sch_io/cadstar/sch_io_cadstar_archive.cpp
+
+    # LTSpice IO plugin
+    sch_io/ltspice/ltspice_schematic.cpp
+    sch_io/ltspice/sch_io_ltspice.cpp
+    sch_io/ltspice/sch_io_ltspice_parser.cpp
+
+    # EasyEDA IO plugin
+    sch_io/easyeda/sch_easyeda_parser.cpp
+    sch_io/easyeda/sch_io_easyeda.cpp
+
+    # EasyEDA Pro IO plugin
+    sch_io/easyedapro/sch_easyedapro_parser.cpp
+    sch_io/easyedapro/sch_io_easyedapro.cpp
+
+    # PADS Logic IO plugin
+    sch_io/pads/sch_io_pads.cpp
+    sch_io/pads/pads_sch_parser.cpp
+    sch_io/pads/pads_sch_symbol_builder.cpp
+    sch_io/pads/pads_sch_schematic_builder.cpp
+
+    # pcbjam remote library plugin (JS bridge; only functional on WASM) — fork addition
     sch_io/pcbjam_lib/sch_io_pcbjam_lib.cpp
     )
 
-# Third-party importers and database plugin are not built for WASM:
-# - Database needs nanodbc/ODBC (common/database/database_connection.cpp
-#   is also gated on NOT EMSCRIPTEN in common/CMakeLists.txt).
-# - Altium pulls in pcbnew/pcb_io/altium common code which pcbnew itself
-#   excludes for WASM (third-party uses std::basic_string<unsigned short>
-#   that the current Emscripten libc++ rejects).
-# - Eagle/Cadstar/LTspice/EasyEDA are cross-tool importers we don't need
-#   for the MVP and they bring transitive incompatible dependencies in.
-# sch_io_mgr.cpp's factory cases are guarded with __EMSCRIPTEN__ to match.
-if( NOT EMSCRIPTEN )
-    list( APPEND EESCHEMA_SCH_IO
-        # Database IO plugin
+# Third-party importers and the database plugin are not built for WASM (sch_io_mgr.cpp's
+# factory cases are guarded with __EMSCRIPTEN__ to match):
+# - Database needs nanodbc/ODBC (also gated NOT EMSCRIPTEN in common/CMakeLists.txt).
+# - Altium pulls in pcbnew/pcb_io/altium common code that uses
+#   std::basic_string<unsigned short>, which the current Emscripten libc++ rejects.
+# - Eagle/Cadstar/LTspice/EasyEDA are cross-tool importers not needed for the MVP and
+#   they bring transitive incompatible dependencies in.
+if( EMSCRIPTEN )
+    list( REMOVE_ITEM EESCHEMA_SCH_IO
         sch_io/database/sch_io_database.cpp
-
-        # gEDA IO plugin
         sch_io/geda/sch_io_geda.cpp
-
-        # Eagle IO plugin
         sch_io/eagle/sch_io_eagle.cpp
-
-        # Altium IO plugin
         sch_io/altium/altium_parser_sch.cpp
         sch_io/altium/sch_io_altium.cpp
-
-        # Cadstar IO plugin
         sch_io/cadstar/cadstar_sch_archive_loader.cpp
         sch_io/cadstar/cadstar_sch_archive_parser.cpp
         sch_io/cadstar/sch_io_cadstar_archive.cpp
-
-        # LTSpice IO plugin
         sch_io/ltspice/ltspice_schematic.cpp
         sch_io/ltspice/sch_io_ltspice.cpp
         sch_io/ltspice/sch_io_ltspice_parser.cpp
-
-        # EasyEDA IO plugin
         sch_io/easyeda/sch_easyeda_parser.cpp
         sch_io/easyeda/sch_io_easyeda.cpp
-
-        # EasyEDA Pro IO plugin
         sch_io/easyedapro/sch_easyedapro_parser.cpp
         sch_io/easyedapro/sch_io_easyedapro.cpp
 
@@ -320,7 +340,7 @@ if( EMSCRIPTEN )
         sim/sim_model_ngspice_data_hsim.cpp
     )
     list( APPEND EESCHEMA_SIM_SRCS
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs/eeschema_ngspice_data_stubs.cpp
+        ${KICAD_WASM_LAYER}/stubs/eeschema_ngspice_data_stubs.cpp
     )
 endif()
 
@@ -613,14 +633,13 @@ add_executable( eeschema WIN32 MACOSX_BUNDLE
     ${EESCHEMA_RESOURCES}
     )
 
+set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+    COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\";BUILD_KIWAY_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static kiface linking - don't define BUILD_KIWAY_DLL
+    # WASM: static kiface linking — single_top.cpp must NOT export the kiway DLL symbols.
     set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
         COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\""
-        )
-else()
-    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
-        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\";BUILD_KIWAY_DLL"
         )
 endif()
 
@@ -646,7 +665,7 @@ add_library( eeschema_kiface_objects OBJECT
 if( EMSCRIPTEN )
     target_sources( eeschema_kiface_objects PRIVATE
         eeschema.cpp
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs/eeschema_frame_stub.cpp
+        ${KICAD_WASM_LAYER}/stubs/eeschema_frame_stub.cpp
     )
 endif()
 
@@ -786,7 +805,7 @@ if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
         COMPILE_DEFINITIONS KICAD_SYM_CONVERTER_WASM )
 
     add_executable( sym_convert
-        ${CMAKE_SOURCE_DIR}/../wasm/cli/sym_convert_main.cpp )
+        ${KICAD_WASM_LAYER}/cli/sym_convert_main.cpp )
 
     target_link_libraries( sym_convert
         PRIVATE
@@ -808,7 +827,7 @@ if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
     # unreachable editor code (the converter only reaches SCH_IO_MGR::ConvertLibrary)
     # plus size optimization. -g0 drops debug info (also keeps finalize from OOMing).
     set_target_properties( sym_convert PROPERTIES
-        LINK_FLAGS "-Oz -g0 -sENVIRONMENT=node -sNODERAWFS=1 -sINVOKE_RUN=1 -sEXIT_RUNTIME=1 -sASYNCIFY=0 -sPTHREAD_POOL_SIZE=2 --pre-js ${CMAKE_SOURCE_DIR}/../wasm/cli/sym_convert_pre.js" )
+        LINK_FLAGS "-Oz -g0 -sENVIRONMENT=node -sNODERAWFS=1 -sINVOKE_RUN=1 -sEXIT_RUNTIME=1 -sASYNCIFY=0 -sPTHREAD_POOL_SIZE=2 --pre-js ${KICAD_WASM_LAYER}/cli/sym_convert_pre.js" )
 endif()
 
 if( MSVC )
@@ -831,15 +850,14 @@ set_target_properties( eeschema_kiface PROPERTIES
     )
 
 # The KIFACE is in eeschema.cpp, export it:
+set_source_files_properties( eeschema.cpp PROPERTIES
+    COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
+    )
 if( EMSCRIPTEN )
-    # WASM: Static linking - don't define BUILD_KIWAY_DLL so KIFACE_GETTER
-    # is exported with its statically-linkable name (KIFACE_1).
+    # WASM: static kiface linking — eeschema.cpp must NOT export the kiway DLL symbols, so
+    # KIFACE_GETTER keeps its statically-linkable name (KIFACE_1).
     set_source_files_properties( eeschema.cpp PROPERTIES
         COMPILE_DEFINITIONS     "COMPILING_DLL"
-        )
-else()
-    set_source_files_properties( eeschema.cpp PROPERTIES
-        COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
         )
 endif()
 

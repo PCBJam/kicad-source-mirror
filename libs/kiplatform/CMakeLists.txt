@@ -31,7 +31,7 @@ elseif( KICAD_WX_PORT STREQUAL gtk )
 elseif( KICAD_WX_PORT STREQUAL wasm )
     # WASM port - uses stub implementations from wasm layer
     set( PLATFORM_SRCS
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/ui.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/ui.cpp
         )
     message( STATUS "Using WASM kiplatform stub implementation" )
 endif()
@@ -81,14 +81,14 @@ elseif( WIN32 )
 elseif( EMSCRIPTEN )
     # WebAssembly / Emscripten - use stub implementations
     list( APPEND PLATFORM_SRCS
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/app.cpp
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/drivers.cpp
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/environment.cpp
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/io.cpp
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/policy.cpp
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/secrets.cpp
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/sysinfo.cpp
-        ${PROJECT_SOURCE_DIR}/../wasm/kiplatform/printing.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/app.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/drivers.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/environment.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/io.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/policy.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/secrets.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/sysinfo.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/printing.cpp
         )
     message( STATUS "Using WASM kiplatform OS stubs" )
 elseif( UNIX )

@@ -2,7 +2,7 @@
 # WASM: 3D mouse support not available, use stubs
 if( EMSCRIPTEN )
     add_library(pl_editor_navlib STATIC
-        "${CMAKE_SOURCE_DIR}/../wasm/stubs/nl_pl_editor_plugin_stub.cpp"
+        "${KICAD_WASM_LAYER}/stubs/nl_pl_editor_plugin_stub.cpp"
     )
     target_include_directories(pl_editor_navlib PRIVATE
         ${CMAKE_SOURCE_DIR}/pagelayout_editor

@@ -16,6 +16,8 @@ set( GAL_SRCS
     cursors.cpp
     gal_display_options.cpp
     graphics_abstraction_layer.cpp
+    hidpi_gl_canvas.cpp
+    hidpi_gl_3D_canvas.cpp
 
     ../view/view.cpp
     ../view/view_controls.cpp
@@ -28,19 +30,33 @@ set( GAL_SRCS
 
     3d/camera.cpp
 
+    # OpenGL GAL
+    opengl/opengl_gal.cpp
+    opengl/gl_resources.cpp
+
+    opengl/shader.cpp
+    opengl/vertex_item.cpp
+    opengl/vertex_container.cpp
+    opengl/cached_container.cpp
+    opengl/cached_container_gpu.cpp
+    opengl/cached_container_ram.cpp
+    opengl/noncached_container.cpp
+    opengl/vertex_manager.cpp
+    opengl/gpu_manager.cpp
+    opengl/antialiasing.cpp
+    opengl/opengl_compositor.cpp
+    opengl/utils.cpp
+
     # Cairo GAL
     cairo/cairo_gal.cpp
     cairo/cairo_compositor.cpp
     cairo/cairo_print.cpp
     )
 
-# OpenGL GAL - enabled for native platforms
-if( NOT EMSCRIPTEN )
-    list( APPEND GAL_SRCS
-        hidpi_gl_canvas.cpp
-        hidpi_gl_3D_canvas.cpp
-
-        # OpenGL GAL
+# On Emscripten the OpenGL GAL is replaced by the WebGL GAL (pure WebGL 2.0, no
+# LEGACY_GL_EMULATION). The shared hidpi_gl_* canvases stay in GAL_SRCS above.
+if( EMSCRIPTEN )
+    list( REMOVE_ITEM GAL_SRCS
         opengl/opengl_gal.cpp
         opengl/gl_resources.cpp
         opengl/shader.cpp
@@ -56,14 +72,7 @@ if( NOT EMSCRIPTEN )
         opengl/opengl_compositor.cpp
         opengl/utils.cpp
     )
-endif()
-
-# WebGL GAL - Emscripten only (pure WebGL 2.0, no LEGACY_GL_EMULATION)
-if( EMSCRIPTEN )
     list( APPEND GAL_SRCS
-        hidpi_gl_canvas.cpp
-        hidpi_gl_3D_canvas.cpp
-
         # WebGL GAL (ported from OPENGL_GAL)
         webgl/webgl_gal.cpp
         webgl/webgl_compositor.cpp
@@ -106,7 +115,7 @@ if( EMSCRIPTEN )
     target_include_directories( gal PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/webgl
         ${CMAKE_SOURCE_DIR}/libs/kimath/glu_tess
-        ${CMAKE_SOURCE_DIR}/../wasm/stubs
+        ${KICAD_WASM_LAYER}/stubs
     )
 endif()
 
@@ -197,77 +206,20 @@ function( add_shader outTarget inFile shaderName )
 endfunction()
 
 if( EMSCRIPTEN )
-    # WASM: convert GLSL 120 -> ES 3.0 before embedding
-    # (uses the same conversion as tests/gal-regression/wasm/generate_shaders.py)
-    find_program( PYTHON3_EXECUTABLE python3 REQUIRED )
-
-    function( add_shader_es3 outTarget inFile shaderName )
-        # Determine shader type from filename
-        string(FIND "${inFile}" "frag" _is_frag)
-        if(_is_frag GREATER -1)
-            set(SHADER_TYPE "fragment")
-        else()
-            set(SHADER_TYPE "vertex")
-        endif()
-
-        set(es3GlslFile "${CMAKE_CURRENT_BINARY_DIR}/${shaderName}_es3.glsl")
-        set(outCppName "${shaderName}.cpp")
-        set(outHeaderName "${shaderName}.h")
-
-        # Step 1: Convert GLSL 120 -> ES 3.0
-        add_custom_command(
-            OUTPUT ${es3GlslFile}
-            COMMAND ${PYTHON3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_glsl_es3.py
-                ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}
-                ${es3GlslFile}
-                ${SHADER_TYPE}
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${inFile}
-                    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_glsl_es3.py
-        )
-
-        # Step 2: Embed as C++ string (same as native path)
-        add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${outCppName}
-                   ${CMAKE_BINARY_DIR}/include/gal/shaders/${outHeaderName}
-            COMMAND ${CMAKE_COMMAND}
-                -DSOURCE_FILE="${es3GlslFile}"
-                -DOUT_CPP_DIR="${CMAKE_CURRENT_BINARY_DIR}/"
-                -DOUT_HEADER_DIR="${CMAKE_BINARY_DIR}/include/gal/shaders/"
-                -DOUT_CPP_FILENAME="${outCppName}"
-                -DOUT_HEADER_FILENAME="${outHeaderName}"
-                -DOUT_VAR_NAME="${shaderName}"
-                -P ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/CreateShaderCpp.cmake
-            DEPENDS ${es3GlslFile}
-        )
-
-        target_sources( ${outTarget} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/${outCppName} )
-        target_include_directories( ${outTarget} PUBLIC ${CMAKE_BINARY_DIR}/include/gal/shaders/ )
-    endfunction()
-
-    add_shader_es3( gal kicad_frag.glsl glsl_kicad_frag )
-    add_shader_es3( gal kicad_vert.glsl glsl_kicad_vert )
-    add_shader_es3( gal smaa_base.glsl glsl_smaa_base )
-    add_shader_es3( gal smaa_pass_1_frag_color.glsl glsl_smaa_pass_1_frag_color )
-    add_shader_es3( gal smaa_pass_1_frag_luma.glsl glsl_smaa_pass_1_frag_luma )
-    add_shader_es3( gal smaa_pass_1_vert.glsl glsl_smaa_pass_1_vert )
-    add_shader_es3( gal smaa_pass_2_frag.glsl glsl_smaa_pass_2_frag )
-    add_shader_es3( gal smaa_pass_2_vert.glsl glsl_smaa_pass_2_vert )
-    add_shader_es3( gal smaa_pass_3_frag.glsl glsl_smaa_pass_3_frag )
-    add_shader_es3( gal smaa_pass_3_vert.glsl glsl_smaa_pass_3_vert )
-    add_shader_es3( gal xor_diff_frag.glsl glsl_xor_diff_frag )
-    add_shader_es3( gal xor_diff_vert.glsl glsl_xor_diff_vert )
-else()
-    add_shader( gal kicad_frag.glsl glsl_kicad_frag )
-    add_shader( gal kicad_vert.glsl glsl_kicad_vert )
-    add_shader( gal smaa_base.glsl glsl_smaa_base )
-    add_shader( gal smaa_pass_1_frag_color.glsl glsl_smaa_pass_1_frag_color )
-    add_shader( gal smaa_pass_1_frag_luma.glsl glsl_smaa_pass_1_frag_luma )
-    add_shader( gal smaa_pass_1_vert.glsl glsl_smaa_pass_1_vert )
-    add_shader( gal smaa_pass_2_frag.glsl glsl_smaa_pass_2_frag )
-    add_shader( gal smaa_pass_2_vert.glsl glsl_smaa_pass_2_vert )
-    add_shader( gal smaa_pass_3_frag.glsl glsl_smaa_pass_3_frag )
-    add_shader( gal smaa_pass_3_vert.glsl glsl_smaa_pass_3_vert )
-    add_shader( gal xor_diff_frag.glsl glsl_xor_diff_frag )
-    add_shader( gal xor_diff_vert.glsl glsl_xor_diff_vert )
+    # On Emscripten, redefine add_shader() to emit GLSL ES 3.0 (the later definition wins), so the
+    # unconditional add_shader() calls below produce ES3 shaders; native keeps the GLSL 1.20 path.
+    include( WasmShaderOverride )
 endif()
+
+add_shader( gal kicad_frag.glsl glsl_kicad_frag )
+add_shader( gal kicad_vert.glsl glsl_kicad_vert )
+add_shader( gal smaa_base.glsl glsl_smaa_base )
+add_shader( gal smaa_pass_1_frag_color.glsl glsl_smaa_pass_1_frag_color )
+add_shader( gal smaa_pass_1_frag_luma.glsl glsl_smaa_pass_1_frag_luma )
+add_shader( gal smaa_pass_1_vert.glsl glsl_smaa_pass_1_vert )
+add_shader( gal smaa_pass_2_frag.glsl glsl_smaa_pass_2_frag )
+add_shader( gal smaa_pass_2_vert.glsl glsl_smaa_pass_2_vert )
+add_shader( gal smaa_pass_3_frag.glsl glsl_smaa_pass_3_frag )
+add_shader( gal smaa_pass_3_vert.glsl glsl_smaa_pass_3_vert )
+add_shader( gal xor_diff_frag.glsl glsl_xor_diff_frag )
+add_shader( gal xor_diff_vert.glsl glsl_xor_diff_vert )
