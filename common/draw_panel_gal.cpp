@@ -560,7 +560,14 @@ bool EDA_DRAW_PANEL_GAL::GetScreenshot( wxImage& aDstImage )
 
     DoRePaint( false );
 
+#ifndef __EMSCRIPTEN__
     return static_cast<KIGFX::OPENGL_GAL*>( m_gal )->GetScreenshot( aDstImage );
+#else
+    // The WASM/WebGL GAL has no GetScreenshot(); canvas readback is done on the JS
+    // side (preserveDrawingBuffer + drawImage→2D→getImageData), so this path is unused.
+    (void) aDstImage;
+    return false;
+#endif
 }
 
 

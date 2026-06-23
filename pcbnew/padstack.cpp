@@ -1529,7 +1529,8 @@ wxString PADSTACK::Name() const
 const wxChar* PADSTACK::CustomName() const
 {
     if( m_customName )
-        return m_customName->wx_str();
+        return m_customName->c_str();  // wx_str() is wxStringCharType* (char* on UTF8 wx); c_str()
+                                       // yields a cached const wxChar* valid in both wx string modes
 
     return wxEmptyString;
 }

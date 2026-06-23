@@ -68,6 +68,11 @@
     inline const char* glewGetErrorString( int ) { return ""; }
     inline int glewIsSupported( const char* ) { return 1; }
 
+    // GLAD compatibility shim — KiCad 10's kicad_gl loads GL via gladLoaderLoadGL().
+    // On WASM the GL entry points are supplied by Emscripten's legacy-GL emulation
+    // (above), so the loader is a no-op that reports success (non-zero, as a real load).
+    inline int gladLoaderLoadGL() { return 1; }
+
 #elif defined( __unix__ ) and not defined( __APPLE__ )
 
     #ifdef KICAD_USE_EGL
