@@ -63,8 +63,13 @@ void KICAD_SINGLETON::Init()
                                                  []
                                                  {
                                                      // Reduce worker threadpriority to reduce lag in main (UI) thread
+                                                     // os_thread_priority is a BS native extension only
+                                                     // defined for _WIN32/__linux__/__APPLE__; Emscripten
+                                                     // has no OS thread-priority API, so skip it there.
+#ifndef __EMSCRIPTEN__
                                                      BS::this_thread::set_os_thread_priority(
                                                              BS::os_thread_priority::below_normal );
+#endif
                                                  } );
 
     m_GLContextManager = new GL_CONTEXT_MANAGER();
