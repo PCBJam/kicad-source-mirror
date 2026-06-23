@@ -548,6 +548,13 @@ void fontconfig::FONTCONFIG::SetReporter( REPORTER* aReporter )
 }
 
 
+REPORTER* fontconfig::FONTCONFIG::GetReporter()
+{
+    std::lock_guard lock( g_fontConfigMutex );
+    return s_reporter;
+}
+
+
 FONTCONFIG* Fontconfig()
 {
     if( !g_config )

@@ -110,8 +110,16 @@ PCBNEW_SETTINGS::PCBNEW_SETTINGS()
     m_params.emplace_back( new PARAM<bool>( "aui.appearance_expand_net_display",
             &m_AuiPanels.appearance_expand_net_display, false ) );
 
+#ifdef __EMSCRIPTEN__
+    // KiCad 10 shows the Properties panel by default; on WASM keep it hidden to
+    // match the established browser layout (smaller viewports, and the e2e layout
+    // baselines). Users can still toggle it on.
+    const bool showPropertiesDefault = false;
+#else
+    const bool showPropertiesDefault = true;
+#endif
     m_params.emplace_back( new PARAM<bool>( "aui.show_properties",
-            &m_AuiPanels.show_properties, true ) );
+            &m_AuiPanels.show_properties, showPropertiesDefault ) );
 
     m_params.emplace_back( new PARAM<bool>( "aui.show_search",
             &m_AuiPanels.show_search, false ) );

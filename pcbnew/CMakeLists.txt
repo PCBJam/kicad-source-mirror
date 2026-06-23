@@ -835,6 +835,19 @@ add_library( pcbnew_kiface_objects OBJECT
     ${PCBNEW_COMMON_SRCS}
     )
 
+if( EMSCRIPTEN )
+    # WASM static-kiface linking: pcbnew.cpp defines Kiface() / KIFACE_GETTER and the
+    # kiface instance, which pcbcommon (pad.cpp, pcb_painter.cpp, ratsnest_view_item.cpp,
+    # ...) references. Native builds resolve these via the dynamically-loaded
+    # pcbnew_kiface MODULE, but the WASM build links everything statically into the
+    # pcbnew executable, so the definitions must live in the kiface objects.
+    # (pcbnew_kiface MODULE also compiles pcbnew.cpp, but under Emscripten that target
+    # is built as a static archive rather than a real link, so the duplicate symbol is
+    # harmless. pcbnew.cpp's WASM COMPILE_DEFINITIONS are set without BUILD_KIWAY_DLL
+    # further down so it does not export the kiway DLL symbols.)
+    target_sources( pcbnew_kiface_objects PRIVATE pcbnew.cpp )
+endif()
+
 if( KICAD_SCRIPTING )
     target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_SCRIPTING_SRCS} )
 endif()

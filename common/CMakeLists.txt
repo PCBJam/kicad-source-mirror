@@ -228,6 +228,7 @@ set( KICOMMON_SRCS
     widgets/std_bitmap_button.cpp
     widgets/ui_common.cpp
     widgets/up_down_tree.cpp
+    widgets/webview_panel.cpp
     widgets/wx_grid.cpp
     widgets/wx_html_report_panel.cpp
     widgets/wx_html_report_panel_base.cpp
@@ -671,12 +672,11 @@ set( COMMON_WIDGET_SRCS
     widgets/zoom_correction_ctrl.cpp
     )
 
-# WebView is not available on Emscripten/WASM
-if( NOT EMSCRIPTEN )
-    list( APPEND COMMON_WIDGETS_SRCS
-        widgets/webview_panel.cpp
-    )
-endif()
+# webview_panel.cpp is built as part of KICOMMON_SRCS above. It builds everywhere
+# (including WASM/Emscripten, where wxUSE_WEBVIEW=0) thanks to its wxUSE_WEBVIEW
+# guards, so the WEBVIEW_PANEL symbols its callers reference (e.g. the eeschema
+# remote-symbol panel) resolve. The previous COMMON_WIDGETS_SRCS list was never
+# consumed by any target.
 
 set( COMMON_DRAWING_SHEET_SRCS
     drawing_sheet/ds_data_item.cpp

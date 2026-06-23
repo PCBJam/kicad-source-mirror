@@ -401,7 +401,6 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
     GetSettingsManager().RegisterSettings( new KICAD_SETTINGS );
 
-
     if( const COMMON_SETTINGS* cfg = Pgm().GetCommonSettings() )
     {
         if( cfg->m_Appearance.app_theme == APP_THEME::DARK )
@@ -429,8 +428,12 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
     Kiway.SetTop( frame );
 
+#ifndef __EMSCRIPTEN__
+    // The first-run setup wizard (library / privacy / settings) targets desktop
+    // installs and is not applicable in the browser; skip it for WASM.
     STARTWIZARD startWizard;
     startWizard.CheckAndRun( frame );
+#endif
 
     // Load library tables after startup wizard
     GetLibraryManager().LoadGlobalTables();
