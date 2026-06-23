@@ -27,6 +27,13 @@
 #include <functional>
 #include <map>
 
+#if !wxUSE_WEBVIEW
+// wx/webview.h declares nothing when wxUSE_WEBVIEW is 0 (e.g. WASM); forward-declare
+// the types referenced by the (stubbed) class interface so the header still compiles.
+class wxWebView;
+class wxWebViewEvent;
+#endif
+
 class TOOL_MANAGER;
 class TOOL_BASE;
 
@@ -54,7 +61,12 @@ public:
                             TOOL_MANAGER* aToolManager = nullptr, TOOL_BASE* aTool = nullptr );
     ~WEBVIEW_PANEL() override;
 
+#if wxUSE_WEBVIEW
     wxWebView* GetWebView() const { return WEBVIEW_PANEL_DETAIL::GetLiveWindow( m_browser ); }
+#else
+    // No webview backend (e.g. WASM, wxUSE_WEBVIEW=0): always returns null.
+    wxWebView* GetWebView() const { return nullptr; }
+#endif
     const wxString& GetBackend() const { return m_backend; }
 
     void LoadURL( const wxString& url );
@@ -68,8 +80,13 @@ public:
 
     void RunScriptAsync( const wxString& aScript, void* aClientData = nullptr ) const
     {
+#if wxUSE_WEBVIEW
         if( wxWebView* browser = GetWebView() )
             browser->RunScriptAsync( aScript, aClientData );
+#else
+        (void) aScript;
+        (void) aClientData;
+#endif
     }
 
     bool HasLoadError() const { return m_loadError; }
@@ -92,7 +109,9 @@ private:
     bool                                m_handleExternalLinks;
     bool                                m_loadError;
     bool                                m_loadedEventBound;
+#if wxUSE_WEBVIEW
     wxWeakRef<wxWebView>                m_browser;
+#endif
     wxString                            m_backend;
     std::map<wxString, MESSAGE_HANDLER> m_msgHandlers;
     TOOL_MANAGER*                       m_toolManager;

@@ -229,8 +229,10 @@ void PANEL_REMOTE_SYMBOL::ensureWebView()
     m_webView->SetHandleExternalLinks( true );
     m_webView->BindLoadedEvent();
 
+#if wxUSE_WEBVIEW
     if( wxWebView* browser = m_webView->GetWebView() )
         browser->Bind( wxEVT_WEBVIEW_LOADED, &PANEL_REMOTE_SYMBOL::onWebViewLoaded, this );
+#endif
 
     GetSizer()->Add( m_webView, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 2 ) );
     Layout();
@@ -239,8 +241,10 @@ void PANEL_REMOTE_SYMBOL::ensureWebView()
 
 void PANEL_REMOTE_SYMBOL::BindWebViewLoaded()
 {
+#if wxUSE_WEBVIEW
     if( wxWebView* browser = m_webView ? m_webView->GetWebView() : nullptr )
         browser->Bind( wxEVT_WEBVIEW_LOADED, &PANEL_REMOTE_SYMBOL::onWebViewLoaded, this );
+#endif
 }
 
 
@@ -259,11 +263,13 @@ void PANEL_REMOTE_SYMBOL::SaveCookies()
     if( !m_webView || m_selectedProviderIndex == wxNOT_FOUND || m_selectedProviderIndex >= static_cast<int>( m_providerEntries.size() ) )
         return;
 
+#if wxUSE_WEBVIEW
     if( wxWebView* browser = m_webView->GetWebView() )
     {
         const wxFileName cookieFile = cookieFilePath( m_providerEntries[m_selectedProviderIndex].provider_id );
         KIPLATFORM::WEBVIEW::SaveCookies( browser, cookieFile.GetFullPath() );
     }
+#endif
 }
 
 
@@ -272,6 +278,7 @@ void PANEL_REMOTE_SYMBOL::LoadCookies()
     if( !m_webView || m_selectedProviderIndex == wxNOT_FOUND || m_selectedProviderIndex >= static_cast<int>( m_providerEntries.size() ) )
         return;
 
+#if wxUSE_WEBVIEW
     if( wxWebView* browser = m_webView->GetWebView() )
     {
         const wxFileName cookieFile = cookieFilePath( m_providerEntries[m_selectedProviderIndex].provider_id );
@@ -279,13 +286,16 @@ void PANEL_REMOTE_SYMBOL::LoadCookies()
         if( cookieFile.FileExists() )
             KIPLATFORM::WEBVIEW::LoadCookies( browser, cookieFile.GetFullPath() );
     }
+#endif
 }
 
 
 void PANEL_REMOTE_SYMBOL::clearCookies( bool aDeleteSavedCookieFile )
 {
+#if wxUSE_WEBVIEW
     if( wxWebView* browser = m_webView ? m_webView->GetWebView() : nullptr )
         KIPLATFORM::WEBVIEW::DeleteCookies( browser );
+#endif
 
     if( aDeleteSavedCookieFile && m_selectedProviderIndex != wxNOT_FOUND
         && m_selectedProviderIndex < static_cast<int>( m_providerEntries.size() ) )
@@ -472,6 +482,7 @@ void PANEL_REMOTE_SYMBOL::showMessage( const wxString& aMessage )
 }
 
 
+#if wxUSE_WEBVIEW
 void PANEL_REMOTE_SYMBOL::onWebViewLoaded( wxWebViewEvent& aEvent )
 {
     if( m_pendingHandshake )
@@ -490,6 +501,7 @@ void PANEL_REMOTE_SYMBOL::onWebViewLoaded( wxWebViewEvent& aEvent )
 
     aEvent.Skip();
 }
+#endif
 
 
 void PANEL_REMOTE_SYMBOL::beginSessionHandshake()
