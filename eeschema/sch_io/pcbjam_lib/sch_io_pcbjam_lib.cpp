@@ -318,6 +318,25 @@ LIB_SYMBOL* SCH_IO_PCBJAM_LIB::loadOne( const wxString& aLibraryPath, const wxSt
             found = symbol;
     }
 
+    // Resolve `extends` (derived-symbol) parents. ParseLib only records the
+    // parent NAME (SetParentName); the standard SCH_IO_KICAD_SEXPR_LIB_CACHE
+    // links the parent pointer in a second pass (updateParentSymbolLinks). We
+    // bypass that cache, so do it here — otherwise IsDerived() stays false and
+    // LIB_SYMBOL::Flatten() (used by the symbol-chooser preview) drops the
+    // parent's body geometry, rendering the preview as a zoomed-out dot. The
+    // parent is normally bundled in the same body; fall back to the cache for a
+    // parent loaded by an earlier request.
+    for( auto& [name, symbol] : map )
+    {
+        if( symbol->GetParentName().IsEmpty() || symbol->GetParent().lock() )
+            continue;
+
+        wxString parentKey = aLibraryPath + wxS( "|" ) + symbol->GetParentName();
+
+        if( auto pit = m_cache.find( parentKey ); pit != m_cache.end() )
+            symbol->SetParent( pit->second );
+    }
+
     if( !found )
     {
         m_lastError = wxString::Format( _( "Symbol '%s' not found in pcbjam library '%s'" ),
