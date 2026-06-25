@@ -226,8 +226,13 @@ bool EDA_DRAW_PANEL_GAL::recoverFromGalError( const std::exception& aError )
             m_glRecoveryAttempted = false;
             SwitchBackend( GAL_FALLBACK );
 
+#ifndef __EMSCRIPTEN__
+            // WASM: Cairo is the expected, unavoidable fallback and this dialog
+            // would pop on every preview render (and wedge the app over a modal
+            // chooser), so fall back silently. Native keeps the notification.
             DisplayInfoMessage( m_parent, _( "Could not use OpenGL, falling back to software rendering" ),
                                 wxString( aError.what() ) );
+#endif
 
             StartDrawing();
             return true;
