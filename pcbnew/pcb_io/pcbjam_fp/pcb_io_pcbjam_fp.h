@@ -21,6 +21,8 @@
 
 #include <map>
 #include <optional>
+#include <set>
+#include <vector>
 
 #include <pcb_io/pcb_io.h>
 
@@ -46,6 +48,12 @@ class FOOTPRINT;
  * The provider answers (kind = "footprint"):
  *
  *   request( "list", uri, "",   "footprint" ) -> JSON {"footprints":["R_0402",..]}
+ *   request( "list", uri, "bodies", "footprint" ) -> JSON
+ *                                                {"footprints":[{"name":..,"body":..}]}
+ *                                                the "fat list": every footprint
+ *                                                body in ONE crossing, so a whole
+ *                                                library hydrates without N
+ *                                                per-item "get"s (0011)
  *   request( "get",  uri, name, "footprint" ) -> a complete (footprint …) s-expr
  *                                                document, or null if not found
  *   request( "save", uri, json, "footprint" ) -> persist one footprint; json is
@@ -103,7 +111,24 @@ private:
     /// Load (or return cached) master copy of one footprint; callers get clones.
     FOOTPRINT* loadOne( const wxString& aLibraryPath, const wxString& aName );
 
+    /// Parse one (footprint …) document and cache it (cache-if-absent). A parse
+    /// failure is logged and skipped, leaving the item simply unavailable.
+    void cacheFootprint( const wxString& aLibraryPath, const wxString& aName,
+                         const std::string& aBody );
+
+    /// Fetch the whole library in one "fat list" crossing and cache every body;
+    /// records the footprint names so a repeat enumerate rebuilds from cache.
+    void fatLoad( const wxString& aLibraryPath );
+
     std::map<wxString, FOOTPRINT*> m_cache;
+
+    /// Libraries already fat-loaded (so the adapter's per-name FootprintLoad calls
+    /// all hit the cache, no crossing). Invalidated for a lib on FootprintSave.
+    std::set<wxString> m_loadedLibs;
+
+    /// The footprint names of each fat-loaded lib, in list order — used to answer
+    /// a repeat FootprintEnumerate from cache without re-fetching.
+    std::map<wxString, std::vector<wxString>> m_libNames;
 
     wxString m_lastError;
 };
