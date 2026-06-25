@@ -227,36 +227,96 @@ void PCB_IO_PCBJAM_FP::FootprintEnumerate( wxArrayString& aFootprintNames,
                                            const wxString& aLibraryPath, bool aBestEfforts,
                                            const std::map<std::string, UTF8>* aProperties )
 {
-    std::string body;
+    // Fat-load the whole library in ONE crossing on first enumerate and cache
+    // every body, so the adapter's subsequent per-name FootprintLoad calls all
+    // hit the cache (the per-item N gets used to live in the adapter loop, not in
+    // this plugin). Repeat enumerates answer from m_libNames with no crossing
+    // (docs/features/libs/0011-fast-lib-load).
+    if( !m_loadedLibs.count( aLibraryPath ) )
+    {
+        try
+        {
+            fatLoad( aLibraryPath );
+        }
+        catch( const IO_ERROR& )
+        {
+            if( aBestEfforts )
+                return;
+
+            throw;
+        }
+        catch( const nlohmann::json::exception& e )
+        {
+            if( aBestEfforts )
+                return;
+
+            m_lastError = wxString::Format( _( "pcbjam footprint list for '%s' is invalid: %s" ),
+                                            aLibraryPath, wxString( e.what() ) );
+            THROW_IO_ERROR( m_lastError );
+        }
+    }
+
+    if( auto it = m_libNames.find( aLibraryPath ); it != m_libNames.end() )
+    {
+        for( const wxString& name : it->second )
+            aFootprintNames.Add( name );
+    }
+}
+
+
+void PCB_IO_PCBJAM_FP::cacheFootprint( const wxString& aLibraryPath, const wxString& aName,
+                                       const std::string& aBody )
+{
+    wxString cacheKey = aLibraryPath + wxS( "|" ) + aName;
+
+    // Cache-if-absent: a footprint already loaded by an earlier "get" keeps its
+    // master (callers hold clones, not the master, but staying consistent with
+    // the symbol plugin and avoiding redundant parses).
+    if( m_cache.find( cacheKey ) != m_cache.end() )
+        return;
 
     try
     {
-        body = request( "list", aLibraryPath, wxEmptyString );
+        PCB_IO_KICAD_SEXPR pi;
+        BOARD_ITEM*        item = pi.Parse( wxString::FromUTF8( aBody.c_str(), aBody.size() ) );
+
+        if( FOOTPRINT* footprint = dynamic_cast<FOOTPRINT*>( item ) )
+            m_cache[cacheKey] = footprint;
+        else
+            delete item;
     }
-    catch( const IO_ERROR& )
+    catch( const IO_ERROR& e )
     {
-        if( aBestEfforts )
-            return;
-
-        throw;
+        // One bad body doesn't abort the library; the item is simply unavailable.
+        m_lastError = wxString::Format( _( "Footprint '%s' in pcbjam library '%s' is invalid: %s" ),
+                                        aName, aLibraryPath, e.What() );
+        wxLogTrace( wxS( "PCBJAM_FP" ), m_lastError );
     }
+}
 
-    try
+
+void PCB_IO_PCBJAM_FP::fatLoad( const wxString& aLibraryPath )
+{
+    // One crossing for the whole library: "list" with arg "bodies" returns every
+    // footprint's body. request() throws if the provider yields null, so a
+    // transient failure leaves the lib un-flagged and retries on the next
+    // enumerate; an empty "footprints" array is a legitimately empty library.
+    std::string body = request( "list", aLibraryPath, wxS( "bodies" ) );
+
+    std::vector<wxString> names;
+
+    // nlohmann::json::exception propagates to FootprintEnumerate (aBestEfforts).
+    nlohmann::json js = nlohmann::json::parse( body );
+
+    for( const auto& item : js.at( "footprints" ) )
     {
-        nlohmann::json js = nlohmann::json::parse( body );
-
-        for( const auto& name : js.at( "footprints" ) )
-            aFootprintNames.Add( wxString::FromUTF8( name.get<std::string>() ) );
+        wxString name = wxString::FromUTF8( item.at( "name" ).get<std::string>() );
+        cacheFootprint( aLibraryPath, name, item.at( "body" ).get<std::string>() );
+        names.push_back( name );
     }
-    catch( const nlohmann::json::exception& e )
-    {
-        if( aBestEfforts )
-            return;
 
-        m_lastError = wxString::Format( _( "pcbjam footprint list for '%s' is invalid: %s" ),
-                                        aLibraryPath, wxString( e.what() ) );
-        THROW_IO_ERROR( m_lastError );
-    }
+    m_libNames[aLibraryPath] = std::move( names );
+    m_loadedLibs.insert( aLibraryPath );
 }
 
 
@@ -286,36 +346,16 @@ FOOTPRINT* PCB_IO_PCBJAM_FP::loadOne( const wxString& aLibraryPath, const wxStri
     if( !got )
         return nullptr;
 
-    FOOTPRINT* footprint = nullptr;
+    // Parse + cache the returned document; shared with the fat-load path.
+    cacheFootprint( aLibraryPath, aName, *got );
 
-    try
-    {
-        PCB_IO_KICAD_SEXPR pi;
-        BOARD_ITEM*        item = pi.Parse( wxString::FromUTF8( got->c_str(), got->size() ) );
+    if( auto it = m_cache.find( cacheKey ); it != m_cache.end() )
+        return it->second;
 
-        footprint = dynamic_cast<FOOTPRINT*>( item );
-
-        if( !footprint )
-            delete item;
-    }
-    catch( const IO_ERROR& e )
-    {
-        m_lastError = wxString::Format( _( "Footprint '%s' in pcbjam library '%s' is invalid: %s" ),
-                                        aName, aLibraryPath, e.What() );
-        wxLogTrace( wxS( "PCBJAM_FP" ), m_lastError );
-        return nullptr;
-    }
-
-    if( !footprint )
-    {
-        m_lastError = wxString::Format( _( "Footprint '%s' not found in pcbjam library '%s'" ),
-                                        aName, aLibraryPath );
-        wxLogTrace( wxS( "PCBJAM_FP" ), m_lastError );
-        return nullptr;
-    }
-
-    m_cache[cacheKey] = footprint;
-    return footprint;
+    m_lastError = wxString::Format( _( "Footprint '%s' not found in pcbjam library '%s'" ),
+                                    aName, aLibraryPath );
+    wxLogTrace( wxS( "PCBJAM_FP" ), m_lastError );
+    return nullptr;
 }
 
 
@@ -354,4 +394,9 @@ void PCB_IO_PCBJAM_FP::FootprintSave( const wxString& aLibraryPath, const FOOTPR
         delete it->second;
         m_cache.erase( it );
     }
+
+    // Invalidate the fat-load guard so the next enumerate refetches this lib —
+    // picking up a newly-created footprint, the edited body, or a removal.
+    m_loadedLibs.erase( aLibraryPath );
+    m_libNames.erase( aLibraryPath );
 }

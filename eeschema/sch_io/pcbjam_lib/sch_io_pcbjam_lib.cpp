@@ -258,14 +258,105 @@ void SCH_IO_PCBJAM_LIB::EnumerateSymbolLib( std::vector<LIB_SYMBOL*>& aSymbolLis
                                             const wxString& aLibraryPath,
                                             const std::map<std::string, UTF8>* aProperties )
 {
-    wxArrayString names;
-    EnumerateSymbolLib( names, aLibraryPath, aProperties );
+    // Fat-load the whole library in ONE provider crossing on first enumerate;
+    // repeat enumerates (tree Sync refreshes) rebuild from m_cache with no
+    // crossing.  This collapses the old "1 list + N get" into a single "list",
+    // while preserving the cache's "already loaded => 0 fetches" property
+    // (docs/features/libs/0011-fast-lib-load).
+    if( !m_loadedLibs.count( aLibraryPath ) )
+        fatLoad( aLibraryPath );
 
-    for( const wxString& name : names )
+    auto it = m_libNames.find( aLibraryPath );
+
+    if( it == m_libNames.end() )
+        return;
+
+    for( const wxString& name : it->second )
     {
         if( LIB_SYMBOL* master = loadOne( aLibraryPath, name ) )
             aSymbolList.emplace_back( new LIB_SYMBOL( *master ) );
     }
+}
+
+
+void SCH_IO_PCBJAM_LIB::cacheLibDocument( const wxString& aLibraryPath, const std::string& aBody )
+{
+    STRING_LINE_READER        reader( aBody, aLibraryPath );
+    SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
+    LIB_SYMBOL_MAP            map;
+
+    parser.ParseLib( map );
+
+    // The document may carry `extends` parents alongside the requested symbol;
+    // cache everything it contained.  Cache-if-absent (not replace): a parent
+    // re-seen in a later body keeps the already-cached master, so pointers held
+    // by earlier derived symbols never dangle; the parsed duplicate is freed.
+    std::vector<LIB_SYMBOL*> fresh;
+
+    for( auto& [name, symbol] : map )
+    {
+        wxString key = aLibraryPath + wxS( "|" ) + name;
+
+        if( m_cache.find( key ) != m_cache.end() )
+        {
+            delete symbol;
+            continue;
+        }
+
+        m_cache[key] = symbol;
+        fresh.push_back( symbol );
+    }
+
+    // Resolve `extends` (derived-symbol) parents. ParseLib only records the
+    // parent NAME (SetParentName); the standard SCH_IO_KICAD_SEXPR_LIB_CACHE
+    // links the parent pointer in a second pass (updateParentSymbolLinks). We
+    // bypass that cache, so do it here — otherwise IsDerived() stays false and
+    // LIB_SYMBOL::Flatten() (used by the symbol-chooser preview) drops the
+    // parent's body geometry, rendering the preview as a zoomed-out dot. The
+    // parent is normally bundled in the same body; fall back to the cache for a
+    // parent loaded by an earlier request.
+    for( LIB_SYMBOL* symbol : fresh )
+    {
+        if( symbol->GetParentName().IsEmpty() || symbol->GetParent().lock() )
+            continue;
+
+        wxString parentKey = aLibraryPath + wxS( "|" ) + symbol->GetParentName();
+
+        if( auto pit = m_cache.find( parentKey ); pit != m_cache.end() )
+            symbol->SetParent( pit->second );
+    }
+}
+
+
+void SCH_IO_PCBJAM_LIB::fatLoad( const wxString& aLibraryPath )
+{
+    // One crossing for the whole library: "list" with arg "bodies" returns every
+    // symbol's body.  request() (not requestOpt) throws if the provider yields
+    // null, so a transient failure leaves the lib un-flagged and retries on the
+    // next expand; an empty "symbols" array is a legitimately empty library.
+    std::string body = request( "list", aLibraryPath, wxS( "bodies" ) );
+
+    std::vector<wxString> names;
+
+    try
+    {
+        nlohmann::json js = nlohmann::json::parse( body );
+
+        for( const auto& item : js.at( "symbols" ) )
+        {
+            cacheLibDocument( aLibraryPath, item.at( "body" ).get<std::string>() );
+            names.emplace_back( wxString::FromUTF8( item.at( "name" ).get<std::string>() ) );
+        }
+    }
+    catch( const nlohmann::json::exception& e )
+    {
+        m_lastError = wxString::Format( _( "pcbjam fat list for '%s' is invalid: %s" ),
+                                        aLibraryPath, wxString( e.what() ) );
+        THROW_IO_ERROR( m_lastError );
+    }
+
+    m_libNames[aLibraryPath] = std::move( names );
+    m_loadedLibs.insert( aLibraryPath );
 }
 
 
@@ -294,57 +385,17 @@ LIB_SYMBOL* SCH_IO_PCBJAM_LIB::loadOne( const wxString& aLibraryPath, const wxSt
     if( !got )
         return nullptr;
 
-    std::string               body = *got;
-    STRING_LINE_READER        reader( body, aLibraryPath + wxS( ":" ) + aName );
-    SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
-    LIB_SYMBOL_MAP            map;
+    // Parse + cache the returned document (the requested symbol plus any bundled
+    // `extends` parents); shared with the fat-load path.
+    cacheLibDocument( aLibraryPath, *got );
 
-    parser.ParseLib( map );
+    if( auto it = m_cache.find( cacheKey ); it != m_cache.end() )
+        return it->second;
 
-    LIB_SYMBOL* found = nullptr;
-
-    // The document may carry `extends` parents alongside the requested
-    // symbol; cache everything it contained.
-    for( auto& [name, symbol] : map )
-    {
-        wxString key = aLibraryPath + wxS( "|" ) + name;
-
-        if( auto it = m_cache.find( key ); it != m_cache.end() )
-            delete it->second;
-
-        m_cache[key] = symbol;
-
-        if( name == aName )
-            found = symbol;
-    }
-
-    // Resolve `extends` (derived-symbol) parents. ParseLib only records the
-    // parent NAME (SetParentName); the standard SCH_IO_KICAD_SEXPR_LIB_CACHE
-    // links the parent pointer in a second pass (updateParentSymbolLinks). We
-    // bypass that cache, so do it here — otherwise IsDerived() stays false and
-    // LIB_SYMBOL::Flatten() (used by the symbol-chooser preview) drops the
-    // parent's body geometry, rendering the preview as a zoomed-out dot. The
-    // parent is normally bundled in the same body; fall back to the cache for a
-    // parent loaded by an earlier request.
-    for( auto& [name, symbol] : map )
-    {
-        if( symbol->GetParentName().IsEmpty() || symbol->GetParent().lock() )
-            continue;
-
-        wxString parentKey = aLibraryPath + wxS( "|" ) + symbol->GetParentName();
-
-        if( auto pit = m_cache.find( parentKey ); pit != m_cache.end() )
-            symbol->SetParent( pit->second );
-    }
-
-    if( !found )
-    {
-        m_lastError = wxString::Format( _( "Symbol '%s' not found in pcbjam library '%s'" ),
-                                        aName, aLibraryPath );
-        wxLogTrace( wxS( "PCBJAM_LIB" ), m_lastError );
-    }
-
-    return found;
+    m_lastError = wxString::Format( _( "Symbol '%s' not found in pcbjam library '%s'" ),
+                                    aName, aLibraryPath );
+    wxLogTrace( wxS( "PCBJAM_LIB" ), m_lastError );
+    return nullptr;
 }
 
 
@@ -385,6 +436,13 @@ void SCH_IO_PCBJAM_LIB::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMB
         delete it->second;
         m_cache.erase( it );
     }
+
+    // Invalidate the fat-load guard so the next enumerate refetches this lib —
+    // picking up a newly-created item, the edited body, or a removal (and the
+    // mirror overlay for an edited origin item). Saves are user-paced, so the
+    // one extra "list" is negligible.
+    m_loadedLibs.erase( aLibraryPath );
+    m_libNames.erase( aLibraryPath );
 }
 
 

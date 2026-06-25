@@ -21,6 +21,8 @@
 
 #include <map>
 #include <optional>
+#include <set>
+#include <vector>
 
 #include <sch_io/sch_io.h>
 #include <sch_io/sch_io_mgr.h>
@@ -39,6 +41,10 @@
  * The provider answers:
  *
  *   request( "list", uri, "" )      -> JSON {"symbols":["R","C",...]}
+ *   request( "list", uri, "bodies" )-> JSON {"symbols":[{"name":..,"body":..}]}
+ *                                      the "fat list": every symbol's body in
+ *                                      ONE crossing, so a whole library hydrates
+ *                                      without N per-item "get"s (0011)
  *   request( "get",  uri, name )    -> a complete kicad_symbol_lib s-expr
  *                                      document containing that one symbol
  *                                      (plus any `extends` parents), or null
@@ -104,8 +110,25 @@ private:
     /// Load (or return cached) master copy of one symbol.
     LIB_SYMBOL* loadOne( const wxString& aLibraryPath, const wxString& aName );
 
+    /// Parse one kicad_symbol_lib document and cache every symbol it holds
+    /// (the requested symbol plus any intra-lib `extends` parents).
+    void cacheLibDocument( const wxString& aLibraryPath, const std::string& aBody );
+
+    /// Fetch the whole library in one "fat list" crossing and cache every body;
+    /// records the lib's symbol names so a repeat enumerate rebuilds from cache.
+    void fatLoad( const wxString& aLibraryPath );
+
     /// Per-(lib,name) master symbols owned by this plugin; callers get clones.
     std::map<wxString, LIB_SYMBOL*> m_cache;
+
+    /// Libraries already fat-loaded (so a repeat enumerate hits the cache, no
+    /// crossing). Invalidated for a lib on SaveSymbol so the next enumerate
+    /// refreshes (new/changed/removed items).
+    std::set<wxString> m_loadedLibs;
+
+    /// The symbol names of each fat-loaded lib, in list order — used to rebuild
+    /// the enumerate result from m_cache without re-fetching.
+    std::map<wxString, std::vector<wxString>> m_libNames;
 
     wxString m_lastError;
 };
