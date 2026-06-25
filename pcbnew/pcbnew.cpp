@@ -783,8 +783,8 @@ bool IFACE::HandleJobConfig( JOB* aJob, wxWindow* aParent )
 
 void IFACE::PreloadLibraries( KIWAY* aKiway )
 {
-    constexpr static int interval = 150;
-    constexpr static int timeLimit = 120000;
+    [[maybe_unused]] constexpr static int interval = 150;    // poll loop is native-only (WASM runs inline)
+    [[maybe_unused]] constexpr static int timeLimit = 120000;
 
     wxCHECK( aKiway, /* void */ );
 
@@ -809,12 +809,17 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
 
             FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &aKiway->Prj() );
 
-            int elapsed = 0;
+            [[maybe_unused]] int elapsed = 0;    // poll loop is native-only (WASM runs inline)
             bool aborted = false;
 
             reporter->Report( _( "Loading Footprint Libraries" ) );
             adapter->AsyncLoad();
 
+#ifndef __EMSCRIPTEN__
+            // Native: poll the background workers for progress. On WASM AsyncLoad()
+            // above ran inline+synchronously (the preload is dispatched inline on the
+            // main thread — see below), so the futures are already complete; skip the
+            // poll loop, whose sleep_for would otherwise just block the main thread.
             while( true )
             {
                 if( m_libraryPreloadAbort.load() )
@@ -845,6 +850,7 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
                 if( elapsed > timeLimit )
                     break;
             }
+#endif
 
             // AbortAsyncLoad() sets the adapter's worker abort flag and then blocks,
             // so workers exit at their next checkpoint. BlockUntilLoaded() alone just
@@ -903,8 +909,22 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
             }
         };
 
+#ifdef __EMSCRIPTEN__
+    // WASM: the KiCad thread-pool is inline-shimmed (tasks run on the calling thread)
+    // because an Asyncify stack cannot be rewound on a pthread worker. std::async(
+    // launch::async ) bypasses that shim and spawns a real worker; on it the pcbjam
+    // footprint-library bridge takes its proxy-to-main path and deadlocks, because the
+    // main thread is still inside OpenProjectFiles and never returns to the event loop
+    // to pump the proxying queue. Run the preload inline on the main thread so the
+    // bridge uses its working main-thread Asyncify path.
+    preload();
+    std::promise<void> preloadDone;
+    preloadDone.set_value();
+    m_libraryPreloadReturn = preloadDone.get_future();
+#else
     std::future<void> preloadFuture = std::async( std::launch::async, preload );
     m_libraryPreloadReturn = std::move( preloadFuture );
+#endif
 }
 
 
