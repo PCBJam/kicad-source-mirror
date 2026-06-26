@@ -185,6 +185,15 @@ protected:
 
     void enumerateLibrary( LIB_DATA* aLib, const wxString& aUri ) override;
 
+    /**
+     * Parse every footprint in one library into PreloadedFootprints.  This is the eager work
+     * that enumerateLibrary() used to do for the bulk async preload; it is now invoked lazily
+     * (GetFootprints() on first access, RefreshLibraryIfChanged() on a disk change) so the
+     * WASM port doesn't enumerate all ~222 network-backed libraries on the main thread at
+     * startup.  Idempotent: skips libraries already present in PreloadedFootprints.
+     */
+    void preloadLibrary( const LIB_DATA* aLib, const wxString& aUri );
+
     LIBRARY_RESULT<IO_BASE*> createPlugin( const LIBRARY_TABLE_ROW* row ) override;
 
     IO_BASE* plugin( const LIB_DATA* aRow ) override { return pcbplugin( aRow ); }
