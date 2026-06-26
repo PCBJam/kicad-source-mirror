@@ -865,6 +865,7 @@ if( EMSCRIPTEN )
             ${KICAD_WASM_LAYER}/stubs/3d_viewer_stub.cpp
             ${KICAD_WASM_LAYER}/stubs/3d_scenegraph_stub.cpp
             ${KICAD_WASM_LAYER}/stubs/3d_canvas_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/model_substitution_stub.cpp
         )
     endif()
     target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_WASM_STUBS} )
