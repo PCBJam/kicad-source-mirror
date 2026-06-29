@@ -235,17 +235,22 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
 
         if( !kiface )
         {
-            // Get the statically linked KIFACE_GETTER
-            extern KIFACE* KIFACE_GETTER( int*, int, PGM_BASE* );
-            kiface = KIFACE_GETTER( &m_kiface_version[aFaceId], KIFACE_VERSION, &Pgm() );
-        }
-        else
-        {
-            // kiface was set via set_kiface(), but OnKifaceStart wasn't called
-            m_kiface_version[aFaceId] = KIFACE_VERSION;
+            // WASM statically links exactly ONE kiface - the app's own, which is
+            // registered in its FACE_T slot via set_kiface() (single_top.cpp). An
+            // unregistered slot therefore means that editor is not present in this
+            // single-app binary, so the face is genuinely unavailable.
+            //
+            // Do NOT fall back to the statically-linked KIFACE_GETTER here: it
+            // returns THIS app's kiface regardless of the requested face, which
+            // then cannot CreateKiWindow() the other editor's panels and yields
+            // blank Preferences pages (Footprint/PCB/3D/Gerber in eeschema).
+            return nullptr;
         }
 
-        if( kiface && kiface->OnKifaceStart( &Pgm(), m_ctl, this ) )
+        // kiface was set via set_kiface(), but OnKifaceStart() wasn't called yet.
+        m_kiface_version[aFaceId] = KIFACE_VERSION;
+
+        if( kiface->OnKifaceStart( &Pgm(), m_ctl, this ) )
             return m_kiface[aFaceId] = kiface;
 
         return nullptr;
