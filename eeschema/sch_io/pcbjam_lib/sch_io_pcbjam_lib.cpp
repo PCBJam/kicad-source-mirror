@@ -17,6 +17,7 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <chrono>
 #include <mutex>
 #include <optional>
 
@@ -25,6 +26,7 @@
 #include <ki_exception.h>
 #include <lib_symbol.h>
 #include <richio.h>
+#include <trace_helpers.h>
 #include <wx/log.h>
 
 #include <sch_file_versions.h>
@@ -271,10 +273,18 @@ void SCH_IO_PCBJAM_LIB::EnumerateSymbolLib( std::vector<LIB_SYMBOL*>& aSymbolLis
     if( it == m_libNames.end() )
         return;
 
+    // Hand back the cache-owned masters directly (NON-owning, like upstream
+    // SCH_IO_KICAD_SEXPR::EnumerateSymbolLib and the footprint adapter's
+    // GetFootprints): the LIB_TREE_NODE_ITEM consumer copies out only the
+    // metadata it needs and never retains the pointer, so the previous
+    // `new LIB_SYMBOL( *master )` per item deep-cloned every symbol's geometry
+    // on EVERY chooser open (~20k clones for the full set, the warm-path
+    // 5-8s) and then leaked them (the contract is non-owning). m_cache owns
+    // these and frees them in the dtor; SaveSymbol invalidates per-lib.
     for( const wxString& name : it->second )
     {
         if( LIB_SYMBOL* master = loadOne( aLibraryPath, name ) )
-            aSymbolList.emplace_back( new LIB_SYMBOL( *master ) );
+            aSymbolList.emplace_back( master );
     }
 }
 
@@ -330,21 +340,33 @@ void SCH_IO_PCBJAM_LIB::cacheLibDocument( const wxString& aLibraryPath, const st
 
 void SCH_IO_PCBJAM_LIB::fatLoad( const wxString& aLibraryPath )
 {
+    using clock = std::chrono::steady_clock;
+    auto msSince = []( clock::time_point a, clock::time_point b )
+                   { return std::chrono::duration<double, std::milli>( b - a ).count(); };
+
     // One crossing for the whole library: "list" with arg "bodies" returns every
     // symbol's body.  request() (not requestOpt) throws if the provider yields
     // null, so a transient failure leaves the lib un-flagged and retries on the
     // next expand; an empty "symbols" array is a legitimately empty library.
-    std::string body = request( "list", aLibraryPath, wxS( "bodies" ) );
+    clock::time_point t0 = clock::now();
+    std::string       body = request( "list", aLibraryPath, wxS( "bodies" ) );
+    clock::time_point tFetch = clock::now();
 
     std::vector<wxString> names;
+    double                jsonMs = 0.0;
+    double                sexprMs = 0.0;
 
     try
     {
-        nlohmann::json js = nlohmann::json::parse( body );
+        clock::time_point tj0 = clock::now();
+        nlohmann::json    js = nlohmann::json::parse( body );
+        jsonMs = msSince( tj0, clock::now() );
 
         for( const auto& item : js.at( "symbols" ) )
         {
+            clock::time_point ts0 = clock::now();
             cacheLibDocument( aLibraryPath, item.at( "body" ).get<std::string>() );
+            sexprMs += msSince( ts0, clock::now() );
             names.emplace_back( wxString::FromUTF8( item.at( "name" ).get<std::string>() ) );
         }
     }
@@ -354,6 +376,15 @@ void SCH_IO_PCBJAM_LIB::fatLoad( const wxString& aLibraryPath )
                                         aLibraryPath, wxString( e.what() ) );
         THROW_IO_ERROR( m_lastError );
     }
+
+    // Cold-path breakdown (KICAD_TRACE=KI_TRACE_SYM_CHOOSER): the fetch crossing
+    // (IDB read + marshal across the JS bridge) vs the JSON envelope parse vs the
+    // per-symbol s-expr parse, so the first-open cost is attributable. fatLoad
+    // runs once per lib (cached after), so these numbers are cold-only.
+    KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ),
+              wxT( "fatLoad lib=%s symbols=%zu bytes=%zu fetch_ms=%.1f json_ms=%.1f sexpr_ms=%.1f total_ms=%.1f\n" ),
+              aLibraryPath, names.size(), body.size(), msSince( t0, tFetch ), jsonMs, sexprMs,
+              msSince( t0, clock::now() ) );
 
     m_libNames[aLibraryPath] = std::move( names );
     m_loadedLibs.insert( aLibraryPath );
