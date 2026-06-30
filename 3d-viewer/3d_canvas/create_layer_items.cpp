@@ -1263,55 +1263,45 @@ void BOARD_ADAPTER::createLayers( REPORTER* aStatusReporter )
         size_t parallelThreadCount = std::min<size_t>( zones.size(),
                 std::max<size_t>( std::thread::hardware_concurrency(), 2 ) );
 
-        auto zoneWorker = [&]()
-        {
-            for( size_t areaId = nextZone.fetch_add( 1 );
-                        areaId < zones.size();
-                        areaId = nextZone.fetch_add( 1 ) )
-            {
-                ZONE* zone = zones[areaId].first;
-
-                if( zone == nullptr )
-                    break;
-
-                PCB_LAYER_ID layer = zones[areaId].second;
-
-                if( m_layerMap.contains( layer ) )
-                    addSolidAreasShapes( zone, m_layerMap[layer], layer );
-
-                if( cfg.opengl_copper_thickness && cfg.engine == RENDER_ENGINE::OPENGL
-                        && m_layers_poly.contains( layer ) )
-                {
-                    auto mut_it = layer_lock.find( layer );
-
-                    if( mut_it != layer_lock.end() )
-                    {
-                        std::lock_guard< std::mutex > lock( *( mut_it->second ) );
-                        zone->TransformSolidAreasShapesToPolygon( layer, *m_layers_poly[layer] );
-                    }
-                }
-            }
-
-            threadsFinished++;
-        };
-
-#ifdef __EMSCRIPTEN__
-        // WASM has no PROXY_TO_PTHREAD: a main-thread busy-wait (sleep_for) on
-        // detached workers can deadlock (on-demand worker creation needs the event
-        // loop, which the spin never yields to). Run serially on the calling thread;
-        // one invocation drains all zones via the atomic cursor.
-        (void) parallelThreadCount;
-        zoneWorker();
-#else
         for( size_t ii = 0; ii < parallelThreadCount; ++ii )
         {
-            std::thread t = std::thread( zoneWorker );
+            std::thread t = std::thread( [&]()
+            {
+                for( size_t areaId = nextZone.fetch_add( 1 );
+                            areaId < zones.size();
+                            areaId = nextZone.fetch_add( 1 ) )
+                {
+                    ZONE* zone = zones[areaId].first;
+
+                    if( zone == nullptr )
+                        break;
+
+                    PCB_LAYER_ID layer = zones[areaId].second;
+
+                    if( m_layerMap.contains( layer ) )
+                        addSolidAreasShapes( zone, m_layerMap[layer], layer );
+
+                    if( cfg.opengl_copper_thickness && cfg.engine == RENDER_ENGINE::OPENGL
+                            && m_layers_poly.contains( layer ) )
+                    {
+                        auto mut_it = layer_lock.find( layer );
+
+                        if( mut_it != layer_lock.end() )
+                        {
+                            std::lock_guard< std::mutex > lock( *( mut_it->second ) );
+                            zone->TransformSolidAreasShapesToPolygon( layer, *m_layers_poly[layer] );
+                        }
+                    }
+                }
+
+                threadsFinished++;
+            } );
+
             t.detach();
         }
 
         while( threadsFinished < parallelThreadCount )
             std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
-#endif
     }
     // End Build Copper layers
 
@@ -1782,38 +1772,31 @@ void BOARD_ADAPTER::createLayers( REPORTER* aStatusReporter )
                     std::max<size_t>( std::thread::hardware_concurrency(), 2 ),
                     selected_layer_id.size() );
 
-            auto simplifyWorker = [&nextItem, &threadsFinished, &selected_layer_id, this]()
-            {
-                for( size_t i = nextItem.fetch_add( 1 );
-                            i < selected_layer_id.size();
-                            i = nextItem.fetch_add( 1 ) )
-                {
-                    if( m_layers_poly.contains( selected_layer_id[i] ) )
-                    {
-                        // This will make a union of all added contours
-                        m_layers_poly[ selected_layer_id[i] ]->ClearArcs();
-                        m_layers_poly[ selected_layer_id[i] ]->Simplify();
-                    }
-                }
-
-                threadsFinished++;
-            };
-
-#ifdef __EMSCRIPTEN__
-            // WASM: serial on the calling thread (see the zones loop above for why
-            // the detached-thread + main-thread busy-wait pattern can deadlock).
-            (void) parallelThreadCount;
-            simplifyWorker();
-#else
             for( size_t ii = 0; ii < parallelThreadCount; ++ii )
             {
-                std::thread t = std::thread( simplifyWorker );
+                std::thread t = std::thread(
+                        [&nextItem, &threadsFinished, &selected_layer_id, this]()
+                        {
+                            for( size_t i = nextItem.fetch_add( 1 );
+                                        i < selected_layer_id.size();
+                                        i = nextItem.fetch_add( 1 ) )
+                            {
+                                if( m_layers_poly.contains( selected_layer_id[i] ) )
+                                {
+                                    // This will make a union of all added contours
+                                    m_layers_poly[ selected_layer_id[i] ]->ClearArcs();
+                                    m_layers_poly[ selected_layer_id[i] ]->Simplify();
+                                }
+                            }
+
+                            threadsFinished++;
+                        } );
+
                 t.detach();
             }
 
             while( threadsFinished < parallelThreadCount )
                 std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
-#endif
         }
     }
 

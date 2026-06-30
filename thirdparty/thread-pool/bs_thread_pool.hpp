@@ -1416,21 +1416,6 @@ public:
     template <typename F>
     void detach_task(F&& task, const priority_t priority = 0)
     {
-#ifdef __EMSCRIPTEN__
-        // KiCad-WASM single-thread shim. Under Emscripten + Asyncify, a stack
-        // that unwinds on a pthread worker cannot be rewound — the rewind entry
-        // is absent from wasmExports, surfacing as "func is not a function" in
-        // Asyncify.doRewind. This pool is the shared KICAD_SINGLETON pool, so
-        // every editor spawns its idle workers at startup (pcbnew does too and
-        // is fine); the crash only happens when work actually RUNS on a worker,
-        // which on the eeschema load path means connectivity (CONNECTION_GRAPH)
-        // and library preload. Run every submitted task inline on the calling
-        // thread so nothing lands on a worker; the idle workers keep blocking
-        // harmlessly on the condition variable. Native builds are unchanged.
-        (void) priority;
-        std::forward<F>( task )();
-        return;
-#else
         {
             const std::scoped_lock tasks_lock(tasks_mutex);
             if constexpr (priority_enabled)
@@ -1439,7 +1424,6 @@ public:
                 tasks.emplace(std::forward<F>(task));
         }
         task_available_cv.notify_one();
-#endif
     }
 
 #ifdef BS_THREAD_POOL_NATIVE_EXTENSIONS
