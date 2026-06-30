@@ -255,9 +255,7 @@ void RENDER_3D_RAYTRACE_BASE::renderTracing( uint8_t* ptrPBO, REPORTER* aStatusR
     std::atomic<size_t> numBlocksRendered( 0 );
     std::atomic<size_t> currentBlock( 0 );
 
-#ifndef __EMSCRIPTEN__
     thread_pool& tp = GetKiCadThreadPool();
-#endif
     const int timeLimit = m_blockPositions.size() > 40000 ? 750 : 400;
 
     auto processBlocks =
@@ -282,35 +280,12 @@ void RENDER_3D_RAYTRACE_BASE::renderTracing( uint8_t* ptrPBO, REPORTER* aStatusR
                 }
             };
 
-#ifdef __EMSCRIPTEN__
-    // WASM: run serially on the calling thread. The thread pool's futures.wait()
-    // blocks the browser main thread and deadlocks under Asyncify; processBlocks()
-    // drains blocks up to the time limit on its own, so a single call is enough
-    // (rendering stays progressive across frames via the render-state machine).
-    //
-    // TODO(wasm-multicore / asyncify-nesting): this path (and the post-process /
-    // preview passes below) is SINGLE-CORE. A multi-core version was built and verified
-    // at ~6-7x on 10 cores, but is PARKED:
-    //   * Naive fix (spawn workers + emscripten_sleep to yield instead of busy-waiting)
-    //     ABORTS the real 3D viewer with `Aborted(invalid state: 1)`: the viewer renders
-    //     inside the wx modal/event-pump, which is ALREADY mid-Asyncify-unwind, and a
-    //     second emscripten_sleep cannot nest on the same (already-unwinding) context.
-    //   * A persistent worker pool + busy-wait (no emscripten_sleep) avoided the abort and
-    //     worked, but it busy-waits the main thread; parked pending a cleaner approach.
-    //   * OPEN QUESTION: is a *nestable* yield possible here? This build ships
-    //     `emscripten_fiber_swap`, so fibers (or JSPI) may allow nested suspension —
-    //     needs research before re-landing.
-    //   * Repro + parked pool design: tests/apps/standalone/raytrace-threads/ +
-    //     tests/e2e/coroutine-raytrace.spec.ts; pool code is in `git -C kicad stash`.
-    processBlocks();
-#else
     BS::multi_future<void> futures;
 
     for( size_t i = 0; i < tp.get_thread_count(); ++i )
         futures.push_back( tp.submit_task( processBlocks ) );
 
     futures.wait();
-#endif
 
     m_blockRenderProgressCount += numBlocksRendered;
 
@@ -727,8 +702,10 @@ void RENDER_3D_RAYTRACE_BASE::postProcessShading( uint8_t* /* ptrPBO */, REPORTE
 
         size_t parallelThreadCount = std::max<size_t>( std::thread::hardware_concurrency(), 2 );
 
-        auto shadeWorker = [&]()
+        for( size_t ii = 0; ii < parallelThreadCount; ++ii )
         {
+            std::thread t = std::thread( [&]()
+            {
                 for( size_t y = nextBlock.fetch_add( 1 ); y < m_realBufferSize.y;
                      y = nextBlock.fetch_add( 1 ) )
                 {
@@ -742,24 +719,13 @@ void RENDER_3D_RAYTRACE_BASE::postProcessShading( uint8_t* /* ptrPBO */, REPORTE
                 }
 
                 threadsFinished++;
-        };
+            } );
 
-#ifdef __EMSCRIPTEN__
-        // WASM: detached threads + a main-thread sleep_for busy-wait deadlock under
-        // Asyncify; run the shading serially on the calling thread instead.
-        // TODO(wasm-multicore): single-core — see renderTracing() (multi-core parked: Asyncify nesting).
-        (void) parallelThreadCount;
-        shadeWorker();
-#else
-        for( size_t ii = 0; ii < parallelThreadCount; ++ii )
-        {
-            std::thread t = std::thread( shadeWorker );
             t.detach();
         }
 
         while( threadsFinished < parallelThreadCount )
             std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
-#endif
 
         m_postShaderSsao.SetShadedBuffer( m_shaderBuffer );
 
@@ -785,8 +751,10 @@ void RENDER_3D_RAYTRACE_BASE::postProcessBlurFinish( uint8_t* ptrPBO,
 
         size_t parallelThreadCount = std::max<size_t>( std::thread::hardware_concurrency(), 2 );
 
-        auto blurWorker = [&]()
+        for( size_t ii = 0; ii < parallelThreadCount; ++ii )
         {
+            std::thread t = std::thread( [&]()
+            {
                 for( size_t y = nextBlock.fetch_add( 1 ); y < m_realBufferSize.y;
                      y = nextBlock.fetch_add( 1 ) )
                 {
@@ -813,24 +781,13 @@ void RENDER_3D_RAYTRACE_BASE::postProcessBlurFinish( uint8_t* ptrPBO,
                 }
 
                 threadsFinished++;
-        };
+            } );
 
-#ifdef __EMSCRIPTEN__
-        // WASM: detached threads + a main-thread sleep_for busy-wait deadlock under
-        // Asyncify; run the blur/finish serially on the calling thread instead.
-        // TODO(wasm-multicore): single-core — see renderTracing() (multi-core parked: Asyncify nesting).
-        (void) parallelThreadCount;
-        blurWorker();
-#else
-        for( size_t ii = 0; ii < parallelThreadCount; ++ii )
-        {
-            std::thread t = std::thread( blurWorker );
             t.detach();
         }
 
         while( threadsFinished < parallelThreadCount )
             std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
-#endif
 
         // Debug code
         //m_postShaderSsao.DebugBuffersOutputAsImages();
@@ -856,8 +813,10 @@ void RENDER_3D_RAYTRACE_BASE::renderPreview( uint8_t* ptrPBO )
             std::max<size_t>( std::thread::hardware_concurrency(), 2 ),
             m_blockPositions.size() );
 
-    auto previewWorker = [&]()
+    for( size_t ii = 0; ii < parallelThreadCount; ++ii )
     {
+        std::thread t = std::thread( [&]()
+        {
             for( size_t iBlock = nextBlock.fetch_add( 1 ); iBlock < m_blockPositionsFast.size();
                  iBlock = nextBlock.fetch_add( 1 ) )
             {
@@ -1434,24 +1393,13 @@ void RENDER_3D_RAYTRACE_BASE::renderPreview( uint8_t* ptrPBO )
             }
 
             threadsFinished++;
-    };
+        } );
 
-#ifdef __EMSCRIPTEN__
-    // WASM: detached threads + a main-thread sleep_for busy-wait deadlock under
-    // Asyncify; run the preview serially on the calling thread instead.
-    // TODO(wasm-multicore): single-core — see renderTracing() (multi-core parked: Asyncify nesting).
-    (void) parallelThreadCount;
-    previewWorker();
-#else
-    for( size_t ii = 0; ii < parallelThreadCount; ++ii )
-    {
-        std::thread t = std::thread( previewWorker );
         t.detach();
     }
 
     while( threadsFinished < parallelThreadCount )
         std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
-#endif
 }
 
 
