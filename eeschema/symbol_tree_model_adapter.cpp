@@ -20,6 +20,7 @@
  */
 
 #include "symbol_tree_model_adapter.h"
+#include "symbol_chooser_timing.h"
 
 #include <wx/log.h>
 #include <wx/tokenzr.h>
@@ -125,6 +126,15 @@ void SYMBOL_TREE_MODEL_ADAPTER::AddLibraries( SCH_BASE_FRAME* aFrame )
 
     bool anyLoaded = false;
 
+    // Timing (KICAD_TRACE=KI_TRACE_SYM_CHOOSER): split the per-lib symbol fetch
+    // (GetSymbols -> plugin EnumerateSymbolLib) from the tree-node build, so the
+    // warm cost (no fatLoad, just consume the cache) is attributable.
+    SYM_CHOOSER_TIMING::clock::time_point addStart = SYM_CHOOSER_TIMING::clock::now();
+    double getSymbolsMs = 0.0;
+    double treeBuildMs = 0.0;
+    size_t totalSymbols = 0;
+    size_t libsLoaded = 0;
+
     for( const wxString& lib : toLoad )
     {
         std::optional<LIB_STATUS> status = m_adapter->GetLibraryStatus( lib );
@@ -146,10 +156,17 @@ void SYMBOL_TREE_MODEL_ADAPTER::AddLibraries( SCH_BASE_FRAME* aFrame )
 
         wxString libDescription = ( *rowResult )->Description();
 
+        SYM_CHOOSER_TIMING::clock::time_point tGet = SYM_CHOOSER_TIMING::clock::now();
         std::vector<LIB_SYMBOL*> libSymbols = m_adapter->GetSymbols( lib );
+        getSymbolsMs += std::chrono::duration<double, std::milli>(
+                SYM_CHOOSER_TIMING::clock::now() - tGet ).count();
+        totalSymbols += libSymbols.size();
+        libsLoaded++;
 
         for( const wxString& column : m_adapter->GetAvailableExtraFields( lib ) )
             addColumnIfNecessary( column );
+
+        SYM_CHOOSER_TIMING::clock::time_point tBuild = SYM_CHOOSER_TIMING::clock::now();
 
         if( m_adapter->SupportsSubLibraries( lib ) )
         {
@@ -185,6 +202,9 @@ void SYMBOL_TREE_MODEL_ADAPTER::AddLibraries( SCH_BASE_FRAME* aFrame )
         {
             addFunc( lib, libSymbols, libDescription );
         }
+
+        treeBuildMs += std::chrono::duration<double, std::milli>(
+                SYM_CHOOSER_TIMING::clock::now() - tBuild ).count();
     }
 
     if( !m_pending_load_libraries.empty() && !m_check_pending_libraries_timer )
@@ -210,7 +230,16 @@ void SYMBOL_TREE_MODEL_ADAPTER::AddLibraries( SCH_BASE_FRAME* aFrame )
         m_check_pending_libraries_timer->Start( 1000 );
     }
 
+    SYM_CHOOSER_TIMING::clock::time_point tRanks = SYM_CHOOSER_TIMING::clock::now();
     m_tree.AssignIntrinsicRanks( m_shownColumns );
+    double ranksMs = std::chrono::duration<double, std::milli>(
+            SYM_CHOOSER_TIMING::clock::now() - tRanks ).count();
+
+    double addTotalMs = std::chrono::duration<double, std::milli>(
+            SYM_CHOOSER_TIMING::clock::now() - addStart ).count();
+    SYM_CHOOSER_TIMING::LogRaw( "AddLibraries", addTotalMs, SYM_CHOOSER_TIMING::TotalMs(),
+            wxString::Format( wxT( "libs=%zu symbols=%zu get_symbols_ms=%.1f tree_build_ms=%.1f ranks_ms=%.1f" ),
+                              libsLoaded, totalSymbols, getSymbolsMs, treeBuildMs, ranksMs ) );
 
     if( isLazyLoad && anyLoaded && m_lazyLoadHandler )
     {
