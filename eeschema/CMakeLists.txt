@@ -755,37 +755,11 @@ target_link_libraries( eeschema_kiface
         ${EESCHEMA_KIFACE_LIBRARIES}
     )
 
-if( EMSCRIPTEN )
-    # WASM: Symbol Editor launcher. The symbol editor (FRAME_SCH_SYMBOL_EDITOR) is
-    # served by the eeschema kiface and its sources are already compiled into
-    # eeschema_kiface_objects, so we only need a second single_top launcher that
-    # opens that frame instead of FRAME_SCH.
-    #
-    # single_top.cpp's COMPILE_DEFINITIONS are directory-scoped (not per-target),
-    # and the file is already pinned to TOP_FRAME=FRAME_SCH for the eeschema
-    # executable above. Copy it to a private translation unit so we can give it its
-    # own TOP_FRAME without colliding with eeschema's definition.
-    configure_file(
-        ${CMAKE_SOURCE_DIR}/common/single_top.cpp
-        ${CMAKE_CURRENT_BINARY_DIR}/symbol_editor_single_top.cpp
-        COPYONLY )
-
-    add_executable( symbol_editor
-        ${CMAKE_CURRENT_BINARY_DIR}/symbol_editor_single_top.cpp )
-
-    set_source_files_properties(
-        ${CMAKE_CURRENT_BINARY_DIR}/symbol_editor_single_top.cpp PROPERTIES
-        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH_SYMBOL_EDITOR;PGM_DATA_FILE_EXT=\"kicad_sym\""
-        )
-
-    target_link_libraries( symbol_editor
-        PRIVATE
-            ${EESCHEMA_KIFACE_LIBRARIES}
-        )
-    target_link_options( symbol_editor PRIVATE
-        "LINKER:--allow-multiple-definition"
-        )
-endif()
+# NOTE: The symbol editor (FRAME_SCH_SYMBOL_EDITOR) is served by this same eeschema
+# kiface — its sources are already compiled into eeschema_kiface_objects. It no
+# longer has its own WASM launcher/target: the eeschema bundle selects the symbol
+# frame at RUNTIME via single_top.cpp's "--frame=symedit" flag (see
+# editor-unification). One build serves both editors.
 
 # WASM: standalone legacy(.lib) -> S-expression(.kicad_sym) symbol-library
 # converter. A headless CLI that drives SCH_IO_MGR::ConvertLibrary from main()
