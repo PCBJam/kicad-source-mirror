@@ -416,8 +416,58 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
     // Use KIWAY to create a top window, which registers its existence also.
     // "TOP_FRAME" is a macro that is passed on compiler command line from CMake,
-    // and is one of the types in FRAME_T.
-    KIWAY_PLAYER* frame = Kiway.Player( TOP_FRAME, true );
+    // and is one of the types in FRAME_T. It is the DEFAULT frame this launcher
+    // opens.
+    FRAME_T topFrame = TOP_FRAME;
+
+#ifdef __EMSCRIPTEN__
+    // WASM: one kiface binary already implements all of its sibling frames (e.g.
+    // the pcbnew kiface serves both FRAME_PCB_EDITOR and FRAME_FOOTPRINT_EDITOR;
+    // eeschema serves FRAME_SCH and FRAME_SCH_SYMBOL_EDITOR). Let the JS launcher
+    // choose the frame at RUNTIME via "--frame=<token>" (threaded through
+    // Module.arguments), so we don't build a separate image per frame. Mirrors the
+    // --frame parser in kicad/kicad.cpp. Falls back to TOP_FRAME when no flag given.
+    {
+        static const wxCmdLineEntryDesc frameDesc[] = {
+            { wxCMD_LINE_OPTION, "f", "frame", "Frame to load", wxCMD_LINE_VAL_STRING, 0 },
+            { wxCMD_LINE_PARAM, nullptr, nullptr, "File to load", wxCMD_LINE_VAL_STRING,
+              wxCMD_LINE_PARAM_MULTIPLE | wxCMD_LINE_PARAM_OPTIONAL },
+            { wxCMD_LINE_NONE, nullptr, nullptr, nullptr, wxCMD_LINE_VAL_NONE, 0 }
+        };
+
+        wxCmdLineParser frameParser( App().argc, App().argv );
+        frameParser.SetDesc( frameDesc );
+        frameParser.Parse( false );
+
+        wxString frameName;
+
+        if( frameParser.Found( "frame", &frameName ) )
+        {
+            const struct
+            {
+                const char* name;
+                FRAME_T     type;
+            } frameTokens[] = { { "pcb", FRAME_PCB_EDITOR },
+                                { "fpedit", FRAME_FOOTPRINT_EDITOR },
+                                { "sch", FRAME_SCH },
+                                { "symedit", FRAME_SCH_SYMBOL_EDITOR },
+                                { "gerb", FRAME_GERBER },
+                                { "ds", FRAME_PL_EDITOR },
+                                { "calc", FRAME_CALC } };
+
+            for( const auto& token : frameTokens )
+            {
+                if( frameName == token.name )
+                {
+                    topFrame = token.type;
+                    break;
+                }
+            }
+        }
+    }
+#endif
+
+    KIWAY_PLAYER* frame = Kiway.Player( topFrame, true );
 
     if( frame == nullptr )
     {
@@ -458,6 +508,11 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
 
     static const wxCmdLineEntryDesc desc[] = {
+#ifdef __EMSCRIPTEN__
+        // Recognize (and ignore, for file purposes) the runtime frame selector so
+        // this positional-file parse doesn't error on "--frame=<token>".
+        { wxCMD_LINE_OPTION, "f", "frame", "Frame to load", wxCMD_LINE_VAL_STRING, 0 },
+#endif
         { wxCMD_LINE_PARAM, nullptr, nullptr, "File to load", wxCMD_LINE_VAL_STRING,
           wxCMD_LINE_PARAM_MULTIPLE | wxCMD_LINE_PARAM_OPTIONAL },
         { wxCMD_LINE_NONE, nullptr, nullptr, nullptr, wxCMD_LINE_VAL_NONE, 0 }
@@ -486,14 +541,38 @@ bool PGM_SINGLE_TOP::OnPgmInit()
         {
             wxFileName argv1( fileArgs[0] );
 
-#if defined(PGM_DATA_FILE_EXT)
-            // PGM_DATA_FILE_EXT, if present, may be different for each compile,
-            // it may come from CMake on the compiler command line, but often does not.
-            // This facility is mostly useful for those program footprints
-            // supporting a single argv[1].
             if( !argv1.GetExt() )
+            {
+#ifdef __EMSCRIPTEN__
+                // WASM: the default data-file extension follows the RUNTIME frame
+                // (topFrame, resolved above) rather than a per-build compile define,
+                // so one binary serves both an editor and its library editor.
+                wxString defaultExt;
+
+                switch( topFrame )
+                {
+                case FRAME_PCB_EDITOR:        defaultExt = wxT( "kicad_pcb" ); break;
+                case FRAME_FOOTPRINT_EDITOR:  defaultExt = wxT( "kicad_mod" ); break;
+                case FRAME_SCH:               defaultExt = wxT( "kicad_sch" ); break;
+                case FRAME_SCH_SYMBOL_EDITOR: defaultExt = wxT( "kicad_sym" ); break;
+                default:                                                       break;
+                }
+
+#  if defined(PGM_DATA_FILE_EXT)
+                if( defaultExt.IsEmpty() )
+                    defaultExt = wxT( PGM_DATA_FILE_EXT );
+#  endif
+
+                if( !defaultExt.IsEmpty() )
+                    argv1.SetExt( defaultExt );
+#elif defined(PGM_DATA_FILE_EXT)
+                // PGM_DATA_FILE_EXT, if present, may be different for each compile,
+                // it may come from CMake on the compiler command line, but often does not.
+                // This facility is mostly useful for those program footprints
+                // supporting a single argv[1].
                 argv1.SetExt( wxT( PGM_DATA_FILE_EXT ) );
 #endif
+            }
             argv1.MakeAbsolute();
 
             fileArgs[0] = argv1.GetFullPath();
