@@ -17,6 +17,8 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <optional>
 
@@ -24,6 +26,8 @@
 
 #include <ki_exception.h>
 #include <footprint.h>
+#include <thread_pool.h>
+#include <trace_helpers.h>
 #include <wx/log.h>
 
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
@@ -65,6 +69,18 @@ EM_ASYNC_JS( char*, pcbjam_fp_libs_request_js,
 
         if( res == null )
             return 0;
+
+        // "Copy as-is": the fat list (list/bodies) returns the raw item bytes as a
+        // Uint8Array — memcpy straight into the wasm heap, no string/JSON detour.
+        // s-expr never contains a NUL byte, so NUL-terminate and the C++ side reads
+        // it as a std::string exactly like the string ops (get/save).
+        if( res instanceof Uint8Array )
+        {
+            const p = _pcbjam_fp_libs_alloc( res.length + 1 );
+            HEAPU8.set( res, p );
+            HEAPU8[p + res.length] = 0;
+            return p;
+        }
 
         const len = lengthBytesUTF8( res ) + 1;
         const ptr = _pcbjam_fp_libs_alloc( len );
@@ -118,6 +134,17 @@ static void pcbjam_fp_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
                 if( res == null )
                 {
                     done( 0 );
+                    return;
+                }
+
+                // "Copy as-is": raw item bytes (fat list) → memcpy; NUL-terminate
+                // so the C++ side reads a std::string like the string ops.
+                if( res instanceof Uint8Array )
+                {
+                    const p = _pcbjam_fp_libs_alloc( res.length + 1 );
+                    HEAPU8.set( res, p );
+                    HEAPU8[p + res.length] = 0;
+                    done( p );
                     return;
                 }
 
@@ -264,56 +291,160 @@ void PCB_IO_PCBJAM_FP::FootprintEnumerate( wxArrayString& aFootprintNames,
 }
 
 
-void PCB_IO_PCBJAM_FP::cacheFootprint( const wxString& aLibraryPath, const wxString& aName,
-                                       const std::string& aBody )
+// File-local: parse one (footprint …) document into a fresh master. PURE — it
+// touches no member or global state and makes no provider/bridge call — so it is
+// safe to run on a thread-pool worker (the parallel-parse path in fatLoad). Each
+// worker builds its own wxString from the UTF-8 body (NOT a shared wxString:
+// wxString's copy-on-write refcount is not thread-safe), and constructs its own
+// PCB_IO_KICAD_SEXPR. A malformed body yields nullptr — one bad footprint must not
+// abort the library.
+static FOOTPRINT* parseFpDoc( const std::string& aBody )
 {
-    wxString cacheKey = aLibraryPath + wxS( "|" ) + aName;
-
-    // Cache-if-absent: a footprint already loaded by an earlier "get" keeps its
-    // master (callers hold clones, not the master, but staying consistent with
-    // the symbol plugin and avoiding redundant parses).
-    if( m_cache.find( cacheKey ) != m_cache.end() )
-        return;
-
     try
     {
         PCB_IO_KICAD_SEXPR pi;
         BOARD_ITEM*        item = pi.Parse( wxString::FromUTF8( aBody.c_str(), aBody.size() ) );
 
         if( FOOTPRINT* footprint = dynamic_cast<FOOTPRINT*>( item ) )
-            m_cache[cacheKey] = footprint;
-        else
-            delete item;
+            return footprint;
+
+        delete item;
     }
-    catch( const IO_ERROR& e )
+    catch( ... )
     {
-        // One bad body doesn't abort the library; the item is simply unavailable.
-        m_lastError = wxString::Format( _( "Footprint '%s' in pcbjam library '%s' is invalid: %s" ),
-                                        aName, aLibraryPath, e.What() );
-        wxLogTrace( wxS( "PCBJAM_FP" ), m_lastError );
+        // Runs on a worker — no exception may escape into the pool future (it would
+        // be rethrown by wait() on the app thread and bypass the aBestEfforts /
+        // IO_ERROR handling in FootprintEnumerate). One bad body is simply dropped.
     }
+
+    return nullptr;
+}
+
+
+void PCB_IO_PCBJAM_FP::mergeFpDoc( const wxString& aLibraryPath, const wxString& aName,
+                                   FOOTPRINT* aFootprint )
+{
+    if( !aFootprint )
+        return;
+
+    wxString cacheKey = aLibraryPath + wxS( "|" ) + aName;
+
+    // Cache-if-absent: a footprint already loaded by an earlier "get" keeps its
+    // master (callers hold clones, not the master, but staying consistent with the
+    // symbol plugin and avoiding redundant parses); the duplicate is freed.
+    if( m_cache.find( cacheKey ) != m_cache.end() )
+    {
+        delete aFootprint;
+        return;
+    }
+
+    m_cache[cacheKey] = aFootprint;
+}
+
+
+void PCB_IO_PCBJAM_FP::cacheFootprint( const wxString& aLibraryPath, const wxString& aName,
+                                       const std::string& aBody )
+{
+    // Single-get path (loadOne): parse on the calling thread, then cache-if-absent.
+    mergeFpDoc( aLibraryPath, aName, parseFpDoc( aBody ) );
 }
 
 
 void PCB_IO_PCBJAM_FP::fatLoad( const wxString& aLibraryPath )
 {
+    using clock = std::chrono::steady_clock;
+    auto msSince = []( clock::time_point a, clock::time_point b )
+                   { return std::chrono::duration<double, std::milli>( b - a ).count(); };
+
     // One crossing for the whole library: "list" with arg "bodies" returns every
     // footprint's body. request() throws if the provider yields null, so a
     // transient failure leaves the lib un-flagged and retries on the next
     // enumerate; an empty "footprints" array is a legitimately empty library.
-    std::string body = request( "list", aLibraryPath, wxS( "bodies" ) );
+    clock::time_point t0 = clock::now();
+    std::string       body = request( "list", aLibraryPath, wxS( "bodies" ) );
+    clock::time_point tFetch = clock::now();
 
+    // Framed fat-list payload ("copy as-is", mirrors the symbol plugin): a one-line
+    // JSON header
+    //   {"footprints":[{"name":..,"len":<utf8 byte length>}, ...]}
+    // then a single '\n', then every body's raw s-expr bytes concatenated with NO
+    // JSON escaping (the provider memcpy's them across the bridge). So we parse only
+    // the small header and slice the body region by byte length — none of the s-expr
+    // gets un-escaped. The header JSON is single-line, so the first '\n' terminates it.
+    std::vector<size_t>   offs;
+    std::vector<size_t>   lens;
     std::vector<wxString> names;
 
-    // nlohmann::json::exception propagates to FootprintEnumerate (aBestEfforts).
-    nlohmann::json js = nlohmann::json::parse( body );
+    size_t nl = body.find( '\n' );
 
-    for( const auto& item : js.at( "footprints" ) )
+    if( nl == std::string::npos )
     {
-        wxString name = wxString::FromUTF8( item.at( "name" ).get<std::string>() );
-        cacheFootprint( aLibraryPath, name, item.at( "body" ).get<std::string>() );
-        names.push_back( name );
+        m_lastError = wxString::Format( _( "pcbjam fat list for '%s' is malformed (no header)" ),
+                                        aLibraryPath );
+        THROW_IO_ERROR( m_lastError );
     }
+
+    // nlohmann::json::exception propagates to FootprintEnumerate (aBestEfforts).
+    nlohmann::json header = nlohmann::json::parse( body.substr( 0, nl ) );
+    const auto&    arr = header.at( "footprints" );
+
+    offs.reserve( arr.size() );
+    lens.reserve( arr.size() );
+    names.reserve( arr.size() );
+
+    size_t off = nl + 1;
+
+    for( const auto& item : arr )
+    {
+        size_t len = item.at( "len" ).get<size_t>();
+        offs.push_back( off );
+        lens.push_back( len );
+        off += len;
+        names.emplace_back( wxString::FromUTF8( item.at( "name" ).get<std::string>() ) );
+    }
+
+    clock::time_point tHeader = clock::now();
+
+    // Parallel s-expr parse: each worker slices its bodies out of `body` (read-only
+    // shared, so concurrent reads are safe) and parses each to a LOCAL master.
+    // parseFpDoc is pure (no member/global state, no bridge call), so this is safe
+    // off the app thread; the wait() yields via the build's main-thread
+    // nanosleep->yield shim, mirroring the 3D raytracer's submit_blocks/wait and the
+    // symbol plugin's fatLoad. Fetch (Asyncify, above) and the cache merge (below)
+    // stay on the calling app thread.
+    const size_t            count = offs.size();
+    std::vector<FOOTPRINT*> parsed( count, nullptr );
+
+    if( count > 0 )
+    {
+        thread_pool& tp = GetKiCadThreadPool();
+
+        tp.submit_blocks( size_t( 0 ), count,
+                [&body, &parsed, &offs, &lens]( size_t start, size_t end )
+                {
+                    for( size_t i = start; i < end; ++i )
+                    {
+                        size_t lo = std::min( offs[i], body.size() );
+                        size_t hi = std::min( offs[i] + lens[i], body.size() );
+                        parsed[i] = parseFpDoc( std::string( body.data() + lo, hi - lo ) );
+                    }
+                } )
+                .wait();
+    }
+
+    clock::time_point tParse = clock::now();
+
+    // Merge every parsed master into m_cache on the app thread (cache-if-absent).
+    for( size_t i = 0; i < count; ++i )
+        mergeFpDoc( aLibraryPath, names[i], parsed[i] );
+
+    // Cold-path breakdown (KICAD_TRACE=KI_TRACE_FP_CHOOSER): fetch crossing vs the
+    // (tiny) header parse vs the parallel s-expr parse wall-time vs the merge.
+    // fatLoad runs once per lib (cached after), so this is cold-only.
+    KI_TRACE( wxT( "KI_TRACE_FP_CHOOSER" ),
+              wxT( "fatLoad lib=%s footprints=%zu bytes=%zu fetch_ms=%.1f header_ms=%.1f parse_ms=%.1f merge_ms=%.1f total_ms=%.1f\n" ),
+              aLibraryPath, count, body.size(), msSince( t0, tFetch ), msSince( tFetch, tHeader ),
+              msSince( tHeader, tParse ), msSince( tParse, clock::now() ), msSince( t0, clock::now() ) );
 
     m_libNames[aLibraryPath] = std::move( names );
     m_loadedLibs.insert( aLibraryPath );

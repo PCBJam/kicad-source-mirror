@@ -48,12 +48,14 @@ class FOOTPRINT;
  * The provider answers (kind = "footprint"):
  *
  *   request( "list", uri, "",   "footprint" ) -> JSON {"footprints":["R_0402",..]}
- *   request( "list", uri, "bodies", "footprint" ) -> JSON
- *                                                {"footprints":[{"name":..,"body":..}]}
- *                                                the "fat list": every footprint
- *                                                body in ONE crossing, so a whole
- *                                                library hydrates without N
- *                                                per-item "get"s (0011)
+ *   request( "list", uri, "bodies", "footprint" ) -> the "fat list": a framed
+ *                                                Uint8Array — one-line JSON header
+ *                                                {"footprints":[{"name":..,"len":..}]}
+ *                                                then '\n' then every body's raw
+ *                                                s-expr bytes concatenated (copied
+ *                                                as-is, no JSON escaping). A whole
+ *                                                library hydrates in ONE crossing,
+ *                                                parsed in parallel (0011 / 0013)
  *   request( "get",  uri, name, "footprint" ) -> a complete (footprint …) s-expr
  *                                                document, or null if not found
  *   request( "save", uri, json, "footprint" ) -> persist one footprint; json is
@@ -112,9 +114,14 @@ private:
     FOOTPRINT* loadOne( const wxString& aLibraryPath, const wxString& aName );
 
     /// Parse one (footprint …) document and cache it (cache-if-absent). A parse
-    /// failure is logged and skipped, leaving the item simply unavailable.
+    /// failure is logged and skipped, leaving the item simply unavailable. Thin
+    /// wrapper over parseFpDoc (pure) + mergeFpDoc (cache) for the single-get path.
     void cacheFootprint( const wxString& aLibraryPath, const wxString& aName,
                          const std::string& aBody );
+
+    /// Cache-if-absent one already-parsed footprint master (app thread). Takes
+    /// ownership: an absent key adopts it, a duplicate frees it. Null is a no-op.
+    void mergeFpDoc( const wxString& aLibraryPath, const wxString& aName, FOOTPRINT* aFootprint );
 
     /// Fetch the whole library in one "fat list" crossing and cache every body;
     /// records the footprint names so a repeat enumerate rebuilds from cache.

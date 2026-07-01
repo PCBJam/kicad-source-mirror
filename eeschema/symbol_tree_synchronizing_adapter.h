@@ -40,9 +40,6 @@ public:
 
     bool IsContainer( const wxDataViewItem& aItem ) const override;
 
-    /// Lazily enumerate a library's symbols the first time its node is expanded.
-    void OnExpanding( const wxDataViewItem& aItem ) override;
-
     void Sync( const wxString& aForceRefresh, std::function<void( int, int, const wxString&)> aProgressCallback );
 
     int GetLibrariesCount() const override;
@@ -73,12 +70,6 @@ protected:
 
     /// Hashes to decide whether a library needs an update.
     std::map<wxString, int> m_libHashes;
-
-    /// Libraries whose symbols have been enumerated into the tree. Libraries are
-    /// added as empty, collapsed nodes and only populated on first expand
-    /// (OnExpanding), so the tree appears instantly and network-backed (CDN)
-    /// libraries are fetched on demand rather than all at startup.
-    std::set<wxString> m_populatedLibs;
 
     /// #SYMBOL_LIBRARY_MANAGER hash value returned in the last synchronization.
     int                     m_lastSyncHash;
