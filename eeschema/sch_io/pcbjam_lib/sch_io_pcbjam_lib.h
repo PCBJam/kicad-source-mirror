@@ -114,8 +114,22 @@ private:
     /// (the requested symbol plus any intra-lib `extends` parents).
     void cacheLibDocument( const wxString& aLibraryPath, const std::string& aBody );
 
+    /// Merge an already-parsed document's symbols into m_cache (cache-if-absent;
+    /// duplicates are deleted), appending newly-cached masters to aFresh. Does NOT
+    /// link `extends` parents — call linkExtends() once after all merges so a
+    /// derived symbol whose parent lives in a different (parallel-parsed) body can
+    /// still resolve. m_cache is plugin-local, so this runs on the app thread.
+    void mergeLibDoc( const wxString& aLibraryPath, LIB_SYMBOL_MAP& aMap,
+                      std::vector<LIB_SYMBOL*>& aFresh );
+
+    /// Resolve `extends` (derived-symbol) parent pointers for aFresh against
+    /// m_cache (run after all of a library's bodies are merged).
+    void linkExtends( const wxString& aLibraryPath, const std::vector<LIB_SYMBOL*>& aFresh );
+
     /// Fetch the whole library in one "fat list" crossing and cache every body;
     /// records the lib's symbol names so a repeat enumerate rebuilds from cache.
+    /// The per-symbol s-expr parse (the dominant cost) runs in parallel on the
+    /// KiCad thread pool; fetch + merge stay on the calling (app) thread.
     void fatLoad( const wxString& aLibraryPath );
 
     /// Per-(lib,name) master symbols owned by this plugin; callers get clones.

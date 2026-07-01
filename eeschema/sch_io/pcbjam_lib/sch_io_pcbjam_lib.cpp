@@ -17,6 +17,7 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 #include <optional>
@@ -26,6 +27,7 @@
 #include <ki_exception.h>
 #include <lib_symbol.h>
 #include <richio.h>
+#include <thread_pool.h>
 #include <trace_helpers.h>
 #include <wx/log.h>
 
@@ -67,6 +69,18 @@ EM_ASYNC_JS( char*, pcbjam_libs_request_js,
 
         if( res == null )
             return 0;
+
+        // "Copy as-is": the fat list (list/bodies) returns the raw item bytes as a
+        // Uint8Array — memcpy straight into the wasm heap, no string/JSON detour.
+        // s-expr never contains a NUL byte, so NUL-terminate and the C++ side reads
+        // it as a std::string exactly like the string ops (get/save).
+        if( res instanceof Uint8Array )
+        {
+            const p = _pcbjam_libs_alloc( res.length + 1 );
+            HEAPU8.set( res, p );
+            HEAPU8[p + res.length] = 0;
+            return p;
+        }
 
         const len = lengthBytesUTF8( res ) + 1;
         const ptr = _pcbjam_libs_alloc( len );
@@ -121,6 +135,17 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
                 if( res == null )
                 {
                     done( 0 );
+                    return;
+                }
+
+                // "Copy as-is": raw item bytes (fat list) → memcpy; NUL-terminate
+                // so the C++ side reads a std::string like the string ops.
+                if( res instanceof Uint8Array )
+                {
+                    const p = _pcbjam_libs_alloc( res.length + 1 );
+                    HEAPU8.set( res, p );
+                    HEAPU8[p + res.length] = 0;
+                    done( p );
                     return;
                 }
 
@@ -289,21 +314,45 @@ void SCH_IO_PCBJAM_LIB::EnumerateSymbolLib( std::vector<LIB_SYMBOL*>& aSymbolLis
 }
 
 
-void SCH_IO_PCBJAM_LIB::cacheLibDocument( const wxString& aLibraryPath, const std::string& aBody )
+// File-local: parse one kicad_symbol_lib document into a fresh symbol map. PURE —
+// it touches no member or global state and makes no provider/bridge call — so it
+// is safe to run on a thread-pool worker (the parallel-parse path in fatLoad). The
+// lib path arrives as UTF-8 std::string (NOT a shared wxString: wxString's
+// copy-on-write refcount is not thread-safe, so each worker builds its own). A
+// malformed body yields an empty map — one bad symbol must not abort the library.
+static LIB_SYMBOL_MAP parseLibDoc( const std::string& aBody, const std::string& aLibPathUtf8 )
 {
-    STRING_LINE_READER        reader( aBody, aLibraryPath );
-    SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
-    LIB_SYMBOL_MAP            map;
+    LIB_SYMBOL_MAP map;
 
-    parser.ParseLib( map );
+    try
+    {
+        wxString                  source = wxString::FromUTF8( aLibPathUtf8 );
+        STRING_LINE_READER        reader( aBody, source );
+        SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
+        parser.ParseLib( map );
+    }
+    catch( ... )
+    {
+        // Runs on a worker — no exception may escape into the pool future (it
+        // would be rethrown by wait() on the app thread and bypass GetSymbols's
+        // IO_ERROR handler). One bad body is simply dropped.
+        for( auto& [name, symbol] : map )
+            delete symbol;
 
-    // The document may carry `extends` parents alongside the requested symbol;
-    // cache everything it contained.  Cache-if-absent (not replace): a parent
-    // re-seen in a later body keeps the already-cached master, so pointers held
-    // by earlier derived symbols never dangle; the parsed duplicate is freed.
-    std::vector<LIB_SYMBOL*> fresh;
+        map.clear();
+    }
 
-    for( auto& [name, symbol] : map )
+    return map;
+}
+
+
+void SCH_IO_PCBJAM_LIB::mergeLibDoc( const wxString& aLibraryPath, LIB_SYMBOL_MAP& aMap,
+                                     std::vector<LIB_SYMBOL*>& aFresh )
+{
+    // Cache-if-absent (not replace): a parent re-seen in a later body keeps the
+    // already-cached master, so pointers held by earlier derived symbols never
+    // dangle; the parsed duplicate is freed.
+    for( auto& [name, symbol] : aMap )
     {
         wxString key = aLibraryPath + wxS( "|" ) + name;
 
@@ -314,18 +363,23 @@ void SCH_IO_PCBJAM_LIB::cacheLibDocument( const wxString& aLibraryPath, const st
         }
 
         m_cache[key] = symbol;
-        fresh.push_back( symbol );
+        aFresh.push_back( symbol );
     }
+}
 
-    // Resolve `extends` (derived-symbol) parents. ParseLib only records the
-    // parent NAME (SetParentName); the standard SCH_IO_KICAD_SEXPR_LIB_CACHE
-    // links the parent pointer in a second pass (updateParentSymbolLinks). We
-    // bypass that cache, so do it here — otherwise IsDerived() stays false and
-    // LIB_SYMBOL::Flatten() (used by the symbol-chooser preview) drops the
-    // parent's body geometry, rendering the preview as a zoomed-out dot. The
-    // parent is normally bundled in the same body; fall back to the cache for a
-    // parent loaded by an earlier request.
-    for( LIB_SYMBOL* symbol : fresh )
+
+void SCH_IO_PCBJAM_LIB::linkExtends( const wxString&                 aLibraryPath,
+                                     const std::vector<LIB_SYMBOL*>& aFresh )
+{
+    // Resolve `extends` (derived-symbol) parents. ParseLib only records the parent
+    // NAME (SetParentName); the standard SCH_IO_KICAD_SEXPR_LIB_CACHE links the
+    // pointer in a second pass (updateParentSymbolLinks). We bypass that cache, so
+    // do it here — otherwise IsDerived() stays false and LIB_SYMBOL::Flatten()
+    // (used by the chooser preview) drops the parent's body geometry, rendering
+    // the preview as a zoomed-out dot. The parent is normally bundled in the same
+    // body but may have parsed in a different (parallel) body, so resolve against
+    // the full m_cache after every body of the library has merged.
+    for( LIB_SYMBOL* symbol : aFresh )
     {
         if( symbol->GetParentName().IsEmpty() || symbol->GetParent().lock() )
             continue;
@@ -335,6 +389,16 @@ void SCH_IO_PCBJAM_LIB::cacheLibDocument( const wxString& aLibraryPath, const st
         if( auto pit = m_cache.find( parentKey ); pit != m_cache.end() )
             symbol->SetParent( pit->second );
     }
+}
+
+
+void SCH_IO_PCBJAM_LIB::cacheLibDocument( const wxString& aLibraryPath, const std::string& aBody )
+{
+    LIB_SYMBOL_MAP           map = parseLibDoc( aBody, std::string( aLibraryPath.utf8_str() ) );
+    std::vector<LIB_SYMBOL*> fresh;
+
+    mergeLibDoc( aLibraryPath, map, fresh );
+    linkExtends( aLibraryPath, fresh );
 }
 
 
@@ -352,39 +416,103 @@ void SCH_IO_PCBJAM_LIB::fatLoad( const wxString& aLibraryPath )
     std::string       body = request( "list", aLibraryPath, wxS( "bodies" ) );
     clock::time_point tFetch = clock::now();
 
+    // Framed fat-list payload ("copy as-is"): a one-line JSON header
+    //   {"symbols":[{"name":..,"len":<utf8 byte length>}, ...]}
+    // then a single '\n', then every body's raw s-expr bytes concatenated with NO
+    // JSON escaping (the provider memcpy's them across the bridge). So we parse only
+    // the small header and slice the body region by byte length — none of the
+    // ~450MB gets un-escaped (the old per-body JSON parse was ~22% of the cold
+    // load). The header JSON is single-line, so the first '\n' is its terminator.
+    std::vector<size_t>   offs;
+    std::vector<size_t>   lens;
     std::vector<wxString> names;
-    double                jsonMs = 0.0;
-    double                sexprMs = 0.0;
+
+    size_t nl = body.find( '\n' );
+
+    if( nl == std::string::npos )
+    {
+        m_lastError = wxString::Format( _( "pcbjam fat list for '%s' is malformed (no header)" ),
+                                        aLibraryPath );
+        THROW_IO_ERROR( m_lastError );
+    }
 
     try
     {
-        clock::time_point tj0 = clock::now();
-        nlohmann::json    js = nlohmann::json::parse( body );
-        jsonMs = msSince( tj0, clock::now() );
+        nlohmann::json header = nlohmann::json::parse( body.substr( 0, nl ) );
+        const auto&    arr = header.at( "symbols" );
 
-        for( const auto& item : js.at( "symbols" ) )
+        offs.reserve( arr.size() );
+        lens.reserve( arr.size() );
+        names.reserve( arr.size() );
+
+        size_t off = nl + 1;
+
+        for( const auto& item : arr )
         {
-            clock::time_point ts0 = clock::now();
-            cacheLibDocument( aLibraryPath, item.at( "body" ).get<std::string>() );
-            sexprMs += msSince( ts0, clock::now() );
+            size_t len = item.at( "len" ).get<size_t>();
+            offs.push_back( off );
+            lens.push_back( len );
+            off += len;
             names.emplace_back( wxString::FromUTF8( item.at( "name" ).get<std::string>() ) );
         }
     }
     catch( const nlohmann::json::exception& e )
     {
-        m_lastError = wxString::Format( _( "pcbjam fat list for '%s' is invalid: %s" ),
+        m_lastError = wxString::Format( _( "pcbjam fat list header for '%s' is invalid: %s" ),
                                         aLibraryPath, wxString( e.what() ) );
         THROW_IO_ERROR( m_lastError );
     }
 
+    clock::time_point tJson = clock::now();
+
+    // Parallel s-expr parse: each worker slices its bodies out of `body` (read-only
+    // shared, so concurrent reads are safe) and parses each to a LOCAL map.
+    // parseLibDoc is pure (no member/global state, no bridge call), so this is safe
+    // off the app thread; the wait() yields via the build's main-thread
+    // nanosleep->yield shim, mirroring the 3D raytracer's submit_blocks/wait. This
+    // spreads the dominant per-symbol s-expr parse over all cores; fetch (Asyncify,
+    // above) and the cache merge (below) stay on the calling app thread; the lib
+    // path is passed as UTF-8 std::string so no shared wxString crosses threads.
+    const size_t                count = offs.size();
+    std::vector<LIB_SYMBOL_MAP> maps( count );
+
+    if( count > 0 )
+    {
+        const std::string libPathUtf8( aLibraryPath.utf8_str() );
+        thread_pool&      tp = GetKiCadThreadPool();
+
+        tp.submit_blocks( size_t( 0 ), count,
+                [&body, &maps, &offs, &lens, &libPathUtf8]( size_t start, size_t end )
+                {
+                    for( size_t i = start; i < end; ++i )
+                    {
+                        size_t lo = std::min( offs[i], body.size() );
+                        size_t hi = std::min( offs[i] + lens[i], body.size() );
+                        maps[i] = parseLibDoc( std::string( body.data() + lo, hi - lo ),
+                                               libPathUtf8 );
+                    }
+                } )
+                .wait();
+    }
+
+    clock::time_point tParse = clock::now();
+
+    // Merge every parsed body into m_cache on the app thread (cache-if-absent),
+    // then resolve `extends` parents once the whole library is present.
+    std::vector<LIB_SYMBOL*> fresh;
+
+    for( LIB_SYMBOL_MAP& map : maps )
+        mergeLibDoc( aLibraryPath, map, fresh );
+
+    linkExtends( aLibraryPath, fresh );
+
     // Cold-path breakdown (KICAD_TRACE=KI_TRACE_SYM_CHOOSER): the fetch crossing
-    // (IDB read + marshal across the JS bridge) vs the JSON envelope parse vs the
-    // per-symbol s-expr parse, so the first-open cost is attributable. fatLoad
-    // runs once per lib (cached after), so these numbers are cold-only.
+    // vs the (now tiny) header parse vs the parallel s-expr parse wall-time vs the
+    // merge. fatLoad runs once per lib (cached after), so this is cold-only.
     KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ),
-              wxT( "fatLoad lib=%s symbols=%zu bytes=%zu fetch_ms=%.1f json_ms=%.1f sexpr_ms=%.1f total_ms=%.1f\n" ),
-              aLibraryPath, names.size(), body.size(), msSince( t0, tFetch ), jsonMs, sexprMs,
-              msSince( t0, clock::now() ) );
+              wxT( "fatLoad lib=%s symbols=%zu bytes=%zu fetch_ms=%.1f header_ms=%.1f parse_ms=%.1f merge_ms=%.1f total_ms=%.1f\n" ),
+              aLibraryPath, count, body.size(), msSince( t0, tFetch ), msSince( tFetch, tJson ),
+              msSince( tJson, tParse ), msSince( tParse, clock::now() ), msSince( t0, clock::now() ) );
 
     m_libNames[aLibraryPath] = std::move( names );
     m_loadedLibs.insert( aLibraryPath );
