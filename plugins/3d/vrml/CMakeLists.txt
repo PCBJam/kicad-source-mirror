@@ -23,7 +23,29 @@ include_directories(
 # export WXTRACE="PLUGIN_VRML"
 #
 
-add_library( s3d_plugin_vrml MODULE
+set( S3D_PLUGIN_VRML_TYPE MODULE )
+
+if( EMSCRIPTEN )
+    # WASM has no dlopen: build as a static archive consumed by the registry in
+    # 3d-viewer/3d_cache/pcbjam_static_3d_plugins.cpp.  vrml.cpp is the single TU
+    # holding every flat C export (including the three defined by 3d_plugin.h);
+    # rename them vrml3d_* so they don't collide with the oce plugin's copies or
+    # with 3d_plugin_manager.cpp's own include of 3d_plugin.h.  `Load` is NOT
+    # renamed: the token also appears as X3DPARSER::Load (called here, defined in
+    # x3d.cpp, which itself calls wxXmlDocument::Load so it can't share the
+    # rename).  The extern "C" `Load` stays unprefixed — unique in the binary
+    # because the oce plugin's copy IS renamed.
+    # FILE_DATA is renamed too: vrml.cpp and oce.cpp both define a namespace-
+    # scope `struct FILE_DATA` with an inline ctor but DIFFERENT bodies — fine
+    # as separate DSOs, an ODR trap statically: the linker dedupes the linkonce
+    # ctor and one plugin's extension list initializes the other's (oce
+    # registered wrl/x3d and never matched .step until this rename).
+    set( S3D_PLUGIN_VRML_TYPE STATIC )
+    set_source_files_properties( vrml.cpp PROPERTIES COMPILE_DEFINITIONS
+        "GetKicadPluginClass=vrml3d_GetKicadPluginClass;GetClassVersion=vrml3d_GetClassVersion;CheckClassVersion=vrml3d_CheckClassVersion;GetKicadPluginName=vrml3d_GetKicadPluginName;GetPluginVersion=vrml3d_GetPluginVersion;GetNExtensions=vrml3d_GetNExtensions;GetModelExtension=vrml3d_GetModelExtension;GetNFilters=vrml3d_GetNFilters;GetFileFilter=vrml3d_GetFileFilter;CanRender=vrml3d_CanRender;FILE_DATA=VRML3D_FILE_DATA" )
+endif()
+
+add_library( s3d_plugin_vrml ${S3D_PLUGIN_VRML_TYPE}
         vrml.cpp
         x3d.cpp
         wrlproc.cpp
