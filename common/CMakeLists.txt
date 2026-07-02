@@ -1128,6 +1128,13 @@ endif()
 
 target_compile_definitions(pcbcommon PRIVATE PCBNEW)
 
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged editor image: pcbcommon is PCB-side code (pad.cpp/pcb_painter.cpp/... call
+    # Kiface() with no frame context and must statically reach the PCB kiface). Same
+    # rename set as pcbnew_kiface_objects — see the top-level CMakeLists.txt.
+    target_compile_definitions( pcbcommon PRIVATE ${KICAD_WASM_PCB_SIDE_RENAMES} )
+endif()
+
 target_include_directories( pcbcommon PRIVATE
     )
 

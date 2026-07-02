@@ -869,6 +869,13 @@ if( EMSCRIPTEN )
     target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_WASM_STUBS} )
 endif()
 
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged editor image: statically bind this kiface's Kiface() calls to its own
+    # accessor and rename the symbols eeschema also defines (see the rename list and
+    # rationale at the top-level CMakeLists.txt).
+    target_compile_definitions( pcbnew_kiface_objects PRIVATE ${KICAD_WASM_PCB_SIDE_RENAMES} )
+endif()
+
 if( KICAD_USE_PCH )
     target_precompile_headers( pcbnew_kiface_objects
         PRIVATE
@@ -956,6 +963,12 @@ if( NOT EMSCRIPTEN OR KICAD_BUILD_3D_VIEWER_WASM )
     list( APPEND PCBNEW_KIFACE_LIBRARIES 3d-viewer )
 endif()
 
+if( EMSCRIPTEN )
+    # Export for the merged kicad_editor target (wasm/editor/), which links both kifaces'
+    # library sets from outside this directory scope. Same pattern as PCBNEW_IO_LIBRARIES.
+    set( PCBNEW_KIFACE_LIBRARIES "${PCBNEW_KIFACE_LIBRARIES}" CACHE INTERNAL "" )
+endif()
+
 # WASM: Link kiface objects directly into pcbnew executable (static linking)
 if( EMSCRIPTEN )
     target_link_libraries( pcbnew
@@ -991,9 +1004,17 @@ set_source_files_properties( pcbnew.cpp PROPERTIES
     )
 if( EMSCRIPTEN )
     # WASM: static kiface linking — pcbnew.cpp must NOT export the kiway DLL symbols.
-    set_source_files_properties( pcbnew.cpp PROPERTIES
-        COMPILE_DEFINITIONS     "COMPILING_DLL"
-        )
+    # In the merged editor image the getter additionally gets a per-engine name so both
+    # kifaces' getters can coexist (kiway.h's KIFACE_GETTER macro is #ifndef-guarded).
+    if( KICAD_WASM_MERGED_EDITOR )
+        set_source_files_properties( pcbnew.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL;KIFACE_GETTER=pcbnew_kiface_getter"
+            )
+    else()
+        set_source_files_properties( pcbnew.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL"
+            )
+    endif()
 endif()
 
 target_link_options( pcbnew_kiface PRIVATE

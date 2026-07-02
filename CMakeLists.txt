@@ -72,6 +72,52 @@ set( CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${KICAD_CMAKE_MODULE_PATH}" )
 # hardcoded ${CMAKE_SOURCE_DIR}/../wasm reach-outs in the EMSCRIPTEN build branches below.
 set( KICAD_WASM_LAYER "${CMAKE_SOURCE_DIR}/../wasm" CACHE PATH "Path to the WASM compatibility layer" )
 
+# Merged pcbnew+eeschema WASM editor (editor-unification Part 2): link BOTH kifaces into
+# one kicad_editor executable whose frame is chosen at runtime by --frame. OFF by default
+# (standalone per-app trees are byte-identical); only the kicad_editor build tree passes ON.
+option( KICAD_WASM_MERGED_EDITOR "Link the pcbnew and eeschema kifaces into one WASM image (kicad_editor)" OFF )
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # PCB-side compile renames for the merged image. Two classes of symbol collide with
+    # eeschema (verified by a strong+weak llvm-nm intersection of the two kiface object
+    # sets — see docs/features/editor-unification):
+    #   - Kiface(): each engine's accessor must stay per-engine. PCB code runs while a
+    #     SCH frame is active (footprint previews in the symbol chooser), so a runtime
+    #     "active editor" lookup would hand PCB code the wrong kiface — the binding has
+    #     to be static, per module.
+    #   - Upstream reuses these class/data names for DIFFERENT types per module (fine as
+    #     separate DSOs). In one static image their vtables/typeinfo/inline members would
+    #     silently cross-bind (the WASM link needs --allow-multiple-definition for wx
+    #     dupes, so no error — just memory corruption at runtime).
+    # Renaming ONE side (PCB) breaks every collision with zero source edits. Applied to
+    # pcbnew_kiface_objects and pcbcommon (the only PCB-side targets that define or
+    # reference these symbols). Re-audit on kicad version bumps (scripts/kicad/
+    # audit-merged-symbols.sh in the parent repo).
+    set( KICAD_WASM_PCB_SIDE_RENAMES
+        Kiface=PcbKiface
+        DIALOG_TEXT_PROPERTIES=PCB_DIALOG_TEXT_PROPERTIES
+        DIALOG_TEXT_PROPERTIES_BASE=PCB_DIALOG_TEXT_PROPERTIES_BASE
+        DIALOG_SHAPE_PROPERTIES=PCB_DIALOG_SHAPE_PROPERTIES
+        DIALOG_SHAPE_PROPERTIES_BASE=PCB_DIALOG_SHAPE_PROPERTIES_BASE
+        DIALOG_TABLE_PROPERTIES=PCB_DIALOG_TABLE_PROPERTIES
+        DIALOG_TABLE_PROPERTIES_BASE=PCB_DIALOG_TABLE_PROPERTIES_BASE
+        DIALOG_TABLECELL_PROPERTIES=PCB_DIALOG_TABLECELL_PROPERTIES
+        DIALOG_TABLECELL_PROPERTIES_BASE=PCB_DIALOG_TABLECELL_PROPERTIES_BASE
+        DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS=PCB_DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS
+        DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS_BASE=PCB_DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS_BASE
+        PANEL_SETUP_FORMATTING=PCB_PANEL_SETUP_FORMATTING
+        PANEL_SETUP_FORMATTING_BASE=PCB_PANEL_SETUP_FORMATTING_BASE
+        TEXT_SEARCH_HANDLER=PCB_TEXT_SEARCH_HANDLER
+        GROUP_SEARCH_HANDLER=PCB_GROUP_SEARCH_HANDLER
+        TEXTBOX_POINT_EDIT_BEHAVIOR=PCB_TEXTBOX_POINT_EDIT_BEHAVIOR
+        RECTANGLE_POINT_EDIT_BEHAVIOR=PCB_RECTANGLE_POINT_EDIT_BEHAVIOR
+        FILEDLG_HOOK_SAVE_PROJECT=PCB_FILEDLG_HOOK_SAVE_PROJECT
+        FOOTPRINT_INFO_GENERATOR=PCB_FOOTPRINT_INFO_GENERATOR
+        checkOverwriteDb=pcbCheckOverwriteDb
+        allowedActions=pcbAllowedActions
+        g_excludedLayers=g_pcbExcludedLayers
+        )
+endif()
+
 include( ConfigurePlatform )
 
 if( WIN32 )
@@ -1289,6 +1335,13 @@ endif()
 add_subdirectory( eeschema )
 add_subdirectory( gerbview )
 add_subdirectory( pcbnew )
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged pcbnew+eeschema editor executable. Lives in the WASM layer (outside the
+    # fork); must come after eeschema and pcbnew so both kifaces' CACHE INTERNAL
+    # library lists exist. The binary dir name doubles as the artifact subdir
+    # (build-wasm/kicad-kicad_editor/kicad_editor/kicad_editor.{js,wasm}).
+    add_subdirectory( ${KICAD_WASM_LAYER}/editor ${CMAKE_BINARY_DIR}/kicad_editor )
+endif()
 add_subdirectory( pagelayout_editor )
 add_subdirectory( bitmap2component )
 add_subdirectory( pcb_calculator )

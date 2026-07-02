@@ -668,6 +668,13 @@ if( EMSCRIPTEN )
     )
 endif()
 
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged editor image: statically bind this kiface's Kiface() calls to its own
+    # accessor. The colliding class/data symbols are renamed on the PCB side only
+    # (KICAD_WASM_PCB_SIDE_RENAMES, top-level CMakeLists.txt) — one side suffices.
+    target_compile_definitions( eeschema_kiface_objects PRIVATE Kiface=SchKiface )
+endif()
+
 if( KICAD_USE_PCH )
     target_precompile_headers( eeschema_kiface_objects
         PRIVATE
@@ -736,6 +743,12 @@ set( EESCHEMA_KIFACE_LIBRARIES
     ${NGSPICE_LIBRARY}
     Boost::headers
     )
+
+if( EMSCRIPTEN )
+    # Export for the merged kicad_editor target (wasm/editor/), which links both kifaces'
+    # library sets from outside this directory scope (matches pcbnew's export).
+    set( EESCHEMA_KIFACE_LIBRARIES "${EESCHEMA_KIFACE_LIBRARIES}" CACHE INTERNAL "" )
+endif()
 
 # WASM: Link kiface objects directly into eeschema executable (static linking)
 if( EMSCRIPTEN )
@@ -828,10 +841,17 @@ set_source_files_properties( eeschema.cpp PROPERTIES
     )
 if( EMSCRIPTEN )
     # WASM: static kiface linking — eeschema.cpp must NOT export the kiway DLL symbols, so
-    # KIFACE_GETTER keeps its statically-linkable name (KIFACE_1).
-    set_source_files_properties( eeschema.cpp PROPERTIES
-        COMPILE_DEFINITIONS     "COMPILING_DLL"
-        )
+    # KIFACE_GETTER keeps its statically-linkable name (KIFACE_1). In the merged editor
+    # image the getter instead gets a per-engine name so both kifaces' getters coexist.
+    if( KICAD_WASM_MERGED_EDITOR )
+        set_source_files_properties( eeschema.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL;KIFACE_GETTER=eeschema_kiface_getter"
+            )
+    else()
+        set_source_files_properties( eeschema.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL"
+            )
+    endif()
 endif()
 
 # if building eeschema, then also build eeschema_kiface if out of date.
