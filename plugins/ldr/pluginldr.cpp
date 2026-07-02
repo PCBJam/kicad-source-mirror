@@ -72,6 +72,17 @@ bool KICAD_PLUGIN_LDR::open( const wxString& aFullFileName, const char* aPluginC
 
     m_fileName.clear();
 
+#ifdef __EMSCRIPTEN__
+    // WASM: no dlopen — only static:// pseudo-paths resolve, via the LINK_ITEM
+    // redirection to the static plugin registry (see pluginldr.h).
+    if( !aFullFileName.StartsWith( wxT( "static://" ) ) )
+    {
+        wxLogTrace( tracePluginLoader, wxT( " * not a static plugin: '%s'" ),
+                    aFullFileName.ToUTF8() );
+
+        return false;
+    }
+#else
     m_PluginLoader.Load( aFullFileName, wxDL_LAZY );
 
     if( !m_PluginLoader.IsLoaded() )
@@ -81,6 +92,7 @@ bool KICAD_PLUGIN_LDR::open( const wxString& aFullFileName, const char* aPluginC
 
         return false;
     }
+#endif
 
     LINK_ITEM( m_getPluginClass, GET_PLUGIN_CLASS, "GetKicadPluginClass" );
     LINK_ITEM( m_getClassVersion, GET_CLASS_VERSION, "GetClassVersion" );

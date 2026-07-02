@@ -27,6 +27,8 @@ set(3D-VIEWER_SRCS
     3d_cache/3d_cache.cpp
     3d_cache/3d_plugin_manager.cpp
     3d_cache/model_substitution_helpers.cpp
+    $<$<BOOL:${EMSCRIPTEN}>:3d_cache/pcbjam_static_3d_plugins.cpp>
+    $<$<BOOL:${EMSCRIPTEN}>:3d_cache/pcbjam_model_fetch.cpp>
     3d_canvas/board_adapter.cpp
     3d_canvas/create_layer_items.cpp
     3d_canvas/create_3Dgraphic_brd_items.cpp
@@ -135,6 +137,12 @@ target_link_libraries( 3d-viewer
         ${wxWidgets_LIBRARIES}
         ${OPENGL_LIBRARIES}
         kicad_3dsg )
+
+if( EMSCRIPTEN )
+    # No dlopen in WASM: the 3D format plugins are static archives consumed by
+    # pcbjam_static_3d_plugins.cpp (PUBLIC so the final link pulls them in).
+    target_link_libraries( 3d-viewer PUBLIC s3d_plugin_vrml s3d_plugin_oce )
+endif()
 
 add_subdirectory( 3d_cache )
 
