@@ -108,7 +108,13 @@
 
 
 #define KIFACE_VERSION      1
+// Overridable so a build can give each kiface a distinct getter symbol when several
+// kifaces are statically linked into one image (WASM merged editor: the pcbnew and
+// eeschema kifaces are compiled with -DKIFACE_GETTER=<engine>_kiface_getter and a
+// combined launcher registers both). Native builds never predefine it.
+#ifndef KIFACE_GETTER
 #define KIFACE_GETTER       KIFACE_1
+#endif
 
 // The KIFACE acquisition function is declared extern "C" so its name should not
 // be mangled.

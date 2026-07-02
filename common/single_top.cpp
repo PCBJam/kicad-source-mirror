@@ -77,6 +77,17 @@
 // which is dedicated to loading only a single DSO.
 KIWAY    Kiway( KFCTL_STANDALONE );
 
+#if defined(KICAD_MERGED_KIFACES)
+// WASM merged editor: the pcbnew and eeschema kifaces are statically linked side by
+// side, each compiled with its own getter symbol via -DKIFACE_GETTER=<name> (see
+// KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt). Both are registered in
+// OnPgmInit below.
+extern "C" KIFACE* pcbnew_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
+                                         PGM_BASE* aProgram );
+extern "C" KIFACE* eeschema_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
+                                           PGM_BASE* aProgram );
+#endif
+
 
 // implement a PGM_BASE and a wxApp side by side:
 
@@ -377,7 +388,21 @@ bool PGM_SINGLE_TOP::OnPgmInit()
         return false;
     }
 
-#if !defined(BUILD_KIWAY_DLL)
+#if defined(KICAD_MERGED_KIFACES)
+
+    // WASM merged editor (kicad_editor): TWO kifaces are statically linked into this
+    // image, each compiled with a distinct KIFACE_GETTER name (kiway.h's macro is
+    // #ifndef-guarded; see KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt).
+    // Register both faces up front — OnKifaceStart still runs lazily on a face's first
+    // use (KIWAY::KiFACE), exactly like the native project manager loading two DSOs.
+    int  kiface_version;
+
+    Kiway.set_kiface( KIWAY::FACE_PCB,
+                      pcbnew_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+    Kiway.set_kiface( KIWAY::FACE_SCH,
+                      eeschema_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+
+#elif !defined(BUILD_KIWAY_DLL)
 
     // Only bitmap2component and pcb_calculator use this code currently, as they
     // are not split to use single_top as a link image separate from a *.kiface.
@@ -581,8 +606,11 @@ bool PGM_SINGLE_TOP::OnPgmInit()
         frame->OpenProjectFiles( fileArgs );
     }
 
-    if( KIFACE* topFrame = Kiway.KiFACE( KIWAY::KifaceType( TOP_FRAME ) ) )
-        topFrame->PreloadLibraries( &Kiway );
+    // Preload for the RUNTIME-resolved frame: with the WASM --frame selector (and the
+    // merged image, where the flag can pick the OTHER engine's frame) the booted face
+    // may differ from the compile-time TOP_FRAME. On native topFrame == TOP_FRAME.
+    if( KIFACE* kf = Kiway.KiFACE( KIWAY::KifaceType( topFrame ) ) )
+        kf->PreloadLibraries( &Kiway );
 
     PreloadDesignBlockLibraries( &Kiway );
 
