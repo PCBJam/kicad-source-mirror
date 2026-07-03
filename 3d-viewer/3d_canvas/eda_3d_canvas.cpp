@@ -162,16 +162,10 @@ EDA_3D_CANVAS::EDA_3D_CANVAS( wxWindow* aParent, const wxGLAttributes& aGLAttrib
 #endif
     m_3d_render_opengl->SetBusyIndicatorFactory( busy_indicator_factory );
 
-#ifdef __EMSCRIPTEN__
-    // WASM has no fixed-function GL renderer; the CPU raytracer is the only engine.
-    // (m_boardAdapter.m_Cfg is still null here — the engine is pinned to RAYTRACING
-    // in DoRePaint where m_Cfg is valid.)
-    m_3d_render = m_3d_render_raytracing;
-#else
     // We always start with the opengl engine (raytracing is avoided due to very
-    // long calculation time)
+    // long calculation time). On WASM the fixed-function renderer runs on the
+    // wasm/gl1 GL1->WebGL2 emulation layer (regression gate: tests/3d-regression).
     m_3d_render = m_3d_render_opengl;
-#endif
 
     m_boardAdapter.ReloadColorSettings();
 
@@ -307,9 +301,9 @@ bool  EDA_3D_CANVAS::initializeOpenGL()
             tokenizer.GetNextToken().ToLong( &minor );
 
 #ifndef __EMSCRIPTEN__
-        // On WASM the raytracer is a GL-free CPU renderer and is the only 3D engine,
-        // so the desktop "GL too old for raytracing" downgrade must not run (WebGL
-        // reports "OpenGL ES 3.0", which would otherwise trip this and disable it).
+        // On WASM the raytracer is a GL-free CPU renderer, so the desktop "GL too
+        // old for raytracing" downgrade must not run (WebGL reports "OpenGL ES
+        // 3.0", which would otherwise trip this and disable it).
         if( major < 2 || ( ( major == 2 ) && ( minor < 1 ) ) )
         {
             wxLogTrace( m_logTrace, wxT( "EDA_3D_CANVAS::%s OpenGL ray tracing not supported." ),
@@ -369,10 +363,6 @@ void EDA_3D_CANVAS::ReloadRequest( BOARD* aBoard , S3D_CACHE* aCachePointer )
 
 void EDA_3D_CANVAS::RenderRaytracingRequest()
 {
-#ifdef __EMSCRIPTEN__
-    // Raytracing not supported in WASM
-    return;
-#endif
     m_3d_render = m_3d_render_raytracing;
 
     if( m_3d_render )
@@ -506,14 +496,9 @@ void EDA_3D_CANVAS::DoRePaint()
         return;
     }
 
-#ifdef __EMSCRIPTEN__
-    // WASM: the GL-free CPU raytracer is the only 3D engine. Pin it every frame so
-    // none of the desktop OpenGL fallbacks can switch us to the fixed-function
-    // renderer. (m_Cfg is valid here, unlike at construction time.)
-    m_3d_render = m_3d_render_raytracing;
-    m_boardAdapter.m_Cfg->m_Render.engine = RENDER_ENGINE::RAYTRACING;
-#else
     // Don't attempt to ray trace if OpenGL doesn't support it.
+    // (On WASM m_opengl_supports_raytracing stays true — the fixed-function engine
+    // runs on the wasm/gl1 emulation layer and the CPU raytracer stays available.)
     if( !m_opengl_supports_raytracing )
     {
         m_3d_render = m_3d_render_opengl;
@@ -536,7 +521,6 @@ void EDA_3D_CANVAS::DoRePaint()
             m_3d_render = m_3d_render_opengl;
         }
     }
-#endif
 
     float curtime_delta_s = 0.0f;
 
@@ -606,9 +590,12 @@ void EDA_3D_CANVAS::DoRePaint()
         }
 
 #ifdef __EMSCRIPTEN__
-        // The CPU raytracer just filled its RAM RGBA buffer; present it on the
-        // (otherwise empty) WebGL2 canvas via a textured fullscreen quad.
-        blitRaytracerImage();
+        // Raytracing engine only: present the CPU raytracer's RAM RGBA buffer on
+        // the canvas via a textured fullscreen quad. The OpenGL engine (wasm/gl1
+        // emulation layer) draws straight into the default framebuffer — blitting
+        // over it would clobber the render.
+        if( m_3d_render == m_3d_render_raytracing )
+            blitRaytracerImage();
 #endif
     }
 
@@ -1488,10 +1475,6 @@ bool EDA_3D_CANVAS::SetView3D( VIEW3D_TYPE aRequestedView )
 
 void EDA_3D_CANVAS::RenderEngineChanged()
 {
-#ifdef __EMSCRIPTEN__
-    // WASM only offers the CPU raytracer; ignore any OpenGL engine selection.
-    m_3d_render = m_3d_render_raytracing;
-#else
     if( EDA_3D_VIEWER_SETTINGS* cfg = GetAppSettings<EDA_3D_VIEWER_SETTINGS>( "3d_viewer" ) )
     {
         switch( cfg->m_Render.engine )
@@ -1501,7 +1484,6 @@ void EDA_3D_CANVAS::RenderEngineChanged()
         default:                        m_3d_render = nullptr;                break;
         }
     }
-#endif
 
     if( m_3d_render )
         m_3d_render->ReloadRequest();
