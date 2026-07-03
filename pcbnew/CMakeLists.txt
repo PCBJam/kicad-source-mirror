@@ -255,13 +255,11 @@ set( PCBNEW_IMPORT_GFX
     )
 
 
-set( PCBNEW_EXPORTERS
-    exporters/export_hyperlynx.cpp
-    exporters/export_d356.cpp
-    exporters/export_footprint_associations.cpp
-    exporters/export_gencad.cpp
-    exporters/export_gencad_writer.cpp
-    exporters/export_idf.cpp
+# OCC-backed 3D exporters (STEP/BREP/XAO/GLB/PLY/STL + U3D). For EMSCRIPTEN
+# these are excluded from the editor (no OCC in pcbnew.wasm) and compiled into
+# the standalone occ_service worker module instead (KICAD_OCC_SERVICE_WASM);
+# the editor links a bridge shadow of EXPORTER_STEP (docs/features/occ-split/).
+set( PCBNEW_OCC_EXPORTERS
     exporters/step/exporter_step.cpp
     exporters/step/kicad3d_info.cpp
     exporters/step/step_pcb_model.cpp
@@ -271,6 +269,15 @@ set( PCBNEW_EXPORTERS
     exporters/u3d/context_manager.cpp
     exporters/u3d/data_block.cpp
     exporters/u3d/writer.cpp
+    )
+
+set( PCBNEW_EXPORTERS
+    exporters/export_hyperlynx.cpp
+    exporters/export_d356.cpp
+    exporters/export_footprint_associations.cpp
+    exporters/export_gencad.cpp
+    exporters/export_gencad_writer.cpp
+    exporters/export_idf.cpp
     exporters/exporter_vrml.cpp
     exporters/place_file_exporter.cpp
     exporters/gendrill_excellon_writer.cpp
@@ -279,6 +286,17 @@ set( PCBNEW_EXPORTERS
     exporters/gerber_jobfile_writer.cpp
     exporters/gerber_placefile_writer.cpp
     )
+
+if( NOT EMSCRIPTEN )
+    list( APPEND PCBNEW_EXPORTERS ${PCBNEW_OCC_EXPORTERS} )
+else()
+    # Export (absolutized) for the occ_service worker-module tree — superproject
+    # wasm/occ-service/, hooked from the top-level CMakeLists.txt — which
+    # compiles the real exporters outside this directory scope.
+    set( _pcbnew_occ_exporters_abs ${PCBNEW_OCC_EXPORTERS} )
+    list( TRANSFORM _pcbnew_occ_exporters_abs PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/" )
+    set( PCBNEW_OCC_EXPORTER_SRCS "${_pcbnew_occ_exporters_abs}" CACHE INTERNAL "" )
+endif()
 
 set( PCBNEW_MICROWAVE_SRCS
     microwave/microwave_footprint.cpp
@@ -857,6 +875,15 @@ if( EMSCRIPTEN )
         ${KICAD_WASM_LAYER}/stubs/scripting_stub.cpp
         ${KICAD_WASM_LAYER}/stubs/pcb_frame_stub.cpp
     )
+    # OCC split: the editor shadows the two OCC consumers with occ_service
+    # worker bridges (docs/features/occ-split/); the occ_service tree compiles
+    # the real implementations instead, so it must not see the shadows.
+    if( NOT KICAD_OCC_SERVICE_WASM )
+        list( APPEND PCBNEW_WASM_STUBS
+            ${KICAD_WASM_LAYER}/stubs/exporter_step_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/oce_plugin_stub.cpp
+        )
+    endif()
     # Add 3D viewer stubs when 3D viewer is disabled
     if( NOT KICAD_BUILD_3D_VIEWER_WASM )
         list( APPEND PCBNEW_WASM_STUBS
@@ -910,8 +937,14 @@ target_link_libraries( pcbnew_kiface_objects
         nanoflann
         Boost::boost
         ZLIB::ZLIB
-        ${OCC_LIBRARIES}
     )
+
+if( NOT EMSCRIPTEN )
+    # OCC is reached only via the STEP/3D exporters (PCBNEW_OCC_EXPORTERS) and
+    # the oce model-import plugin, which the WASM build moves into the
+    # occ_service worker module (docs/features/occ-split/).
+    target_link_libraries( pcbnew_kiface_objects PRIVATE ${OCC_LIBRARIES} )
+endif()
 
 add_library( pcbnew_kiface MODULE
     pcbnew.cpp

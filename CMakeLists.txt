@@ -72,6 +72,14 @@ set( CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${KICAD_CMAKE_MODULE_PATH}" )
 # hardcoded ${CMAKE_SOURCE_DIR}/../wasm reach-outs in the EMSCRIPTEN build branches below.
 set( KICAD_WASM_LAYER "${CMAKE_SOURCE_DIR}/../wasm" CACHE PATH "Path to the WASM compatibility layer" )
 
+# Standalone OpenCASCADE 3D service for the browser build: STEP/3D export and
+# STEP/IGES model tessellation in a lazy Web Worker module, so the editor drops
+# its OCC link (superproject docs/features/occ-split/). OFF by default; only the
+# occ_service build tree passes ON. Target: wasm/occ-service/ (hooked in below,
+# after pcbnew/).
+option( KICAD_OCC_SERVICE_WASM
+    "WASM only: build the standalone OCC 3D service (occ_service)" OFF )
+
 # Merged pcbnew+eeschema WASM editor (editor-unification Part 2): link BOTH kifaces into
 # one kicad_editor executable whose frame is chosen at runtime by --frame. OFF by default
 # (standalone per-app trees are byte-identical); only the kicad_editor build tree passes ON.
@@ -1341,6 +1349,13 @@ if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
     # library lists exist. The binary dir name doubles as the artifact subdir
     # (build-wasm/kicad-kicad_editor/kicad_editor/kicad_editor.{js,wasm}).
     add_subdirectory( ${KICAD_WASM_LAYER}/editor ${CMAKE_BINARY_DIR}/kicad_editor )
+endif()
+if( EMSCRIPTEN AND KICAD_OCC_SERVICE_WASM )
+    # Standalone OCC worker-service executable (docs/features/occ-split/). Lives in
+    # the WASM layer (outside the fork); must come after pcbnew so its CACHE INTERNAL
+    # kiface-library and OCC-exporter-source lists exist. The binary dir name doubles
+    # as the artifact subdir (build-wasm/kicad-occ_service/occ_service/).
+    add_subdirectory( ${KICAD_WASM_LAYER}/occ-service ${CMAKE_BINARY_DIR}/occ_service )
 endif()
 add_subdirectory( pagelayout_editor )
 add_subdirectory( bitmap2component )
