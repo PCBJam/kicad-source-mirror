@@ -141,7 +141,16 @@ target_link_libraries( 3d-viewer
 if( EMSCRIPTEN )
     # No dlopen in WASM: the 3D format plugins are static archives consumed by
     # pcbjam_static_3d_plugins.cpp (PUBLIC so the final link pulls them in).
-    target_link_libraries( 3d-viewer PUBLIC s3d_plugin_vrml s3d_plugin_oce )
+    if( KICAD_OCC_SERVICE_WASM )
+        # The occ_service tree links the real OCC-backed loader.
+        target_link_libraries( 3d-viewer PUBLIC s3d_plugin_vrml s3d_plugin_oce )
+    else()
+        # The editor carries no OCC: the oce3d_* surface is satisfied by the
+        # occ_service bridge shadow (superproject wasm/stubs/oce_plugin_stub.cpp,
+        # appended to PCBNEW_WASM_STUBS) — .step/.iges models parse in the
+        # worker (docs/features/occ-split/).
+        target_link_libraries( 3d-viewer PUBLIC s3d_plugin_vrml )
+    endif()
 endif()
 
 add_subdirectory( 3d_cache )
