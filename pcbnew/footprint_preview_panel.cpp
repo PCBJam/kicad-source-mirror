@@ -191,6 +191,15 @@ bool FOOTPRINT_PREVIEW_PANEL::DisplayFootprint( const LIB_ID& aFPID )
 
     FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &Prj() );
 
+    // LoadFootprint only reaches the IO plugin for a library the manager has
+    // loaded (fetchIfLoaded). In a schematic session nothing has preloaded the
+    // footprint tables when the symbol chooser shows its first preview — the
+    // selector's filter pass (which also loads them) runs AFTER this handler.
+    // Idempotent and cheap once loaded (library enumeration stays lazy); a
+    // no-op in pcbnew sessions, which preload at boot.
+    adapter->AsyncLoad();
+    adapter->BlockUntilLoaded();
+
     try
     {
         m_currentFootprint.reset( adapter->LoadFootprint( aFPID.GetLibNickname(), aFPID.GetLibItemName(), false ) );

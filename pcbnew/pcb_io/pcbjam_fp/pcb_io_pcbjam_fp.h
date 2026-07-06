@@ -99,6 +99,21 @@ public:
         return aLibraryPath.StartsWith( wxS( "/mnt/pcbjam/" ) );
     }
 
+    /**
+     * One raw provider request outside any plugin instance — the chooser's
+     * footprint filter (KIFACE_FILTER_FOOTPRINTS, pcbnew.cpp) uses it to fetch
+     * the publish-time footprint index:
+     *
+     *   request( "index", "/mnt/pcbjam/", "", "footprint" ) ->
+     *       JSON { "schema":1, "tag":.., "libs": { "<lib>": [["<name>", <padCount>], …] } }
+     *
+     * so the selector can pin-count/wildcard-filter EVERY library without
+     * fat-loading any body.  Returns nullopt when the provider is absent, has
+     * no index, or fails (and always outside Emscripten builds).
+     */
+    static std::optional<std::string> BridgeRequest( const std::string& aOp, const wxString& aLib,
+                                                     const wxString& aArg );
+
 private:
     /// Perform a provider request; returns the response or throws IO_ERROR.
     std::string request( const std::string& aOp, const wxString& aLibraryPath,
