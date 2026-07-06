@@ -218,12 +218,12 @@ bool PCB_IO_PCBJAM_FP::CanReadLibrary( const wxString& aFileName ) const
 }
 
 
-std::optional<std::string> PCB_IO_PCBJAM_FP::requestOpt( const std::string& aOp,
-                                                         const wxString& aLibraryPath,
-                                                         const wxString& aArg )
+std::optional<std::string> PCB_IO_PCBJAM_FP::BridgeRequest( const std::string& aOp,
+                                                            const wxString& aLib,
+                                                            const wxString& aArg )
 {
 #ifdef __EMSCRIPTEN__
-    char* res = pcbjam_fp_libs_request_dispatch( aOp.c_str(), aLibraryPath.utf8_str().data(),
+    char* res = pcbjam_fp_libs_request_dispatch( aOp.c_str(), aLib.utf8_str().data(),
                                                  aArg.utf8_str().data(), "footprint" );
 
     if( !res )
@@ -235,6 +235,14 @@ std::optional<std::string> PCB_IO_PCBJAM_FP::requestOpt( const std::string& aOp,
 #else
     return std::nullopt;
 #endif
+}
+
+
+std::optional<std::string> PCB_IO_PCBJAM_FP::requestOpt( const std::string& aOp,
+                                                         const wxString& aLibraryPath,
+                                                         const wxString& aArg )
+{
+    return BridgeRequest( aOp, aLibraryPath, aArg );
 }
 
 
