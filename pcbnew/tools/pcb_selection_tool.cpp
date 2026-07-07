@@ -52,6 +52,7 @@ using namespace std::placeholders;
 #include <pcbnew_settings.h>
 #include <tool/tool_event.h>
 #include <tool/tool_manager.h>
+#include <pcbjam_remote_lock.h>
 #include <tools/tool_event_utils.h>
 #include <tools/pcb_point_editor.h>
 #include <tools/pcb_selection_tool.h>
@@ -803,8 +804,13 @@ bool PCB_SELECTION_TOOL::selectPoint( const VECTOR2I& aWhere, bool aOnDrag, bool
     // Remove unselectable items
     for( int i = collector.GetCount() - 1; i >= 0; --i )
     {
-        if( !Selectable( collector[ i ] ) || ( aOnDrag && collector[i]->IsLocked() ) )
+        if( !Selectable( collector[ i ] )
+            || ( aOnDrag
+                 && ( collector[i]->IsLocked()
+                      || PCBJAM_REMOTE_LOCK::IsLocked( collector[i]->m_Uuid ) ) ) )
+        {
             collector.Remove( i );
+        }
     }
 
     m_selection.ClearReferencePoint();
@@ -4568,6 +4574,16 @@ void PCB_SELECTION_TOOL::GuessSelectionCandidates( GENERAL_COLLECTOR& aCollector
 
 bool PCB_SELECTION_TOOL::ReportFilteredLockedItems()
 {
+    // pcbjam: remote soft-locks report the holding peer (collab-presence 0007).
+    if( !m_remoteLockHolder.IsEmpty() && m_frame )
+    {
+        m_frame->ShowInfoBarWarning( wxString::Format( _( "Some items are being edited by %s "
+                                                          "and were skipped." ),
+                                                       m_remoteLockHolder ),
+                                     true );
+        return;
+    }
+
     if( m_lockedItemsFiltered && m_frame )
     {
         m_frame->ShowInfoBarWarning( _( "Selection contains locked items. "
@@ -4609,6 +4625,7 @@ bool PCB_SELECTION_TOOL::isWithinEnteredGroup( BOARD_ITEM* aItem, PCB_GROUP* aEn
 void PCB_SELECTION_TOOL::FilterCollectorForLockedItems( GENERAL_COLLECTOR& aCollector )
 {
     m_lockedItemsFiltered = false;
+    m_remoteLockHolder.Clear();
 
     if( m_frame && m_frame->IsType( FRAME_PCB_EDITOR ) && !m_frame->GetOverrideLocks() )
     {
@@ -4622,6 +4639,20 @@ void PCB_SELECTION_TOOL::FilterCollectorForLockedItems( GENERAL_COLLECTOR& aColl
                 aCollector.Remove( item );
                 m_lockedItemsFiltered = true;
             }
+        }
+    }
+
+    // pcbjam: remote soft-locks (collab peers' live selections, 0007) —
+    // ephemeral, never serialized, deliberately NOT overridable via
+    // 'Override locks' (the point is not to fight another person).
+    for( int i = (int) aCollector.GetCount() - 1; i >= 0; --i )
+    {
+        wxString holder;
+
+        if( PCBJAM_REMOTE_LOCK::IsLocked( aCollector[i]->m_Uuid, &holder ) )
+        {
+            aCollector.Remove( i );
+            m_remoteLockHolder = holder;
         }
     }
 }

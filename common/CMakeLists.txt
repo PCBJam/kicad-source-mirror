@@ -271,6 +271,7 @@ set( KICOMMON_SRCS
     json_schema_validator.cpp
     kidialog.cpp
     kiid.cpp
+    pcbjam_remote_lock.cpp
     kiway.cpp
     kiway_mail.cpp
     kiway_holder.cpp
