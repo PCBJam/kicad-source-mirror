@@ -55,6 +55,7 @@
 #include <sch_table.h>
 #include <tool/tool_event.h>
 #include <tool/tool_manager.h>
+#include <pcbjam_remote_lock.h>
 #include <tools/ee_grid_helper.h>
 #include <tools/sch_move_tool.h>
 #include <tools/sch_point_editor.h>
@@ -1473,6 +1474,31 @@ void SCH_SELECTION_TOOL::narrowSelection( SCH_COLLECTOR& collector, const VECTOR
                 aRejected->lockedItems = true;
             collector.Remove( i );
             continue;
+        }
+
+        // pcbjam: remote soft-locks (collab peers' live selections, 0007) —
+        // like locked items, held items stay selectable for inspection but
+        // are filtered from move/drag acquisition (aCheckLocked paths).
+        if( aCheckLocked )
+        {
+            wxString holder;
+
+            if( PCBJAM_REMOTE_LOCK::IsLocked( collector[i]->m_Uuid, &holder ) )
+            {
+                if( m_frame )
+                {
+                    m_frame->ShowInfoBarWarning( wxString::Format( _( "Some items are being "
+                                                                      "edited by %s and were "
+                                                                      "skipped." ),
+                                                                   holder ),
+                                                 true );
+                }
+
+                if( aRejected )
+                    aRejected->lockedItems = true;
+                collector.Remove( i );
+                continue;
+            }
         }
 
         if( !itemPassesFilter( collector[i], aRejected ) )

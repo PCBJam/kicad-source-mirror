@@ -551,6 +551,10 @@ private:
 
     bool                     m_lockedItemsFiltered;
 
+    // pcbjam: peer holding the last remotely-soft-locked item filtered out
+    // (collab-presence 0007); empty = none. Feeds ReportFilteredLockedItems.
+    wxString                 m_remoteLockHolder;
+
     // Anchor cell for shift+click range selection in a PCB_TABLE
     PCB_TABLECELL*           m_previousFirstCell;
 
