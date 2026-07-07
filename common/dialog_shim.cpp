@@ -898,7 +898,9 @@ void DIALOG_SHIM::SelectAllInTextCtrls( wxWindowList& children )
             // We don't currently run this on GTK because some window managers don't hide the
             // selection in non-active controls, and other window managers do the selection
             // automatically anyway.
-#if defined( __WXMAC__ ) || defined( __WXMSW__ )
+            // The WASM/DOM port behaves like Mac/MSW: the browser shows the selection only
+            // in the focused <input>, and type-to-replace is the expected dialog behavior.
+#if defined( __WXMAC__ ) || defined( __WXMSW__ ) || defined( __WXWASM__ )
             if( !textCtrl->GetStringSelection().IsEmpty() )
             {
                 // Respect an existing selection
