@@ -77,6 +77,15 @@ public:
 
     void Clear();
 
+    /**
+     * Depth offset from the GAL minimum this overlay draws at (default 0).
+     * All overlays share one depth plane, and same-depth fragments drawn
+     * later lose the depth test — two cooperating overlays (e.g. shapes
+     * under labels) can layer deterministically by giving the lower one a
+     * positive offset. (PCBJAM wasm collab-presence addition.)
+     */
+    void SetDepthOffset( double aOffset ) { m_depthOffset = aOffset; }
+
     virtual const BOX2I ViewBBox() const override;
     virtual void ViewDraw( int aLayer, VIEW *aView ) const override;
     virtual std::vector<int> ViewGetLayers() const override;
@@ -114,6 +123,7 @@ private:
     void releaseCommands();
 
 private:
+    double                m_depthOffset = 0.0;
     COLOR4D               m_strokeColor;
     COLOR4D               m_fillColor;
     std::vector<COMMAND*> m_commands;
