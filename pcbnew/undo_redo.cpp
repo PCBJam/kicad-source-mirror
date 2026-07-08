@@ -47,6 +47,7 @@ using namespace std::placeholders;
 #include <tools/board_editor_control.h>
 #include <board_commit.h>
 #include <drawing_sheet/ds_proxy_undo_item.h>
+#include <wx/log.h>
 #include <wx/msgdlg.h>
 #include <pcb_board_outline.h>
 
@@ -625,8 +626,10 @@ void PCB_BASE_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList, bool
         }
     }
 
+    // Not a modal: dropped entries are routine when a collaborative remote apply
+    // deletes items behind the undo stack's back (remote applies skip the stack).
     if( not_found )
-        wxMessageBox( _( "Incomplete undo/redo operation: some items not found" ) );
+        wxLogWarning( wxS( "Incomplete undo/redo operation: some items not found" ) );
 
     // We have now swapped all the group parent and group member pointers.  But it is a
     // risky proposition to bet on the pointers being invariant, so validate them all.
