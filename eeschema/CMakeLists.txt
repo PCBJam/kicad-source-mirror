@@ -652,6 +652,65 @@ if( NOT EMSCRIPTEN )
 endif()
 # WASM linking is done after EESCHEMA_KIFACE_LIBRARIES is defined
 
+# WASM sym_convert diet (ysync 0009, cut e): the converter tree links the kiface
+# as force-linked OBJECTs, so every TU's static initializers (TOOL_ACTIONs, wx
+# event tables, dialog statics) are GC roots — vtable/link-order stubs cannot
+# unroot them. Prune the editor-surface TUs from the kiface for THIS tree only
+# (the flag is pinned OFF for editor trees, see build-kicad-target.sh). The
+# converter path is SCH_IO_MGR::ConvertLibrary → sch_io readers/writers + the
+# symbol/item model; everything UI-, tool-, plot- and sim-shaped is unreachable.
+if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
+    list( FILTER EESCHEMA_SRCS EXCLUDE REGEX
+          "^(dialogs|sim|tools|widgets|netlist_exporters|symbol_editor|sync_sheet_pin|import_gfx|api)/" )
+    list( REMOVE_ITEM EESCHEMA_SRCS
+        annotate.cpp
+        bom_plugins.cpp
+        bus-wire-junction.cpp
+        cross-probing.cpp
+        sch_design_block_utils.cpp
+        eeschema_config.cpp
+        eeschema_helpers.cpp
+        eeschema_jobs_handler.cpp
+        fields_data_model.cpp
+        fields_grid_table.cpp
+        files-io.cpp
+        generate_alias_info.cpp
+        gfx_import_utils.cpp
+        lib_fields_data_model.cpp
+        menubar.cpp
+        net_navigator.cpp
+        picksymbol.cpp
+        project_rescue.cpp
+        sch_base_frame.cpp
+        sch_commit.cpp
+        sch_draw_panel.cpp
+        sch_edit_frame.cpp
+        sch_painter.cpp
+        sch_plotter.cpp
+        sch_preview_panel.cpp
+        sch_validators.cpp
+        sch_view.cpp
+        schematic_undo_redo.cpp
+        sheet.cpp
+        symbol_checker.cpp
+        symbol_chooser_frame.cpp
+        symbol_import_manager.cpp
+        symbol_library_manager.cpp
+        symbol_tree_model_adapter.cpp
+        symbol_tree_synchronizing_adapter.cpp
+        symbol_viewer_frame.cpp
+        toolbars_sch_editor.cpp
+        toolbars_symbol_viewer.cpp
+        )
+    set( EESCHEMA_PRINTING )
+    # Kept back from the symbol_editor/ filter: a pure settings class (no UI).
+    # SCH_PIN's default ctor and EESCHEMA_SETTINGS migration reference its
+    # typeinfo via GetAppSettings<>; linking the real TU keeps those code paths
+    # exactly upstream (typeinfo/data symbols cannot become JS imports, unlike
+    # the function refs covered by -sERROR_ON_UNDEFINED_SYMBOLS=0 below).
+    list( APPEND EESCHEMA_SRCS symbol_editor/symbol_editor_settings.cpp )
+endif()
+
 # the main Eeschema program, in DSO form.
 add_library( eeschema_kiface_objects OBJECT
     ${EESCHEMA_SRCS}
@@ -661,9 +720,15 @@ add_library( eeschema_kiface_objects OBJECT
 
 # WASM: Bring eeschema.cpp (the KIFACE entry point) and stub sources into the
 # kiface_objects translation unit so static linking finds KIFACE_GETTER.
-if( EMSCRIPTEN )
+# sym_convert (ysync 0009 diet) skips eeschema.cpp: nothing calls KIFACE_GETTER
+# there, and its static IFACE instance is an init-array root into the frames.
+if( EMSCRIPTEN AND NOT KICAD_SYM_CONVERTER_WASM )
     target_sources( eeschema_kiface_objects PRIVATE
         eeschema.cpp
+        ${KICAD_WASM_LAYER}/stubs/eeschema_frame_stub.cpp
+    )
+elseif( EMSCRIPTEN )
+    target_sources( eeschema_kiface_objects PRIVATE
         ${KICAD_WASM_LAYER}/stubs/eeschema_frame_stub.cpp
     )
 endif()
@@ -791,6 +856,11 @@ if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
         COMPILE_DEFINITIONS KICAD_SYM_CONVERTER_WASM )
 
     add_executable( sym_convert
+        # Link-order diet stubs (ysync 0009): listed before the kiface objects
+        # so --allow-multiple-definition resolves the duplicated definitions to
+        # these (first definition wins) — severs schematic-load/save + the font
+        # engine from the converter binary.
+        ${KICAD_WASM_LAYER}/cli/sym_convert_stubs.cpp
         ${KICAD_WASM_LAYER}/cli/sym_convert_main.cpp )
 
     target_link_libraries( sym_convert
@@ -812,8 +882,14 @@ if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
     # -Oz runs wasm-opt -Oz at link: whole-module dead-code elimination strips the
     # unreachable editor code (the converter only reaches SCH_IO_MGR::ConvertLibrary)
     # plus size optimization. -g0 drops debug info (also keeps finalize from OOMing).
+    # -sERROR_ON_UNDEFINED_SYMBOLS=0: the kiface prune (ysync 0009 diet, cut e)
+    # leaves ~20 dangling references from vtable-pinned-but-never-run editor code
+    # in retained model TUs (hypertext nav in sch_field/text, sim glue in
+    # sch_symbol, Kiface() in autoplace). They become aborting JS imports; live
+    # ones would trap loudly, dead ones are GC'd. The qa conversion byte-compare
+    # is the correctness gate.
     set_target_properties( sym_convert PROPERTIES
-        LINK_FLAGS "-Oz -g0 -sENVIRONMENT=node -sNODERAWFS=1 -sINVOKE_RUN=1 -sEXIT_RUNTIME=1 -sASYNCIFY=0 -sPTHREAD_POOL_SIZE=2 --pre-js ${KICAD_WASM_LAYER}/cli/sym_convert_pre.js" )
+        LINK_FLAGS "-Oz -g0 -sENVIRONMENT=node -sNODERAWFS=1 -sINVOKE_RUN=1 -sEXIT_RUNTIME=1 -sASYNCIFY=0 -sPTHREAD_POOL_SIZE=2 -sERROR_ON_UNDEFINED_SYMBOLS=0 --pre-js ${KICAD_WASM_LAYER}/cli/sym_convert_pre.js" )
 endif()
 
 if( MSVC )
