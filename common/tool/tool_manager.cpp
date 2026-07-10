@@ -39,6 +39,7 @@
 
 #include <math/vector2wx.h>
 
+#include <pcbjam_read_only.h>
 #include <view/view.h>
 #include <view/view_controls.h>
 #include <eda_base_frame.h>
@@ -1179,6 +1180,21 @@ void TOOL_MANAGER::applyViewControls( const TOOL_STATE* aState )
 bool TOOL_MANAGER::processEvent( const TOOL_EVENT& aEvent )
 {
     wxLogTrace( kicadTraceToolStack, wxS( "TOOL_MANAGER::processEvent - %s" ), aEvent.Format() );
+
+    // pcbjam WASM addition (read-only-viewer): every action execution funnels
+    // through here — hotkeys re-enter as TA_ACTION via DispatchHotKey/RunHotKey,
+    // menus dispatch through ACTION_MENU::OnMenuEvent → ProcessEvent, and direct
+    // RunAction calls (e.g. the selection tools' drag-to-move) land here via
+    // doRunAction. In read-only mode swallow everything but the view-only
+    // allowlist; raw key/mouse events (non-TC_COMMAND) pass through untouched.
+    if( PCBJAM_READ_ONLY::IsReadOnly()
+            && aEvent.Category() == TC_COMMAND
+            && ( aEvent.Action() == TA_ACTION || aEvent.Action() == TA_ACTIVATE
+                 || aEvent.Action() == TA_REACTIVATE )
+            && !PCBJAM_READ_ONLY::IsActionAllowed( aEvent.getCommandStr() ) )
+    {
+        return false;
+    }
 
     // First try to dispatch the action associated with the event if it is a key press event
     bool handled = DispatchHotKey( aEvent );
