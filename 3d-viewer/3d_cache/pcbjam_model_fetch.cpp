@@ -20,6 +20,9 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <vector>
+
+#include <wx/filename.h>
 
 #include "pcbjam_model_fetch.h"
 
@@ -164,7 +167,7 @@ static char* pcbjam_3d_request_dispatch( const char* aOp, const char* aLib, cons
 // brace or paren syntax) → "<lib>.3dshapes/<name>.<ext>".  Bare relative refs
 // pass through as-is.  Absolute paths, ${KIPRJMOD}-style project refs and
 // kicad_embed:// URIs return empty — they are not served by the model libs.
-static wxString pcbjamNormalizeModelRef( const wxString& aModelRef )
+wxString PCBJAM_3D::NormalizeModelRef( const wxString& aModelRef )
 {
     wxString ref = aModelRef;
     ref.Trim( true ).Trim( false );
@@ -201,10 +204,54 @@ static wxString pcbjamNormalizeModelRef( const wxString& aModelRef )
 }
 
 
+wxString PCBJAM_3D::FindStagedModel( const wxString& aModelRef )
+{
+    const wxString rel = NormalizeModelRef( aModelRef );
+
+    if( rel.empty() )
+        return wxEmptyString;
+
+    const wxString root = wxString::FromUTF8( MODELS_MEMFS_ROOT ) + wxT( "/" );
+
+    // The exact ref, then the same-stem format fallbacks (mirror the JS
+    // models-bridge FALLBACK_EXTS: the staged file's own extension picks the
+    // parser, so a .wrl ref answered by its .step sibling loads through OCC).
+    std::vector<wxString> candidates{ rel };
+
+    const int dot = rel.Find( '.', /* fromEnd */ true );
+
+    if( dot != wxNOT_FOUND )
+    {
+        const wxString ext = rel.Mid( dot ).Lower();
+        const wxString stem = rel.Mid( 0, dot );
+
+        if( ext == wxT( ".wrl" ) || ext == wxT( ".wrz" ) )
+        {
+            candidates.push_back( stem + wxT( ".step" ) );
+            candidates.push_back( stem + wxT( ".stp" ) );
+        }
+        else if( ext == wxT( ".step" ) || ext == wxT( ".stp" ) )
+        {
+            candidates.push_back( stem + wxT( ".wrl" ) );
+        }
+    }
+
+    for( const wxString& candidate : candidates )
+    {
+        const wxString path = root + candidate;
+
+        if( wxFileName::FileExists( path ) )
+            return path;
+    }
+
+    return wxEmptyString;
+}
+
+
 wxString PCBJAM_3D::EnsureModelFile( const wxString& aModelRef )
 {
 #ifdef __EMSCRIPTEN__
-    const wxString rel = pcbjamNormalizeModelRef( aModelRef );
+    const wxString rel = NormalizeModelRef( aModelRef );
 
     if( rel.empty() )
         return wxEmptyString;
