@@ -56,6 +56,7 @@
 #include <tool/tool_event.h>
 #include <tool/tool_manager.h>
 #include <pcbjam_remote_lock.h>
+#include <pcbjam_read_only.h>
 #include <tools/ee_grid_helper.h>
 #include <tools/sch_move_tool.h>
 #include <tools/sch_point_editor.h>
@@ -3627,6 +3628,12 @@ void SCH_SELECTION_TOOL::RebuildSelection()
 bool SCH_SELECTION_TOOL::Selectable( const EDA_ITEM* aItem, const VECTOR2I* aPos,
                                      bool checkVisibilityOnly ) const
 {
+    // pcbjam WASM addition (read-only-viewer): nothing is selectable, which
+    // also starves drag-move acquisition, double-click properties and the
+    // point editor (it wakes on selection events).
+    if( PCBJAM_READ_ONLY::IsReadOnly() )
+        return false;
+
     // NOTE: in the future this is where Eeschema layer/itemtype visibility will be handled
 
     SYMBOL_EDIT_FRAME* symEditFrame = dynamic_cast<SYMBOL_EDIT_FRAME*>( m_frame );

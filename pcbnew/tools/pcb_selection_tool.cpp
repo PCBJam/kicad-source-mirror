@@ -53,6 +53,7 @@ using namespace std::placeholders;
 #include <tool/tool_event.h>
 #include <tool/tool_manager.h>
 #include <pcbjam_remote_lock.h>
+#include <pcbjam_read_only.h>
 #include <tools/tool_event_utils.h>
 #include <tools/pcb_point_editor.h>
 #include <tools/pcb_selection_tool.h>
@@ -3604,6 +3605,12 @@ void PCB_SELECTION_TOOL::RebuildSelection()
 
 bool PCB_SELECTION_TOOL::Selectable( const BOARD_ITEM* aItem, bool checkVisibilityOnly ) const
 {
+    // pcbjam WASM addition (read-only-viewer): nothing is selectable, which
+    // also starves drag-move acquisition, double-click properties and the
+    // point editor (it wakes on selection events).
+    if( PCBJAM_READ_ONLY::IsReadOnly() )
+        return false;
+
     const RENDER_SETTINGS* settings = getView()->GetPainter()->GetSettings();
     const PCB_DISPLAY_OPTIONS& options = frame()->GetDisplayOptions();
 
