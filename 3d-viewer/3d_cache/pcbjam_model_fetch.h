@@ -24,6 +24,11 @@
 
 namespace PCBJAM_3D
 {
+    // The MEMFS root the JS side stages official-lib model bodies under —
+    // shared by the editor's models-bridge (constants.ts MODELS_3D_ROOT), the
+    // occ_service export staging, and FindStagedModel below.
+    inline constexpr char MODELS_MEMFS_ROOT[] = "/pcbjam/3dmodels";
+
     // Lazily materialize a footprint's referenced 3D model file in MEMFS and
     // return its ABSOLUTE path ("" when unavailable).
     //
@@ -39,6 +44,23 @@ namespace PCBJAM_3D
     // Never throws and never re-crosses for repeat refs: results (the path, or
     // "" for a ref the provider can't serve) are memoized per session.
     wxString EnsureModelFile( const wxString& aModelRef );
+
+    // Normalize a footprint model reference to its lib-relative form:
+    // "${KICAD*_3DMODEL_DIR}/<lib>.3dshapes/<name>.<ext>" (any variable
+    // vintage, brace or paren syntax) → "<lib>.3dshapes/<name>.<ext>"; bare
+    // relative refs pass through; anything not served by the model libs
+    // (absolute, ${KIPRJMOD}, URIs) → "".
+    wxString NormalizeModelRef( const wxString& aModelRef );
+
+    // Resolve a footprint model reference against files ALREADY staged under
+    // MODELS_MEMFS_ROOT — a pure path probe, no JS bridge, usable where the
+    // runtime cannot suspend (the occ_service worker's EXPORTER_STEP, built
+    // -sASYNCIFY=0; bodies are staged up front by the export request there).
+    // Tries the exact ref, then the same-stem format fallbacks (a .wrl ref is
+    // served by its .step sibling — kicad-packages3D is STEP-only from 10.x —
+    // and vice versa), mirroring the JS models-bridge refCandidates. Returns
+    // the ABSOLUTE path of the staged file, "" on miss.
+    wxString FindStagedModel( const wxString& aModelRef );
 }
 
 #endif // PCBJAM_MODEL_FETCH_H
