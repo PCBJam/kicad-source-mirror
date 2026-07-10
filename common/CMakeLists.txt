@@ -272,6 +272,7 @@ set( KICOMMON_SRCS
     kidialog.cpp
     kiid.cpp
     pcbjam_remote_lock.cpp
+    pcbjam_read_only.cpp
     kiway.cpp
     kiway_mail.cpp
     kiway_holder.cpp
