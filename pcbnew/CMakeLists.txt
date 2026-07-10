@@ -846,12 +846,62 @@ target_link_options( pcbnew PRIVATE
     )
 
 #the main pcbnew program, in DSO form.
+
+# WASM pcb_convert diet (pcbjam-mcp 0001 tier 3a): mirror of the sym_convert
+# diet in eeschema/CMakeLists.txt. The converter tree links the kiface as
+# force-linked OBJECTs, so every TU's static initializers (TOOL_ACTIONs, wx
+# event tables, dialog statics) are GC roots. Prune the editor-surface TUs
+# from the kiface for THIS tree only (the flag is pinned OFF for editor trees,
+# see build-kicad-target.sh). The DRC path is PCB_IO_MGR::Load → board model +
+# connectivity + drc/ providers (their DRC_REGISTER_TEST_PROVIDER statics must
+# stay); everything UI-, tool-, plot- and export-shaped is unreachable.
+if( EMSCRIPTEN AND KICAD_PCB_CONVERTER_WASM )
+    list( FILTER PCBNEW_SRCS EXCLUDE REGEX
+          "^(dialogs|widgets|autorouter|microwave|generators|import_gfx|api|board_stackup_manager|zone_manager|specctra_import_export|git|navlib|netlist_reader|tools|exporters|footprint_wizard)/" )
+    list( REMOVE_ITEM PCBNEW_SRCS
+        cross-probing.cpp
+        edit.cpp
+        files.cpp
+        footprint_chooser_frame.cpp
+        footprint_edit_frame.cpp
+        footprint_editor_utils.cpp
+        footprint_libraries_utils.cpp
+        footprint_viewer_frame.cpp
+        footprint_wizard.cpp
+        footprint_wizard_frame.cpp
+        footprint_wizard_frame_functions.cpp
+        initpcb.cpp
+        load_select_footprint.cpp
+        menubar_footprint_editor.cpp
+        menubar_pcb_editor.cpp
+        pcb_base_edit_frame.cpp
+        pcb_edit_frame.cpp
+        pcb_plotter.cpp
+        pcbnew_config.cpp
+        pcbnew_jobs_handler.cpp
+        pcbnew_printout.cpp
+        pcbplot.cpp
+        plot_board_layers.cpp
+        plot_brditems_plotter.cpp
+        toolbars_footprint_editor.cpp
+        toolbars_footprint_viewer.cpp
+        toolbars_pcb_editor.cpp
+        )
+    # NOTE pcbnew_settings.cpp / footprint_editor_settings.cpp stay: pure
+    # settings TUs whose typeinfo/data symbols are referenced from retained
+    # model code via GetAppSettings<> (typeinfo cannot become a JS import,
+    # unlike function refs covered by -sERROR_ON_UNDEFINED_SYMBOLS=0).
+endif()
+
 add_library( pcbnew_kiface_objects OBJECT
     ${PCBNEW_SRCS}
     ${PCBNEW_COMMON_SRCS}
     )
 
-if( EMSCRIPTEN )
+# pcb_convert (mirror of the sym_convert diet) skips pcbnew.cpp: nothing calls
+# KIFACE_GETTER there, and its static IFACE instance is an init-array root into
+# the frames (it also registers the 3D-viewer settings).
+if( EMSCRIPTEN AND NOT KICAD_PCB_CONVERTER_WASM )
     # WASM static-kiface linking: pcbnew.cpp defines Kiface() / KIFACE_GETTER and the
     # kiface instance, which pcbcommon (pad.cpp, pcb_painter.cpp, ratsnest_view_item.cpp,
     # ...) references. Native builds resolve these via the dynamically-loaded
@@ -1001,6 +1051,17 @@ if( EMSCRIPTEN )
     # library sets from outside this directory scope. Same pattern as PCBNEW_IO_LIBRARIES.
     set( PCBNEW_KIFACE_LIBRARIES "${PCBNEW_KIFACE_LIBRARIES}" CACHE INTERNAL "" )
 endif()
+
+# Headless board CLI diet (pcbjam-mcp 0001 tier 3a): gates the pcbnew kiface
+# prune above for the merged kicad_tools tree (KICAD_TOOLS_WASM configures with
+# this ON). Pinned OFF for editor trees.
+option( KICAD_PCB_CONVERTER_WASM
+    "WASM only: diet the pcbnew kiface for the headless CLI tree (kicad_tools)" OFF )
+
+# The standalone pcb_convert executable is RETIRED (pcbjam-mcp 0001): the
+# merged kicad_tools image (wasm/tools/, gated by KICAD_TOOLS_WASM at the top
+# level) carries --drc on this same dieted kiface. This option now only gates
+# the diet above.
 
 # WASM: Link kiface objects directly into pcbnew executable (static linking)
 if( EMSCRIPTEN )

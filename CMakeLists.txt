@@ -1357,6 +1357,17 @@ if( EMSCRIPTEN AND KICAD_OCC_SERVICE_WASM )
     # as the artifact subdir (build-wasm/kicad-occ_service/occ_service/).
     add_subdirectory( ${KICAD_WASM_LAYER}/occ-service ${CMAKE_BINARY_DIR}/occ_service )
 endif()
+option( KICAD_TOOLS_WASM
+    "WASM only: merged headless CLI linking both dieted kifaces (kicad_tools)" OFF )
+if( EMSCRIPTEN AND KICAD_TOOLS_WASM )
+    # Merged headless CLI (pcbjam-mcp 0001 tier 3a): sym_convert + pcb_convert
+    # subcommands in one node-WASM image. Lives in the WASM layer (outside the
+    # fork); must come after eeschema and pcbnew so both kifaces' CACHE INTERNAL
+    # library lists exist. Configure with BOTH diet options ON (see
+    # wasm/tools/CMakeLists.txt). The binary dir name doubles as the artifact
+    # subdir (build-wasm/kicad-kicad_tools/kicad_tools/kicad_tools.{js,wasm}).
+    add_subdirectory( ${KICAD_WASM_LAYER}/tools ${CMAKE_BINARY_DIR}/kicad_tools )
+endif()
 add_subdirectory( pagelayout_editor )
 add_subdirectory( bitmap2component )
 add_subdirectory( pcb_calculator )
