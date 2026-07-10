@@ -876,13 +876,9 @@ if( EMSCRIPTEN AND KICAD_PCB_CONVERTER_WASM )
         menubar_pcb_editor.cpp
         pcb_base_edit_frame.cpp
         pcb_edit_frame.cpp
-        pcb_plotter.cpp
         pcbnew_config.cpp
         pcbnew_jobs_handler.cpp
         pcbnew_printout.cpp
-        pcbplot.cpp
-        plot_board_layers.cpp
-        plot_brditems_plotter.cpp
         toolbars_footprint_editor.cpp
         toolbars_footprint_viewer.cpp
         toolbars_pcb_editor.cpp
@@ -891,6 +887,15 @@ if( EMSCRIPTEN AND KICAD_PCB_CONVERTER_WASM )
     # settings TUs whose typeinfo/data symbols are referenced from retained
     # model code via GetAppSettings<> (typeinfo cannot become a JS import,
     # unlike function refs covered by -sERROR_ON_UNDEFINED_SYMBOLS=0).
+    # NOTE the plot TUs (pcb_plotter.cpp, pcbplot.cpp, plot_board_layers.cpp,
+    # plot_brditems_plotter.cpp) stay too: kicad_tools --gerbers drives
+    # StartPlotBoard/PlotBoardLayers — plotter-based, no GAL context.
+    # Kept back from the exporters/ and board_stackup_manager/ filters for
+    # --gerbers' .gbrjob output (the jobfile writer resolves stackup colors
+    # through GetStandardColors — a pure data-table TU, not the UI panel):
+    list( APPEND PCBNEW_SRCS
+        exporters/gerber_jobfile_writer.cpp
+        board_stackup_manager/stackup_predefined_prms.cpp )
 endif()
 
 add_library( pcbnew_kiface_objects OBJECT
