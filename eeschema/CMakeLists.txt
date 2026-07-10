@@ -709,6 +709,10 @@ if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
     # exactly upstream (typeinfo/data symbols cannot become JS imports, unlike
     # the function refs covered by -sERROR_ON_UNDEFINED_SYMBOLS=0 below).
     list( APPEND EESCHEMA_SRCS symbol_editor/symbol_editor_settings.cpp )
+    # Kept back from the sim/ filter for the --lint mode (ysync 0009 §7):
+    # SCHEMATIC_SETTINGS' ctor constructs NGSPICE_SETTINGS (spice_settings.cpp,
+    # another pure settings TU), and lint's SCHEMATIC::SetProject runs it.
+    list( APPEND EESCHEMA_SRCS sim/spice_settings.cpp )
 endif()
 
 # the main Eeschema program, in DSO form.
@@ -889,7 +893,7 @@ if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
     # ones would trap loudly, dead ones are GC'd. The qa conversion byte-compare
     # is the correctness gate.
     set_target_properties( sym_convert PROPERTIES
-        LINK_FLAGS "-Oz -g0 -sENVIRONMENT=node -sNODERAWFS=1 -sINVOKE_RUN=1 -sEXIT_RUNTIME=1 -sASYNCIFY=0 -sPTHREAD_POOL_SIZE=2 -sERROR_ON_UNDEFINED_SYMBOLS=0 --pre-js ${KICAD_WASM_LAYER}/cli/sym_convert_pre.js" )
+        LINK_FLAGS "-Oz -g0 --profiling-funcs -sSTACK_SIZE=2MB -sENVIRONMENT=node -sNODERAWFS=1 -sINVOKE_RUN=1 -sEXIT_RUNTIME=1 -sASYNCIFY=0 -sPTHREAD_POOL_SIZE=2 -sERROR_ON_UNDEFINED_SYMBOLS=0 --pre-js ${KICAD_WASM_LAYER}/cli/sym_convert_pre.js" )
 endif()
 
 if( MSVC )
