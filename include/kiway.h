@@ -330,6 +330,18 @@ public:
      */
     static FACE_T KifaceType( FRAME_T aFrameType );
 
+    /**
+     * Return true if a KIFACE is already registered for \a aFaceId, without attempting
+     * to load or start one. On the merged WASM editor image both the PCB and SCH
+     * kifaces are statically linked and pre-registered (single_top.cpp), so this
+     * answers "is that editor reachable in-process" even though the program runs
+     * with KFCTL_STANDALONE.
+     */
+    static bool FaceRegistered( FACE_T aFaceId )
+    {
+        return (unsigned) aFaceId < m_kiface.size() && m_kiface[aFaceId] != nullptr;
+    }
+
     // If you change the vtable, recompile all of KiCad.
 
     /**
