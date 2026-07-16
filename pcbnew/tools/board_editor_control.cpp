@@ -938,7 +938,7 @@ int BOARD_EDITOR_CONTROL::ShowEeschema( const TOOL_EVENT& aEvent )
         }
     }
 
-    if( Kiface().IsSingle() )
+    if( Kiface().IsSingle() && !KIWAY::FaceRegistered( KIWAY::FACE_SCH ) )
     {
         ExecuteFile( EESCHEMA_EXE, schematic.GetFullPath() );
     }

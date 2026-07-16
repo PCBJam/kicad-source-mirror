@@ -2295,7 +2295,9 @@ void PCB_EDIT_FRAME::FindNext( bool reverse )
 
 int PCB_EDIT_FRAME::TestStandalone()
 {
-    if( Kiface().IsSingle() )
+    // A standalone build can still sync when the SCH kiface is linked in-process
+    // (merged WASM editor) — Player( FRAME_SCH ) works without a project manager.
+    if( Kiface().IsSingle() && !KIWAY::FaceRegistered( KIWAY::FACE_SCH ) )
         return 0;
 
     // Update PCB requires a netlist. Therefore the schematic editor must be running
@@ -2328,12 +2330,23 @@ int PCB_EDIT_FRAME::TestStandalone()
 
         frame->OpenProjectFiles( std::vector<wxString>( 1, fn.GetFullPath() ) );
 
+#ifdef __EMSCRIPTEN__
+        // WASM merged editor (project-sync 0001): there is no project manager whose
+        // bookkeeping needs the schematic frame visible, and every tool owns its own
+        // browser tab — showing the spawned eeschema frame would hijack the PCB tab.
+        // Keep it hidden: the netlist fetch (ExpressMail MAIL_SCH_GET_NETLIST) needs
+        // only the loaded SCHEMATIC, not a visible frame or GAL. Leaving it unshown
+        // also keeps IsShownOnScreen() false, so this block re-runs OpenProjectFiles
+        // on every sync — each update re-reads the (live-restaged) MEMFS schematic
+        // instead of a stale cached parse (repeat-sync freshness).
+#else
         // we show the schematic editor frame, because do not show is seen as
         // a not yet opened schematic by Kicad manager, which is not the case
         frame->Show( true );
 
         // bring ourselves back to the front
         Raise();
+#endif
     }
 
     return 1;            //Success!

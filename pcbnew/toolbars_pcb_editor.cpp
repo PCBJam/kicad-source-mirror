@@ -36,6 +36,7 @@
 #include <footprint.h>
 #include <pcb_field.h>
 #include <kiface_base.h>
+#include <kiway.h>
 #include <kiplatform/ui.h>
 #include <macros.h>
 #include <pcb_edit_frame.h>
@@ -350,7 +351,7 @@ std::optional<TOOLBAR_CONFIGURATION> PCB_EDIT_TOOLBAR_SETTINGS::DefaultToolbarCo
 
         config.AppendSeparator();
 
-        if( !Kiface().IsSingle() )
+        if( !Kiface().IsSingle() || KIWAY::FaceRegistered( KIWAY::FACE_SCH ) )
             config.AppendAction( ACTIONS::updatePcbFromSchematic );
         else
             config.AppendAction( PCB_ACTIONS::importNetlist );
