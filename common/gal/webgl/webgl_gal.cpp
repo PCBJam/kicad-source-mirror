@@ -170,8 +170,6 @@ static wxGLAttributes getGLAttribs()
 
 wxGLContext* WEBGL_GAL::m_glMainContext = nullptr;
 int          WEBGL_GAL::m_instanceCounter = 0;
-GLuint       WEBGL_GAL::g_fontTexture = 0;
-bool         WEBGL_GAL::m_isBitmapFontLoaded = false;
 
 namespace KIGFX
 {
@@ -443,6 +441,8 @@ WEBGL_GAL::WEBGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIONS
 
     // Initialize the flags
     m_isFramebufferInitialized = false;
+    m_isBitmapFontLoaded = false;
+    m_fontTexture = 0;
     m_isBitmapFontInitialized = false;
     m_isInitialized = false;
     m_isGrouping = false;
@@ -521,6 +521,17 @@ WEBGL_GAL::~WEBGL_GAL()
     gluDeleteTess( m_tesselator );
     ClearCache();
 
+    // The font texture is per-instance: WebGL contexts share no objects, so
+    // it must die with this instance's context. A "last instance" cleanup is
+    // too late — SwitchBackend() constructs the replacement GAL before
+    // deleting the old one, so the counter never reaches zero during a swap
+    // and the stale texture id would be rebound on the new context.
+    if( m_isBitmapFontLoaded )
+    {
+        glDeleteTextures( 1, &m_fontTexture );
+        m_isBitmapFontLoaded = false;
+    }
+
     delete m_compositor;
 
     if( m_isInitialized )
@@ -543,15 +554,6 @@ WEBGL_GAL::~WEBGL_GAL()
     // Are we destroying the last GAL instance?
     if( m_instanceCounter == 0 )
     {
-        gl_mgr->LockCtx( m_glMainContext, this );
-
-        if( m_isBitmapFontLoaded )
-        {
-            glDeleteTextures( 1, &g_fontTexture );
-            m_isBitmapFontLoaded = false;
-        }
-
-        gl_mgr->UnlockCtx( m_glMainContext );
         gl_mgr->DestroyCtx( m_glMainContext );
         m_glMainContext = nullptr;
     }
@@ -652,6 +654,17 @@ void WEBGL_GAL::BeginDrawing()
 
     if( !m_isInitialized )
     {
+        // Drain stale GL error flags before the first frame touches this
+        // context. SwitchBackend() deletes the previous GAL only after this
+        // one exists, and when the old context was browser-lost its
+        // destructor's cleanup calls land on the current context instead,
+        // leaving sticky error flags behind (WebGL keeps them until read).
+        // Un-drained, the first checkGlError() in init() misattributes the
+        // leftover error and throws — which turned every backend-reinit
+        // recovery into a silent Cairo fallback.
+        while( glGetError() != GL_NO_ERROR )
+        { }
+
         init();
     }
 
@@ -745,8 +758,8 @@ void WEBGL_GAL::BeginDrawing()
         if( !m_isBitmapFontLoaded )
         {
             glActiveTexture( GL_TEXTURE0 + FONT_TEXTURE_UNIT );
-            glGenTextures( 1, &g_fontTexture );
-            glBindTexture( GL_TEXTURE_2D, g_fontTexture );
+            glGenTextures( 1, &m_fontTexture );
+            glBindTexture( GL_TEXTURE_2D, m_fontTexture );
             glTexImage2D( GL_TEXTURE_2D, 0, GL_RGB8, font_image.width, font_image.height, 0, GL_RGB,
                           GL_UNSIGNED_BYTE, font_image.pixels );
             glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
@@ -760,7 +773,7 @@ void WEBGL_GAL::BeginDrawing()
         else
         {
             glActiveTexture( GL_TEXTURE0 + FONT_TEXTURE_UNIT );
-            glBindTexture( GL_TEXTURE_2D, g_fontTexture );
+            glBindTexture( GL_TEXTURE_2D, m_fontTexture );
             glActiveTexture( GL_TEXTURE0 );
         }
 
@@ -831,13 +844,26 @@ void WEBGL_GAL::EndDrawing()
     // Cached & non-cached containers are rendered to the same buffer
     m_compositor->SetBuffer( m_mainBuffer );
 
+    // The glFlush() after each render pass below (and in EndDiffLayer) is a
+    // Chromium/SwiftShader workaround: without a flush at these pass
+    // boundaries, the shared-FBO attachment swapping (see WEBGL_COMPOSITOR::
+    // SetBuffer) intermittently loses a whole pass's rasterization — the
+    // eeschema diff-layer items vanished from the presented frame with zero
+    // GL errors while identical draw calls were submitted (presence-eeschema
+    // overlay tests, headless chromium + SwiftShader; llvmpipe/Firefox never
+    // exhibited it). All three flushes are needed — removing any brings the
+    // drop back. Cost is negligible (command submission only).
     cntEndNoncached.Start();
     m_nonCachedManager->EndDrawing();
     cntEndNoncached.Stop();
 
+    glFlush();
+
     cntEndCached.Start();
     m_cachedManager->EndDrawing();
     cntEndCached.Stop();
+
+    glFlush();
 
     cntEndOverlay.Start();
     // Overlay container is rendered to a different buffer
@@ -2272,6 +2298,9 @@ void WEBGL_GAL::EndDiffLayer()
         glBlendEquation( GL_FUNC_ADD );
 
         m_compositor->DrawBuffer( m_tempBuffer, m_mainBuffer );
+
+        // Part of the SwiftShader pass-boundary flush workaround — see EndDrawing().
+        glFlush();
     }
     else
     {
