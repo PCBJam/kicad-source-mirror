@@ -1343,13 +1343,6 @@ endif()
 add_subdirectory( eeschema )
 add_subdirectory( gerbview )
 add_subdirectory( pcbnew )
-if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
-    # Merged pcbnew+eeschema editor executable. Lives in the WASM layer (outside the
-    # fork); must come after eeschema and pcbnew so both kifaces' CACHE INTERNAL
-    # library lists exist. The binary dir name doubles as the artifact subdir
-    # (build-wasm/kicad-kicad_editor/kicad_editor/kicad_editor.{js,wasm}).
-    add_subdirectory( ${KICAD_WASM_LAYER}/editor ${CMAKE_BINARY_DIR}/kicad_editor )
-endif()
 if( EMSCRIPTEN AND KICAD_OCC_SERVICE_WASM )
     # Standalone OCC worker-service executable (docs/features/occ-split/). Lives in
     # the WASM layer (outside the fork); must come after pcbnew so its CACHE INTERNAL
@@ -1373,6 +1366,13 @@ add_subdirectory( bitmap2component )
 add_subdirectory( pcb_calculator )
 add_subdirectory( plugins )             # 3D plugins must be built before kicad
 add_subdirectory( cvpcb )               # must be after pcbnew
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged pcbnew+eeschema(+cvpcb) editor executable. Lives in the WASM layer
+    # (outside the fork); must come after eeschema, pcbnew AND cvpcb so all three
+    # kifaces' CACHE INTERNAL library lists exist. The binary dir name doubles as the
+    # artifact subdir (build-wasm/kicad-kicad_editor/kicad_editor/kicad_editor.{js,wasm}).
+    add_subdirectory( ${KICAD_WASM_LAYER}/editor ${CMAKE_BINARY_DIR}/kicad_editor )
+endif()
 add_subdirectory( kicad )               # should follow pcbnew, eeschema, api
 add_subdirectory( tools )
 add_subdirectory( utils )

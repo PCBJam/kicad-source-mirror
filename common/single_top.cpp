@@ -78,14 +78,16 @@
 KIWAY    Kiway( KFCTL_STANDALONE );
 
 #if defined(KICAD_MERGED_KIFACES)
-// WASM merged editor: the pcbnew and eeschema kifaces are statically linked side by
-// side, each compiled with its own getter symbol via -DKIFACE_GETTER=<name> (see
-// KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt). Both are registered in
-// OnPgmInit below.
+// WASM merged editor: the pcbnew, eeschema and cvpcb kifaces are statically linked
+// side by side, each compiled with its own getter symbol via -DKIFACE_GETTER=<name>
+// (see KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt). All are registered
+// in OnPgmInit below.
 extern "C" KIFACE* pcbnew_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
                                          PGM_BASE* aProgram );
 extern "C" KIFACE* eeschema_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
                                            PGM_BASE* aProgram );
+extern "C" KIFACE* cvpcb_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
+                                        PGM_BASE* aProgram );
 #endif
 
 
@@ -390,17 +392,21 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
 #if defined(KICAD_MERGED_KIFACES)
 
-    // WASM merged editor (kicad_editor): TWO kifaces are statically linked into this
+    // WASM merged editor (kicad_editor): THREE kifaces are statically linked into this
     // image, each compiled with a distinct KIFACE_GETTER name (kiway.h's macro is
     // #ifndef-guarded; see KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt).
-    // Register both faces up front — OnKifaceStart still runs lazily on a face's first
-    // use (KIWAY::KiFACE), exactly like the native project manager loading two DSOs.
+    // Register all faces up front — OnKifaceStart still runs lazily on a face's first
+    // use (KIWAY::KiFACE), exactly like the native project manager loading the DSOs.
+    // cvpcb has no page-load --frame entry; it only opens via eeschema's Assign
+    // Footprints (KIWAY::Player( FRAME_CVPCB )).
     int  kiface_version;
 
     Kiway.set_kiface( KIWAY::FACE_PCB,
                       pcbnew_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
     Kiway.set_kiface( KIWAY::FACE_SCH,
                       eeschema_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+    Kiway.set_kiface( KIWAY::FACE_CVPCB,
+                      cvpcb_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
 
 #elif !defined(BUILD_KIWAY_DLL)
 
