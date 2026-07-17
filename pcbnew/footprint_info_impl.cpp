@@ -258,6 +258,20 @@ void FOOTPRINT_LIST_IMPL::loadFootprints()
                 return 1;
             };
 
+#ifdef __EMSCRIPTEN__
+    // WASM: the pool tasks would run on worker pthreads, but the PCBJAM plugin's
+    // FootprintEnumerate inside fp_thread resolves through the MAIN-thread JS
+    // bridge (window.kicadLibs) — a worker task blocks proxying to the main
+    // thread while the future-wait below busy-spins the main thread on the
+    // workers' futures: deadlock (this is how CvPcb's LoadFootprintFiles hung
+    // the whole tab). Run the per-library loads serially inline instead; the
+    // bridge then suspends via Asyncify exactly like every other lazy library
+    // load on the main thread.
+    (void) tp;
+    (void) returns;
+    for( size_t ii = 0; ii < num_elements; ++ii )
+        fp_thread();
+#else
     for( size_t ii = 0; ii < num_elements; ++ii )
         returns[ii] = tp.submit_task( fp_thread );
 
@@ -273,6 +287,7 @@ void FOOTPRINT_LIST_IMPL::loadFootprints()
             status = ret.wait_for( std::chrono::milliseconds( 250 ) );
         }
     }
+#endif
 
     std::unique_ptr<FOOTPRINT_INFO> fpi;
 

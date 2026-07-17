@@ -88,6 +88,69 @@ set_source_files_properties( cvpcb.cpp PROPERTIES
     COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
     )
 
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged editor image (kicad_editor): cvpcb is statically linked as a THIRD kiface
+    # so eeschema's Assign Footprints (KIWAY::Player( FRAME_CVPCB )) works in WASM.
+    # The two pcbnew TUs in CVPCB_SRCS are dropped here: pcbnew_kiface_objects already
+    # compiles them (with the same renames), so the merged link takes pcbnew's copies.
+    set( CVPCB_MERGED_SRCS ${CVPCB_SRCS} )
+    list( REMOVE_ITEM CVPCB_MERGED_SRCS
+        ${CMAKE_SOURCE_DIR}/pcbnew/board_stackup_manager/stackup_predefined_prms.cpp
+        ${CMAKE_SOURCE_DIR}/pcbnew/footprint_info_impl.cpp
+        )
+
+    add_library( cvpcb_kiface_objects OBJECT
+        cvpcb.cpp
+        ${CVPCB_MERGED_SRCS}
+        ${CVPCB_DIALOGS}
+        )
+
+    # cvpcb is PCB-side code (pcbnew headers/TUs), so it must carry the same ODR class
+    # renames as pcbnew (KICAD_WASM_PCB_SIDE_RENAMES, top-level CMakeLists.txt) or its
+    # un-renamed PCB-side symbols would re-collide with eeschema's. Kiface() alone gets
+    # a cvpcb-own name so this module's calls bind to its own kiface instance.
+    set( CVPCB_WASM_RENAMES ${KICAD_WASM_PCB_SIDE_RENAMES} )
+    list( REMOVE_ITEM CVPCB_WASM_RENAMES Kiface=PcbKiface )
+    list( APPEND CVPCB_WASM_RENAMES Kiface=CvpcbKiface )
+    target_compile_definitions( cvpcb_kiface_objects PRIVATE ${CVPCB_WASM_RENAMES} )
+
+    target_link_libraries( cvpcb_kiface_objects
+        PRIVATE
+            pcbcommon
+            gal
+            common
+            kimath
+            markdown_lib
+            Boost::headers
+            ${wxWidgets_LIBRARIES}
+        )
+
+    # Static kiface linking: no BUILD_KIWAY_DLL, and a per-engine getter name so all
+    # three kifaces' getters coexist (registered in single_top.cpp's merged branch).
+    set_source_files_properties( cvpcb.cpp PROPERTIES
+        COMPILE_DEFINITIONS     "COMPILING_DLL;KIFACE_GETTER=cvpcb_kiface_getter"
+        )
+
+    # Export for the merged kicad_editor target (wasm/editor/), which links the kiface
+    # library sets from outside this directory scope (matches pcbnew's export). The
+    # editor subdir is added AFTER cvpcb/ at the top level so this cache entry exists.
+    set( CVPCB_KIFACE_LIBRARIES
+        cvpcb_kiface_objects
+        pcbcommon
+        gal
+        common
+        kimath
+        markdown_lib
+        ${PCBNEW_IO_LIBRARIES}
+        Boost::headers
+        ${wxWidgets_LIBRARIES}
+        )
+    if( KICAD_BUILD_3D_VIEWER_WASM )
+        list( APPEND CVPCB_KIFACE_LIBRARIES 3d-viewer )
+    endif()
+    set( CVPCB_KIFACE_LIBRARIES "${CVPCB_KIFACE_LIBRARIES}" CACHE INTERNAL "" )
+endif()
+
 target_link_options( cvpcb_kiface PRIVATE
     $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=_cvpcb.kiface.map>
     )
