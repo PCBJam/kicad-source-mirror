@@ -328,19 +328,23 @@ set( EESCHEMA_SIM_SRCS
     widgets/tuner_slider_base.cpp
     )
 
-# WASM: the four largest BSIM/SOI/HSIM data initializer functions exceed the
-# V8/SpiderMonkey limit on locals per function ("too many locals") once
-# compiled. Replace them with empty stubs — the simulator UI is unreachable
-# in WASM anyway (see wasm/stubs/ngspice/sharedspice.h).
+# WASM: the simulator runs against the ngspice_service worker
+# (docs/features/ngspice-split/): the sharedspice client stub forwards the
+# ngSpice_* calls NGSPICE::init_dll binds in its __EMSCRIPTEN__ branch (see
+# wasm/stubs/ngspice/sharedspice.h). The four large BSIM/SOI/HSIM model-data
+# initializers historically tripped the JS engines' "too many locals" limit at
+# -O0; -O2 collapses the locals (same per-source workaround as the msys block
+# at the top of this file), keeping the full parameter tables for the
+# simulator model dialogs.
 if( EMSCRIPTEN )
-    list( REMOVE_ITEM EESCHEMA_SIM_SRCS
+    set_source_files_properties(
         sim/sim_model_ngspice_data_bsim4.cpp
         sim/sim_model_ngspice_data_b3soi.cpp
         sim/sim_model_ngspice_data_b4soi.cpp
         sim/sim_model_ngspice_data_hsim.cpp
-    )
+        PROPERTIES COMPILE_OPTIONS "-O2" )
     list( APPEND EESCHEMA_SIM_SRCS
-        ${KICAD_WASM_LAYER}/stubs/eeschema_ngspice_data_stubs.cpp
+        ${KICAD_WASM_LAYER}/stubs/sharedspice_client.cpp
     )
 endif()
 
