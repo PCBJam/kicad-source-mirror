@@ -343,10 +343,7 @@ private:
     wxEvtHandler*           m_mouseListener;
     wxEvtHandler*           m_paintListener;
 
-    /// Bitmap font texture handle. Per instance, NOT shared: WebGL contexts
-    /// (unlike native GL with context sharing) share no objects, and each
-    /// WEBGL_GAL owns its own context.
-    GLuint                  m_fontTexture;
+    static GLuint           g_fontTexture;      ///< Bitmap font texture handle (shared)
 
     // Vertex buffer objects related fields
     typedef std::unordered_map< unsigned int, std::shared_ptr<VERTEX_ITEM> > GROUPS_MAP;
@@ -375,7 +372,7 @@ private:
 
     // Internal flags
     bool                    m_isFramebufferInitialized; ///< Are the framebuffers initialized?
-    bool                    m_isBitmapFontLoaded;       ///< Is m_fontTexture loaded (per instance)?
+    static bool             m_isBitmapFontLoaded;       ///< Is the bitmap font texture loaded?
     bool                    m_isBitmapFontInitialized;  ///< Is the shader set to use bitmap fonts?
     bool                    m_isInitialized;            ///< Basic initialization flag, has to be
                                                         ///< done when the window is visible
