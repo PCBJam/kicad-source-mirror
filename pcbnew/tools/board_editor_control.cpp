@@ -938,17 +938,7 @@ int BOARD_EDITOR_CONTROL::ShowEeschema( const TOOL_EVENT& aEvent )
         }
     }
 
-#ifdef __EMSCRIPTEN__
-    // The merged WASM editor registers the SCH kiface for project-sync, whose
-    // in-process eeschema player is deliberately kept HIDDEN (see
-    // TestStandalone) — routing the user-facing switch through it would show
-    // nothing. Every tool owns its own browser tab, so the switch must go
-    // through ExecuteFile, which the WASM port forwards to
-    // window.kicadWebOpenTool (a browser navigation).
-    if( Kiface().IsSingle() )
-#else
     if( Kiface().IsSingle() && !KIWAY::FaceRegistered( KIWAY::FACE_SCH ) )
-#endif
     {
         ExecuteFile( EESCHEMA_EXE, schematic.GetFullPath() );
     }
