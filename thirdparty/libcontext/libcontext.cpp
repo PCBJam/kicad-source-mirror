@@ -20,6 +20,7 @@
 // WASM/Emscripten: implement libcontext using Emscripten fibers so KiCad's
 // existing coroutine machinery can switch stacks on the web build too.
 #if defined(LIBCONTEXT_PLATFORM_wasm32)
+#include <emscripten.h>
 
 #include <emscripten/fiber.h>
 
@@ -31,7 +32,14 @@ namespace libcontext {
 namespace
 {
 
-constexpr size_t ASYNCIFY_STACK_SIZE = 64 * 1024;
+// 512K (was 64K): an asyncify unwind saves every live frame's locals into
+// this per-fiber buffer. Shallow tool-loop yields fit 64K, but a DEEP park —
+// e.g. a collab apply suspending inside commit.Push → connectivity → font
+// work — overflowed it, and with assertions compiled out the overflow
+// silently corrupted the saved rewind state: the rewind then re-dispatched
+// indirect call sites from garbage locals ("table index is out of bounds" on
+// doRewind — drift-trio finding #10b, standalone-hardening 0008 §10).
+constexpr size_t ASYNCIFY_STACK_SIZE = 512 * 1024;
 [[maybe_unused]] constexpr int MAX_WASM_FCONTEXT_LOGS = 220;
 
 struct invocation_args_probe
@@ -246,6 +254,7 @@ void ensure_main_context()
         if( !ctx->return_to )
         {
             log_wasm_fcontext( "entry-orphaned", ctx, nullptr, 0 );
+            EM_ASM( { console.log( "[collab-fcontext] entry-orphaned ctx=" + $0 ); }, (int) ctx->id );
             std::abort();
         }
 
@@ -326,6 +335,10 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
         // Instead of killing all WASM execution, log and return 0 so the caller
         // sees a null INVOCATION_ARGS and handles it gracefully.
         log_wasm_fcontext( "jump-ghost", old_ctx, new_ctx, old_ctx->transfer_value );
+        // Unconditional anomaly beacon (drift-trio #10b hunt): ghost resumes
+        // precede the rewind-path table-index traps under collab fuzz load.
+        EM_ASM( { console.log( "[collab-fcontext] jump-ghost ctx=" + $0 + " epoch=" + $1 ); },
+                (int) old_ctx->id, (int) old_ctx->resume_epoch );
         g_current_context = old_ctx;
         old_ctx->running = true;
         return 0;
