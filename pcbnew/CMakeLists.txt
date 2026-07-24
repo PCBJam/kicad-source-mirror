@@ -892,12 +892,13 @@ if( EMSCRIPTEN AND KICAD_PCB_CONVERTER_WASM )
     # StartPlotBoard/PlotBoardLayers — plotter-based, no GAL context.
     # Kept back from the exporters/ and board_stackup_manager/ filters for
     # --gerbers' .gbrjob output (the jobfile writer resolves stackup colors
-    # through GetStandardColors — a pure data-table TU, not the UI panel) and
-    # --drill's excellon writer:
+    # through GetStandardColors — a pure data-table TU, not the UI panel),
+    # --drill's excellon writer, and --ipc356's D-356 writer (plugins 0002):
     list( APPEND PCBNEW_SRCS
         exporters/gerber_jobfile_writer.cpp
         exporters/gendrill_excellon_writer.cpp
         exporters/gendrill_writer_base.cpp
+        exporters/export_d356.cpp
         board_stackup_manager/stackup_predefined_prms.cpp )
 endif()
 
