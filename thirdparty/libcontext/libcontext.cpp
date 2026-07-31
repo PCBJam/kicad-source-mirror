@@ -99,6 +99,14 @@ struct wasm_fcontext
     bool initialized = false;
     bool running = false;
     bool finished = false;
+    // True ONLY between a real fiber_swap suspension (its fiber rewind data
+    // is valid) and the next swap-in. A context whose flag is false is
+    // mid-execution — possibly asyncify-parked inside handleSleep below a JS
+    // turn, a wasm-only state its fiber data knows nothing about. Swapping
+    // into such a context rewinds STALE data (finishContextSwitch → doRewind
+    // → "unreachable executed" — the 2026-07 production board-load trap) and
+    // poisons every later Asyncify entry ("index out of bounds").
+    bool swap_suspended = false;
     bool releasable = true;
     int refcount = 0;
     uint32_t resume_epoch = 0;
@@ -263,6 +271,9 @@ void ensure_main_context()
         return_to->transfer_value = 0;
         g_current_context = return_to;
         return_to->running = true;
+        // Mirror of jump_fcontext's bookkeeping (see wasm_fcontext).
+        ctx->swap_suspended = true;
+        return_to->swap_suspended = false;
         log_wasm_fcontext( "trampoline-swap", ctx, return_to, 0 );
         emscripten_fiber_swap( &ctx->fiber, &return_to->fiber );
 
@@ -290,6 +301,9 @@ fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
     ctx->initialized = true;
     ctx->refcount = 1;
     ctx->id = g_next_context_id++;
+    // A fresh fiber is safely enterable: its first swap-in takes the
+    // entry-point path (no rewind of saved data is involved).
+    ctx->swap_suspended = true;
 
     void* stack_bottom = static_cast<char*>( sp ) - size;
 
@@ -312,6 +326,34 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     if( !old_ctx || !new_ctx || !new_ctx->initialized )
         return 0;
 
+    if( !new_ctx->swap_suspended )
+    {
+        // The target is mid-execution: its body is asyncify-parked inside
+        // handleSleep somewhere below a JS turn (TOOL_MANAGER cannot tell —
+        // natively a coroutine cannot be suspended without yielding). Its
+        // saved fiber suspension is STALE; swapping in would rewind it
+        // regardless (finishContextSwitch → doRewind → "unreachable
+        // executed", the production board-load trap) and poison all later
+        // Asyncify entries. REFUSE instead — the same null-INVOCATION_ARGS
+        // contract the jump-ghost path below already established. The parked
+        // body completes via its own wake and suspends properly; only this
+        // one dispatch is dropped.
+        log_wasm_fcontext( "jump-refused-parked", new_ctx, old_ctx, vp );
+
+        static int s_refused = 0;
+        ++s_refused;
+
+        if( s_refused <= 10 || s_refused % 100 == 0 )
+        {
+            EM_ASM( { console.warn( "[collab-fcontext] jump-refused: ctx=" + $0
+                                    + " is asyncify-parked, not suspended (occurrence "
+                                    + $1 + ")" ); },
+                    (int) new_ctx->id, s_refused );
+        }
+
+        return 0;
+    }
+
     log_wasm_fcontext( "jump-enter", new_ctx, old_ctx, vp, ofc,
                        ofc ? static_cast<wasm_fcontext*>( *ofc ) : nullptr );
     assign_saved_context( ofc, old_ctx );
@@ -324,6 +366,10 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     new_ctx->transfer_value = vp;
     old_ctx->running = false;
     new_ctx->running = true;
+    // The swap's unwind writes old_ctx's fiber suspension (valid to resume);
+    // new_ctx is about to execute (its saved data is consumed by this swap).
+    old_ctx->swap_suspended = true;
+    new_ctx->swap_suspended = false;
     g_current_context = new_ctx;
 
     log_wasm_fcontext( "jump-swap", new_ctx, old_ctx, vp );
