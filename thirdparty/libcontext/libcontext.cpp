@@ -29,6 +29,24 @@
 
 namespace libcontext {
 
+// The handlesleep runtime shim maintains Asyncify.__wakingRoot: it is >0
+// exactly while the MAIN context's own sleep-wake continuation is executing
+// synchronously (rewind + resumed forward run, until its next park). A fiber
+// swap OUT of main inside that extent writes a suspension that is broken by
+// construction: emscripten_fiber_swap records the rewind entry as the BOTTOM
+// of Asyncify.exportCallStack — the re-invoked main export — while the
+// asyncify capture only spans the frames near the swap site (measured 1.3KB
+// vs the ~10KB of a valid fresh-entry capture, 2026-08-03 local repro). The
+// eventual rewind of that pairing traps immediately ("unreachable executed" /
+// "index out of bounds"), no matter when it runs — deferring it changes
+// nothing (proven: a microtask-deferred retry on an empty stack trapped
+// identically). Prevention is the only option, and it must happen BEFORE
+// _asyncify_start_unwind writes the doomed data — i.e. here, not in the JS
+// finishContextSwitch layer.
+EM_JS( int, wasm_root_wake_in_flight, (), {
+    return ( typeof Asyncify !== "undefined" && ( Asyncify.__wakingRoot | 0 ) > 0 ) ? 1 : 0;
+} );
+
 namespace
 {
 
@@ -352,6 +370,89 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
         }
 
         return 0;
+    }
+
+    // REFUSAL RETRACTED 2026-08-03 (round 6): refusing this swap DOES prevent
+    // the unrewindable write (the "unreachable executed" cascade disappears),
+    // but the dropped dispatch strands the tool coroutine and the load dies
+    // anyway — the frame tears down, ~wxTopLevelWindowWasm fires the host quit
+    // notification, and the teardown itself traps "index out of bounds". Same
+    // dead board, different obituary. Kept as a BEACON so field logs still name
+    // the exact fatal interleave; the cure has to stop the situation from
+    // arising (fiber-first runtime / requeueing the dispatch to a fresh JS
+    // entry), not veto it after the fact.
+    if( false && old_ctx == &g_main_context && new_ctx != &g_main_context
+            && wasm_root_wake_in_flight() )
+    {
+        // Swapping OUT of main into a fiber inside main's own live wake window
+        // would write an unrewindable MAIN suspension (see
+        // wasm_root_wake_in_flight above) — the 2026-07/08 production
+        // board-load killer, reproduced locally 2026-08-03 (warm load of a
+        // 110MB+ project stretches one wake slice long enough for an event
+        // dispatch to land inside it). REFUSE with the same
+        // null-INVOCATION_ARGS ghost contract as the parked guard above: this
+        // one dispatch is dropped, the target stays validly suspended, and the
+        // next fresh-entry tick redelivers.
+        //
+        // Jumps INTO main are always allowed — they consume main's EXISTING
+        // suspension (a fiber's yield-back, possibly with g_current_context
+        // laundered to null→main); refusing one mid-yield strands the fiber's
+        // completion and took the whole frame down (guard round 1, 2026-08-03:
+        // the refused into-main jump cascaded into a real top-window close).
+        log_wasm_fcontext( "jump-refused-hot-main", new_ctx, old_ctx, vp );
+
+        static int s_hot_refused = 0;
+        ++s_hot_refused;
+
+        if( s_hot_refused <= 10 || s_hot_refused % 100 == 0 )
+        {
+            // The stack names the JS entry that drove this dispatch (timer,
+            // RAF, message) plus the wasm frame chain — the only way to
+            // identify the refused dispatch's owner in a release build.
+            EM_ASM( { console.warn( "[collab-fcontext] jump-refused-hot-main: old=" + $0
+                                    + " new=" + $1
+                                    + " dispatch inside main's live wake window (occurrence "
+                                    + $2 + ")\n" + new Error( "refusal-site" ).stack ); },
+                    (int) old_ctx->id, (int) new_ctx->id, s_hot_refused );
+        }
+
+        return 0;
+    }
+
+    // THE fatal interleave, observed not vetoed: main swapping OUT into a fiber
+    // inside its own live sleep-wake continuation. emscripten_fiber_swap stamps
+    // exportCallStack[0] (the wake's re-invoked __main_argc_argv) as the rewind
+    // entry of a capture that only spans the swap-site frames — an unrewindable
+    // pairing. Exactly one of these precedes every reproduced board-load death.
+    if( old_ctx == &g_main_context && new_ctx != &g_main_context
+            && wasm_root_wake_in_flight() )
+    {
+        static int s_hot_out = 0;
+        ++s_hot_out;
+
+        if( s_hot_out <= 10 || s_hot_out % 100 == 0 )
+        {
+            EM_ASM( { console.warn( "[collab-fcontext] hot-main-swap-out: old=" + $0
+                                    + " new=" + $1
+                                    + " — unrewindable main suspension written (occurrence "
+                                    + $2 + ")" ); },
+                    (int) old_ctx->id, (int) new_ctx->id, s_hot_out );
+        }
+    }
+
+    // A hot jump INTO main is either a fiber's legit yield-back or the return
+    // half of the pair above; beaconed for field correlation.
+    if( new_ctx == &g_main_context && wasm_root_wake_in_flight() )
+    {
+        static int s_hot_into_main = 0;
+        ++s_hot_into_main;
+
+        if( s_hot_into_main <= 10 || s_hot_into_main % 100 == 0 )
+        {
+            EM_ASM( { console.warn( "[collab-fcontext] jump-hot-into-main: old=" + $0
+                                    + " new=" + $1 + " (occurrence " + $2 + ")" ); },
+                    (int) old_ctx->id, (int) new_ctx->id, s_hot_into_main );
+        }
     }
 
     log_wasm_fcontext( "jump-enter", new_ctx, old_ctx, vp, ofc,
