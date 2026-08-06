@@ -41,3 +41,10 @@ add_library( libcontext STATIC
 target_include_directories( libcontext PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     )
+
+if( EMSCRIPTEN )
+    # The wasm backend is a thin adapter over the scheduler registry
+    # (wx/wasm/private/sched_context.h, header-only — pcbjam
+    # docs/features/async/22 Phase A), so it needs wx's include paths.
+    target_include_directories( libcontext PRIVATE ${wxWidgets_INCLUDE_DIRS} )
+endif()
