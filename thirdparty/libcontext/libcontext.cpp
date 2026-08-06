@@ -186,14 +186,28 @@ void divergence_beacon( const char* aKind, const wasm_fcontext* aOld,
 // fcontext pointer — previously a silent use-after-free; now a loud beacon
 // and no swap, which the caller's ghost-resume contract contains (the caller
 // sees an unchanged epoch and returns null INVOCATION_ARGS).
-void sched_swap( wasm_fcontext* aFrom, wasm_fcontext* aTo )
+// Phase B: a swap is a STAR TRANSFER — park the source, make the target
+// runnable, and let the scheduler perform the entry. The value handed back is
+// whatever the next transfer into us carries, which is exactly libcontext's
+// return-from-jump_fcontext contract.
+//
+// Falls back to Phase A's direct swap when the source is not the scheduler's
+// current context: that means nothing has moved onto contexts in this build
+// (the standalone coroutine harnesses), and a transfer would have nothing to
+// park.
+intptr_t sched_swap( wasm_fcontext* aFrom, wasm_fcontext* aTo, intptr_t aValue )
 {
+    if( pcbjam_sched::current() == aFrom->sched_id && pcbjam_sched::can_yield_here() )
+        return pcbjam_sched::fiber_transfer( aFrom->sched_id, aTo->sched_id, aValue );
+
     if( !pcbjam_sched::fiber_swap( aFrom->sched_id, aTo->sched_id ) )
     {
         EM_ASM( { console.warn( "[collab-fcontext] swap-lost: scheduler refused old=" + $0
                                 + " new=" + $1 ); },
                 (int) aFrom->id, (int) aTo->id );
     }
+
+    return aFrom->transfer_value;
 }
 
 
@@ -477,11 +491,21 @@ void ensure_main_context()
         g_main_context.initialized = true;
         g_main_context.releasable = false;
         g_main_context.id = g_next_context_id++;
-        // Runs on the stack being adopted (the first-ever jump comes from the
-        // main stack — nothing else exists yet), which is the one situation
-        // where adopting "the current stack" is exact.
-        g_main_context.sched_id =
-                pcbjam_sched::fiber_adopt_current( ASYNCIFY_STACK_SIZE, "libctx-main" );
+
+        // ONE ROOT (doc 22 §5, the constraint that orders the flip). If a
+        // scheduler context is already running — which under Phase D it always
+        // is, because wx dispatch lives on one — then THAT context is our
+        // root. Adopting the current stack instead would mint a second
+        // emscripten_fiber_t describing a stack the scheduler already owns,
+        // and the two corrupt each other on first entry.
+        //
+        // The fallback covers builds/tests where nothing has moved onto a
+        // context yet: adopt the stack we are standing on, as Phase A did.
+        g_main_context.sched_id = pcbjam_sched::current();
+
+        if( !g_main_context.sched_id )
+            g_main_context.sched_id =
+                    pcbjam_sched::fiber_adopt_current( ASYNCIFY_STACK_SIZE, "libctx-main" );
         ++g_main_refresh_count;
         g_main_initialized = true;
         g_main_context.running = true;
@@ -532,7 +556,10 @@ void ensure_main_context()
         ctx->swap_suspended = true;
         return_to->swap_suspended = false;
         log_wasm_fcontext( "trampoline-swap", ctx, return_to, 0 );
-        sched_swap( ctx, return_to );
+        // A star transfer hands the next invocation back through its return
+        // value; the direct-swap fallback returns what the other side wrote
+        // into transfer_value, so this assignment is correct for both.
+        ctx->transfer_value = sched_swap( ctx, return_to, 0 );
 
         // If someone swaps back to us, the while(true) loops.
         // Reset state so re-entry is safe (though unlikely in normal operation).
@@ -751,7 +778,7 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     g_current_context = new_ctx;
 
     log_wasm_fcontext( "jump-swap", new_ctx, old_ctx, vp );
-    sched_swap( old_ctx, new_ctx );
+    old_ctx->transfer_value = sched_swap( old_ctx, new_ctx, vp );
 
     if( old_ctx->resume_epoch == expected_resume_epoch )
     {
