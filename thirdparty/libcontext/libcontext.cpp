@@ -580,9 +580,23 @@ void ensure_main_context()
         return_to->swap_suspended = false;
 
         log_wasm_fcontext( "trampoline-swap", ctx, return_to, 0 );
-        // A star transfer hands the next invocation back through its return
-        // value; the direct-swap fallback returns what the other side wrote
-        // into transfer_value, so this assignment is correct for both.
+
+        // Phase B, transfer lane: a finished coroutine's hand-back is
+        // TERMINAL. The legacy while(true) ghost re-entry loop, expressed as
+        // transfers, marked the counterpart Ready on every bounce and
+        // livelocked two finished coroutines across ticks (measured
+        // 2026-08-07, D-on probe). fiber_finish_transfer marks this context
+        // Finished — never re-queued; a later transfer into it is refused
+        // into the caller's ghost contract — and never returns.
+        if( pcbjam_sched::current() == ctx->sched_id && pcbjam_sched::can_yield_here() )
+        {
+            ctx->swap_suspended = false;   // terminal: no valid re-entry capture
+            pcbjam_sched::fiber_finish_transfer( ctx->sched_id, return_to->sched_id, 0 );
+            // Not reached: the registry parks this fiber forever.
+        }
+
+        // Direct-swap fallback (nothing on contexts in this build): legacy
+        // semantics unchanged, including ghost re-entry below.
         ctx->transfer_value = sched_swap( ctx, return_to, 0 );
 
         // If someone swaps back to us, the while(true) loops.
@@ -674,7 +688,24 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     //
     // Until then every disagreement is a recorded fact, not a behaviour
     // change: these beacons are the evidence Phase B's flip gets designed on.
-    if( old_ctx->sched_id != pcbjam_sched::fiber_current() )
+    // Who does the registry think is on the CPU? Under the star (Phase B) the
+    // authority is current() — the scheduler enters every context, and the
+    // symmetric lane's fiber_current() is only meaningful while a direct swap
+    // chain owns the CPU. Comparing against the lane alone made this beacon
+    // fire on every transfer jump (28 firings in one battery, all benign),
+    // which is exactly how a tripwire stops being evidence.
+    const pcbjam_sched::ContextId on_cpu = pcbjam_sched::current()
+                                                   ? pcbjam_sched::current()
+                                                   : pcbjam_sched::fiber_current();
+
+    // "The registry says nobody is running" and "we are the root, on the main
+    // stack" are the SAME fact, not a disagreement: entries that still arrive
+    // on the main stack (mailbox timers, DOM handlers, everything until Phase
+    // E) run there with no context on the CPU.
+    const bool root_on_main_stack = old_ctx == &g_main_context && on_cpu == 0
+                                    && old_ctx->sched_id == g_main_stack_sched_id;
+
+    if( !root_on_main_stack && old_ctx->sched_id != on_cpu )
         divergence_beacon( "current", old_ctx, new_ctx );
 
     if( pcbjam_sched::fiber_enterable( new_ctx->sched_id ) != new_ctx->swap_suspended )
