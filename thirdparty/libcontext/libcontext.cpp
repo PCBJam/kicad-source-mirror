@@ -154,6 +154,9 @@ struct wasm_fcontext
 wasm_fcontext* g_current_context = nullptr;
 wasm_fcontext g_main_context;
 bool g_main_initialized = false;
+// The MAIN STACK's fiber-lane identity, adopted lazily the first time a jump
+// happens while no scheduler context runs (see resolve_root_identity).
+pcbjam_sched::ContextId g_main_stack_sched_id = 0;
 [[maybe_unused]] int g_log_count = 0;
 uint32_t g_next_context_id = 1;
 uint32_t g_main_refresh_count = 0;
@@ -484,6 +487,39 @@ void assign_saved_context( fcontext_t* aSlot, wasm_fcontext* aCtx )
 }
 
 
+// The scheduler identity of "the root" for a jump happening RIGHT NOW.
+//
+// MEASURED PLAN CORRECTION (2026-08-07, nested case 3 + races pump-error).
+// Doc 22 first said "the root adopts the RUNNING context, never the main
+// stack" — binding it ONCE, at first jump. That is wrong while any entry
+// still runs on the main stack (mailbox timers, DOM handlers — everything
+// until Phase E completes): a timer jumping a fiber from the MAIN stack then
+// used the DISPATCH context's fiber struct as its from-side while that
+// context sat PARKED in a modal — overwriting the parked capture and marking
+// it Running, so the modal's later resolve hit "mark_ready() on a running
+// context" and the wake was lost.
+//
+// The root's identity is a PER-JUMP question: the running scheduler context
+// if there is one, else a lazily-adopted main-stack fiber (adopted while
+// provably standing on it — current()==0 means exactly that). The stamp is
+// consumed synchronously: a coroutine entered by this jump yields back
+// before any other stack can jump out of the root, so re-stamping per jump
+// is race-free on a single thread.
+pcbjam_sched::ContextId resolve_root_identity()
+{
+    const pcbjam_sched::ContextId cur = pcbjam_sched::current();
+
+    if( cur )
+        return cur;
+
+    if( !g_main_stack_sched_id )
+        g_main_stack_sched_id =
+                pcbjam_sched::fiber_adopt_current( ASYNCIFY_STACK_SIZE, "libctx-main" );
+
+    return g_main_stack_sched_id;
+}
+
+
 void ensure_main_context()
 {
     if( !g_main_initialized )
@@ -492,20 +528,7 @@ void ensure_main_context()
         g_main_context.releasable = false;
         g_main_context.id = g_next_context_id++;
 
-        // ONE ROOT (doc 22 §5, the constraint that orders the flip). If a
-        // scheduler context is already running — which under Phase D it always
-        // is, because wx dispatch lives on one — then THAT context is our
-        // root. Adopting the current stack instead would mint a second
-        // emscripten_fiber_t describing a stack the scheduler already owns,
-        // and the two corrupt each other on first entry.
-        //
-        // The fallback covers builds/tests where nothing has moved onto a
-        // context yet: adopt the stack we are standing on, as Phase A did.
-        g_main_context.sched_id = pcbjam_sched::current();
-
-        if( !g_main_context.sched_id )
-            g_main_context.sched_id =
-                    pcbjam_sched::fiber_adopt_current( ASYNCIFY_STACK_SIZE, "libctx-main" );
+        g_main_context.sched_id = resolve_root_identity();
         ++g_main_refresh_count;
         g_main_initialized = true;
         g_main_context.running = true;
@@ -555,6 +578,7 @@ void ensure_main_context()
         // Mirror of jump_fcontext's bookkeeping (see wasm_fcontext).
         ctx->swap_suspended = true;
         return_to->swap_suspended = false;
+
         log_wasm_fcontext( "trampoline-swap", ctx, return_to, 0 );
         // A star transfer hands the next invocation back through its return
         // value; the direct-swap fallback returns what the other side wrote
@@ -621,6 +645,14 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
 
     if( !old_ctx || !new_ctx || !new_ctx->initialized )
         return 0;
+
+    // A jump OUT of the root re-resolves which stack the root IS right now
+    // (the running scheduler context, or the lazily-adopted main stack — see
+    // resolve_root_identity). The stamp is read again by the coroutine's
+    // yield-back, which happens synchronously before any other stack can
+    // jump out of the root.
+    if( old_ctx == &g_main_context )
+        old_ctx->sched_id = resolve_root_identity();
 
     if( !new_ctx->sched_id )
     {
