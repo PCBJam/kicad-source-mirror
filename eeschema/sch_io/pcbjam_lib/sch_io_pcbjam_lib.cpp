@@ -116,9 +116,11 @@ EM_JS( void, pcbjam_libs_request_start,
 } );
 
 // Token waits live in the wx wasm port (evtloop.cpp); this is the first
-// KiCad-side client of that registry.
-extern "C" int wxWasmBeginWait( const char* aKind );
-extern "C" int wxWasmYieldUntil( int aToken );
+// KiCad-side client of that registry. WEAK: the sym_convert diet compiles this
+// TU without the wx wasm port — there the registry is absent, and so is any
+// /mnt/pcbjam provider, so a null resolves to "request unavailable" (nullopt).
+extern "C" int wxWasmBeginWait( const char* aKind ) __attribute__(( weak ));
+extern "C" int wxWasmYieldUntil( int aToken ) __attribute__(( weak ));
 
 
 struct PCBJAM_LIBS_REQ
@@ -210,6 +212,9 @@ static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, co
 {
     if( emscripten_is_main_runtime_thread() )
     {
+        if( !wxWasmBeginWait || !wxWasmYieldUntil )
+            return nullptr;   // converter diet: no wait registry, no provider
+
         const int token = wxWasmBeginWait( "lib" );
         pcbjam_libs_request_start( token, aOp, aLib, aArg, aKind );
 
