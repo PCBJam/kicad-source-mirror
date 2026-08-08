@@ -51,24 +51,45 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_fp_libs_finish( em_proxying_ctx* aCt
     emscripten_proxy_finish( aCtx );
 }
 
-// Main-thread path: suspends the calling C++ stack via Asyncify until the
-// provider's promise resolves.  Returns a malloc'd UTF-8 string (caller frees)
-// or 0 on failure.  globalThis here is the window, where the standalone installs
-// the provider.  The 4th arg carries the item kind ("footprint").
-EM_ASYNC_JS( char*, pcbjam_fp_libs_request_js,
-             ( const char* aOp, const char* aLib, const char* aArg, const char* aKind ), {
+// Main-thread path, Phase E shape (docs/features/async/22 §5, K2): the request
+// no longer Asyncify-parks the stack it stands on — it opens a wait token,
+// starts the JS request, and waits via wxWasmYieldUntil (context park when the
+// frame stands on a scheduler context, in-place park otherwise).
+//
+// Every resolution defers to at least a microtask, NEVER synchronously from
+// this call: the C++ caller has not parked yet, and wxWasmYieldUntil's
+// early-resolve peek is the other half of that contract (doc 22 §10, the
+// Phase E retry entry).
+EM_JS( void, pcbjam_fp_libs_request_start,
+       ( int aToken, const char* aOp, const char* aLib, const char* aArg, const char* aKind ), {
+    const op = UTF8ToString( aOp ), lib = UTF8ToString( aLib );
+    const arg = UTF8ToString( aArg ), kind = UTF8ToString( aKind );
+    const finish = ( ptr ) => globalThis.__wxScheduler.resolveWait( aToken, ptr );
+
     const hook = globalThis.kicadLibs;
 
     if( !hook || !hook.request )
-        return 0;
+    {
+        Promise.resolve().then( () => finish( 0 ) );
+        return;
+    }
+
+    let req;
 
     try
     {
-        const res = await hook.request( UTF8ToString( aOp ), UTF8ToString( aLib ),
-                                        UTF8ToString( aArg ), UTF8ToString( aKind ) );
+        req = Promise.resolve( hook.request( op, lib, arg, kind ) );
+    }
+    catch( e )
+    {
+        console.error( 'kicadLibs.request (footprint) failed:', e );
+        Promise.resolve().then( () => finish( 0 ) );
+        return;
+    }
 
+    req.then( ( res ) => {
         if( res == null )
-            return 0;
+            return finish( 0 );
 
         // "Copy as-is": the fat list (list/bodies) returns the raw item bytes as a
         // Uint8Array — memcpy straight into the wasm heap, no string/JSON detour.
@@ -79,20 +100,25 @@ EM_ASYNC_JS( char*, pcbjam_fp_libs_request_js,
             const p = _pcbjam_fp_libs_alloc( res.length + 1 );
             HEAPU8.set( res, p );
             HEAPU8[p + res.length] = 0;
-            return p;
+            return finish( p );
         }
 
         const len = lengthBytesUTF8( res ) + 1;
         const ptr = _pcbjam_fp_libs_alloc( len );
         stringToUTF8( res, ptr, len );
-        return ptr;
-    }
-    catch( e )
-    {
+        finish( ptr );
+    } ).catch( ( e ) => {
         console.error( 'kicadLibs.request (footprint) failed:', e );
-        return 0;
-    }
+        finish( 0 );
+    } );
 } );
+
+// Token waits live in the wx wasm port (evtloop.cpp). WEAK: the pcb_convert
+// diet compiles this TU without the wx wasm port — there the registry is
+// absent, and so is any /mnt/pcbjam provider, so a null resolves to "request
+// unavailable" (nullptr).
+extern "C" int wxWasmBeginWait( const char* aKind ) __attribute__(( weak ));
+extern "C" int wxWasmYieldUntil( int aToken ) __attribute__(( weak ));
 
 
 struct PCBJAM_FP_LIBS_REQ
@@ -179,7 +205,18 @@ static char* pcbjam_fp_libs_request_dispatch( const char* aOp, const char* aLib,
                                               const char* aKind )
 {
     if( emscripten_is_main_runtime_thread() )
-        return pcbjam_fp_libs_request_js( aOp, aLib, aArg, aKind );
+    {
+        if( !wxWasmBeginWait || !wxWasmYieldUntil )
+            return nullptr;   // converter diet: no wait registry, no provider
+
+        const int token = wxWasmBeginWait( "fp-lib" );
+        pcbjam_fp_libs_request_start( token, aOp, aLib, aArg, aKind );
+
+        // The result is the malloc'd pointer, carried through the wait as an
+        // int32; recover the full unsigned address before widening.
+        const int r = wxWasmYieldUntil( token );
+        return (char*) (uintptr_t) (uint32_t) r;
+    }
 
     PCBJAM_FP_LIBS_REQ req{ aOp, aLib, aArg, aKind, nullptr };
 
