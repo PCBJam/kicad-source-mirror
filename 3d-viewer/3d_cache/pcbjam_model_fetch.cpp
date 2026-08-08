@@ -44,37 +44,58 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_3d_finish( em_proxying_ctx* aCtx )
     emscripten_proxy_finish( aCtx );
 }
 
-// Main-thread path: suspends the calling C++ stack via Asyncify until the
-// provider's promise resolves.  The provider fetches the model body (IDB, then
-// R2) and writes it into the MEMFS model root itself (FS.writeFile) — the
-// response is just an ack string, so no binary framing crosses the bridge.
-EM_ASYNC_JS( char*, pcbjam_3d_request_js,
-             ( const char* aOp, const char* aLib, const char* aArg, const char* aKind ), {
+// Main-thread path, Phase E shape (docs/features/async/22 §5, K3): the request
+// no longer Asyncify-parks the stack it stands on — token wait via
+// wxWasmYieldUntil, resolution ALWAYS deferred to at least a microtask (the
+// early-resolve contract, doc 22 §10 Phase E retry entry). The provider fetches
+// the model body (IDB, then R2) and writes it into the MEMFS model root itself
+// (FS.writeFile) — the response is just an ack string, so no binary framing
+// crosses the bridge.
+EM_JS( void, pcbjam_3d_request_start,
+       ( int aToken, const char* aOp, const char* aLib, const char* aArg, const char* aKind ), {
+    const op = UTF8ToString( aOp ), lib = UTF8ToString( aLib );
+    const arg = UTF8ToString( aArg ), kind = UTF8ToString( aKind );
+    const finish = ( ptr ) => globalThis.__wxScheduler.resolveWait( aToken, ptr );
+
     const hook = globalThis.kicadLibs;
 
     if( !hook || !hook.request )
-        return 0;
+    {
+        Promise.resolve().then( () => finish( 0 ) );
+        return;
+    }
+
+    let req;
 
     try
     {
-        const res = await hook.request( UTF8ToString( aOp ), UTF8ToString( aLib ),
-                                        UTF8ToString( aArg ), UTF8ToString( aKind ) );
+        req = Promise.resolve( hook.request( op, lib, arg, kind ) );
+    }
+    catch( e )
+    {
+        console.error( 'kicadLibs.request (model3d) failed:', e );
+        Promise.resolve().then( () => finish( 0 ) );
+        return;
+    }
 
+    req.then( ( res ) => {
         if( res == null )
-            return 0;
+            return finish( 0 );
 
         const str = typeof res === 'string' ? res : '1';
         const len = lengthBytesUTF8( str ) + 1;
         const ptr = _pcbjam_3d_alloc( len );
         stringToUTF8( str, ptr, len );
-        return ptr;
-    }
-    catch( e )
-    {
+        finish( ptr );
+    } ).catch( ( e ) => {
         console.error( 'kicadLibs.request (model3d) failed:', e );
-        return 0;
-    }
+        finish( 0 );
+    } );
 } );
+
+// Token waits live in the wx wasm port (evtloop.cpp).
+extern "C" int wxWasmBeginWait( const char* aKind );
+extern "C" int wxWasmYieldUntil( int aToken );
 
 
 struct PCBJAM_3D_REQ
@@ -144,7 +165,15 @@ static char* pcbjam_3d_request_dispatch( const char* aOp, const char* aLib, cons
                                          const char* aKind )
 {
     if( emscripten_is_main_runtime_thread() )
-        return pcbjam_3d_request_js( aOp, aLib, aArg, aKind );
+    {
+        const int token = wxWasmBeginWait( "3d" );
+        pcbjam_3d_request_start( token, aOp, aLib, aArg, aKind );
+
+        // The result is the malloc'd pointer, carried through the wait as an
+        // int32; recover the full unsigned address before widening.
+        const int r = wxWasmYieldUntil( token );
+        return (char*) (uintptr_t) (uint32_t) r;
+    }
 
     PCBJAM_3D_REQ req{ aOp, aLib, aArg, aKind, nullptr };
 
