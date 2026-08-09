@@ -353,16 +353,16 @@ void beacon_jump_into_reclaimed( const wasm_fcontext* aCtx )
 // Give up the fiber, keep the struct. `sched_id = 0` is the recorded "this
 // coroutine's stack is gone" state — a later jump reads it and takes the
 // ghost contract instead of chasing a freelist pointer.
-void reclaim_fiber( wasm_fcontext* aCtx )
+void reclaim_fiber( wasm_fcontext* aCtx, const char* aWhy )
 {
     static int s_reclaimed = 0;
     ++s_reclaimed;
 
     if( s_reclaimed <= 10 || s_reclaimed % 100 == 0 )
     {
-        EM_ASM( { console.warn( "[collab-fcontext] grace-ring-evict: ctx=" + $0
+        EM_ASM( { console.warn( "[collab-fcontext] " + UTF8ToString( $2 ) + ": ctx=" + $0
                                 + " fiber reclaimed (occurrence " + $1 + ")" ); },
-                (int) aCtx->id, s_reclaimed );
+                (int) aCtx->id, s_reclaimed, aWhy );
     }
 
     pcbjam_sched::fiber_release( aCtx->sched_id );
@@ -419,7 +419,7 @@ void trim_grace_ring()
 
         wasm_fcontext* ctx = ring[victim];
         ring.erase( ring.begin() + victim );
-        reclaim_fiber( ctx );
+        reclaim_fiber( ctx, "grace-ring-evict" );
     }
 }
 
@@ -450,6 +450,20 @@ void release_context( wasm_fcontext* aCtx )
 
     if( aCtx->refcount == 0 && !aCtx->zombie )
     {
+        // Phase F (doc 22 §10, 2026-08-09): a coroutine that RAN TO
+        // COMPLETION can never be validly re-entered — the flip's terminal
+        // finish refuses transfers into it, and a raw jump at sched_id == 0
+        // takes the recorded ghost contract. Reclaim its fiber (the retained
+        // 512K asyncify buffer + registry entry) NOW instead of parking it in
+        // the grace ring until overflow. The ring keeps only its real
+        // clients: released-but-never-finished coroutines, which
+        // TOOL_MANAGER re-enters long after their refcount hits zero.
+        if( evictable( aCtx ) )
+        {
+            reclaim_fiber( aCtx, "release-reclaimed" );
+            return;
+        }
+
         static int s_released = 0;
         ++s_released;
 
