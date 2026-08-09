@@ -711,6 +711,16 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     if( pcbjam_sched::fiber_enterable( new_ctx->sched_id ) != new_ctx->swap_suspended )
         divergence_beacon( "enterable", old_ctx, new_ctx );
 
+    // Phase F F2/F3 finding (doc 22 §10, 2026-08-09): a registry-informed
+    // REFUSAL here (swap_suspended true but fiber_enterable false — the
+    // laundered in-place-park case) was built, measured, and REMOVED. The
+    // ghost contract is the wrong recovery for a misrouted YIELD-BACK: the
+    // yielding coroutine ghost-resumes and runs on, where the JS quarantine's
+    // drop leaves it suspended. Until attribution is registry-authoritative
+    // (the gap-3 redesign), the quarantine owns this case; the registry keeps
+    // the in-place-park fact as observability (divergence beacons above) and
+    // as a hard refusal on the transfer lane, where attribution cannot rot.
+
     if( !new_ctx->swap_suspended )
     {
         // The target is mid-execution: its body is asyncify-parked inside
