@@ -469,19 +469,6 @@ public:
     void RunMainStack( TOOL_BASE* aTool, std::function<void()> aFunc );
 
     /**
-     * Run @a aFunc on the main stack if a tool coroutine is currently active,
-     * otherwise run it inline.
-     *
-     * Same mechanism as RunMainStack(), but for callers that do not know which
-     * tool (or whether any) is running — a blocking call deep inside generic
-     * UI code. Callers that already have their TOOL_BASE should use
-     * RunMainStack() directly.
-     *
-     * @return true if the work was bounced onto the main stack.
-     */
-    bool RunOnMainStackIfActiveTool( std::function<void()> aFunc );
-
-    /**
      * Update the status bar and synchronizes toolbars.
      */
     void UpdateUI( const TOOL_EVENT& aEvent );
