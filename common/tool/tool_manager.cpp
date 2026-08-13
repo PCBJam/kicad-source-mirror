@@ -726,7 +726,8 @@ void TOOL_MANAGER::RunMainStack( TOOL_BASE* aTool, std::function<void()> aFunc )
 
 bool TOOL_MANAGER::RunOnMainStackIfActiveTool( std::function<void()> aFunc )
 {
-    if( !m_activeState || !m_activeState->cofunc || !m_activeState->cofunc->Running() )
+    if( !m_activeState || !m_activeState->cofunc || !m_activeState->cofunc->Running()
+            || !m_activeState->cofunc->CanResume() )
     {
         aFunc();
         return false;
@@ -792,6 +793,21 @@ bool TOOL_MANAGER::dispatchInternal( TOOL_EVENT& aEvent )
         // the tool state handler is waiting for events (i.e. called Wait() method)
         if( st && st->cofunc && st->pendingWait && st->waitEvents.Matches( aEvent ) )
         {
+            if( !st->cofunc->CanResume() )
+            {
+                // The coroutine's context died while parked (destroyed
+                // mid-wait): resuming would be refused, but the branch below
+                // would still consume the event and tear down the wait —
+                // swallowing it for every live tool behind us. Skip the
+                // corpse; the event flows on.
+                wxLogTrace( kicadTraceToolStack,
+                            wxS( "TOOL_MANAGER::dispatchInternal - tool %s wait context is "
+                                 "dead; skipping" ),
+                            st->theTool->GetName() );
+                ++it;
+                continue;
+            }
+
             if( !aEvent.FirstResponder() )
                 aEvent.SetFirstResponder( st->theTool );
 

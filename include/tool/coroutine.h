@@ -137,11 +137,14 @@ private:
         {
         }
 
-        ~CALL_CONTEXT()
-        {
-            if( m_mainStackContext )
-                libcontext::release_fcontext( m_mainStackContext->ctx );
-        }
+        // No destructor releasing m_mainStackContext->ctx: that handle is
+        // BORROWED — it is the caller's context record (the enterer coroutine
+        // on a nested dispatch, or the root), written by jump_fcontext's
+        // symmetric protocol. Only ~COROUTINE's m_callee.ctx is owned.
+        // Releasing a borrowed handle was harmless while release_fcontext was
+        // a native no-op; the JSPI backend treats any release of a started,
+        // unfinished record as destroy-while-parked and kills a LIVE
+        // coroutine mid-slice.
 
 
         void SetMainStack( CONTEXT_T* aStack )
@@ -232,9 +235,10 @@ public:
         VALGRIND_STACK_DEREGISTER( m_valgrind_stack );
 #endif
 
-        if( m_caller.ctx )
-            libcontext::release_fcontext( m_caller.ctx );
-
+        // Ownership rule: m_callee.ctx is the one record this COROUTINE owns.
+        // m_caller.ctx is borrowed (whoever entered us last — the root or a
+        // live enterer coroutine) and must never be released here; see the
+        // CALL_CONTEXT comment above.
         if( m_callee.ctx )
             libcontext::release_fcontext( m_callee.ctx );
     }
@@ -272,7 +276,24 @@ public:
     void RunMainStack( std::function<void()> func )
     {
         assert( m_callContext );
+
+        // NDEBUG wasm: a null m_callContext (finishing sentinel, or a resume
+        // that never delivered a context) would read linear-memory address ~0
+        // silently instead of trapping — refuse instead.
+        if( !m_callContext )
+            return;
+
         m_callContext->RunMainStack( this, std::move( func ) );
+    }
+
+    /**
+     * @return false if the coroutine's context is known-dead (destroyed while
+     *         parked, or already finished) and a Resume() would be refused.
+     *         Always true on backends without context liveness tracking.
+     */
+    bool CanResume() const
+    {
+        return m_callee.ctx && libcontext::context_alive( m_callee.ctx );
     }
 
    /**
