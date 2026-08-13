@@ -27,6 +27,8 @@
 #include <functional>
 #include <map>
 
+#include <kicommon.h>
+
 #if !wxUSE_WEBVIEW
 // wx/webview.h declares nothing when wxUSE_WEBVIEW is 0 (e.g. WASM); forward-declare
 // the types referenced by the (stubbed) class interface so the header still compiles.
@@ -51,7 +53,10 @@ T* GetLiveWindow( const wxWeakRef<T>& aWindowRef )
 }
 } // namespace WEBVIEW_PANEL_DETAIL
 
-class WEBVIEW_PANEL : public wxPanel
+// KICOMMON_API: built into libkicommon (the shared module on wasm); emcc 6
+// only exports annotated symbols from a side module — without it the editor
+// link fails "undefined symbol: WEBVIEW_PANEL::...".
+class KICOMMON_API WEBVIEW_PANEL : public wxPanel
 {
 public:
     using MESSAGE_HANDLER = std::function<void( const wxString& )>;

@@ -17,6 +17,8 @@
 
 #include <functional>
 
+#include <kicommon.h>
+
 class KIID;
 class wxString;
 
@@ -27,11 +29,14 @@ namespace PCBJAM_REMOTE_LOCK
  *  the peer's display name for user feedback. */
 using QUERY = std::function<bool( const KIID& aId, wxString* aHolder )>;
 
+// KICOMMON_API: defined in libkicommon (shared module on wasm); emcc 6 only
+// exports annotated symbols from a side module.
+
 /** Install (or clear, with nullptr) the process-global lock query. */
-void SetQuery( QUERY aQuery );
+KICOMMON_API void SetQuery( QUERY aQuery );
 
 /** True when a query is installed and reports the item as remotely held. */
-bool IsLocked( const KIID& aId, wxString* aHolder = nullptr );
+KICOMMON_API bool IsLocked( const KIID& aId, wxString* aHolder = nullptr );
 
 } // namespace PCBJAM_REMOTE_LOCK
 
