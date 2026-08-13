@@ -21,20 +21,26 @@
 
 #include <string>
 
+#include <kicommon.h>
+
 namespace PCBJAM_READ_ONLY
 {
 
+// KICOMMON_API on every function: these live in libkicommon (the shared
+// module on wasm), and emcc 6 only exports annotated symbols from a side
+// module — without it the editor link fails "undefined symbol".
+
 /** Enable/disable the process-global read-only viewer mode. */
-void Set( bool aReadOnly );
+KICOMMON_API void Set( bool aReadOnly );
 
 /** True while the read-only viewer mode is active. */
-bool IsReadOnly();
+KICOMMON_API bool IsReadOnly();
 
 /** True when the TOOL_ACTION command string names a view-only action a
  *  read-only session may still run. Exact-name matches only — prefixes are
  *  unsafe ("common.Control.save" shares the zoom prefix). Only meaningful
  *  while IsReadOnly(); callers check that first. */
-bool IsActionAllowed( const std::string& aActionName );
+KICOMMON_API bool IsActionAllowed( const std::string& aActionName );
 
 } // namespace PCBJAM_READ_ONLY
 

@@ -368,9 +368,19 @@ if( EMSCRIPTEN AND NOT KICAD_IPC_API )
     )
 endif()
 
-add_library( kicommon SHARED
-    ${KICOMMON_SRCS}
-    )
+# WASM: STATIC, not SHARED. emcc 6 treats a .so input as a REAL dynamic
+# dependency (DT_NEEDED resolved at runtime — the app 404s fetching
+# libkicommon.so.10.0.4 at boot); emcc 4 folded it in statically. A static
+# archive restores that monolithic link.
+if( EMSCRIPTEN )
+    add_library( kicommon STATIC
+        ${KICOMMON_SRCS}
+        )
+else()
+    add_library( kicommon SHARED
+        ${KICOMMON_SRCS}
+        )
+endif()
 
 if( KICAD_USE_PCH )
     target_precompile_headers( kicommon
