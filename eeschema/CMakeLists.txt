@@ -342,7 +342,11 @@ if( EMSCRIPTEN )
         sim/sim_model_ngspice_data_b3soi.cpp
         sim/sim_model_ngspice_data_b4soi.cpp
         sim/sim_model_ngspice_data_hsim.cpp
-        PROPERTIES COMPILE_OPTIONS "-O2" )
+        # clang 24 (emcc 6) hard-errors when a TU's -O level differs from the
+        # PCH's ("OptimizationLevel differs in precompiled file"); these are
+        # generated data tables that gain nothing from the PCH, so opt them
+        # out instead of losing the -O2 locals collapse.
+        PROPERTIES COMPILE_OPTIONS "-O2" SKIP_PRECOMPILE_HEADERS ON )
     list( APPEND EESCHEMA_SIM_SRCS
         ${KICAD_WASM_LAYER}/stubs/sharedspice_client.cpp
     )

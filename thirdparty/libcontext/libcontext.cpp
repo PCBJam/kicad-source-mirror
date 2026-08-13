@@ -28,6 +28,499 @@
 // ghost-resume epochs, refcounting — and keeps its old guards as cross-check
 // tripwires that must agree with the registry (a disagreement beacons).
 #if defined(LIBCONTEXT_PLATFORM_wasm32)
+#if defined(PCBJAM_JSPI)
+// =============================== JSPI backend ===============================
+// Each coroutine is ONE WebAssembly.promising activation; every switch crosses
+// the JS boundary through a per-coroutine pair of promises:
+//   yielded : resolved by the coroutine when it yields (or finishes)
+//   resume  : resolved by the caller when it resumes the coroutine
+// jump_fcontext keeps libcontext's symmetric signature and infers direction
+// from the target record: jumping to a CORO record enters it (start/resume and
+// await its yield); jumping to an ADOPTED record is the current coroutine
+// yielding to whoever entered it. The INVOCATION_ARGS protocol above this
+// layer (coroutine.h) passes through untouched.
+//
+// Shadow-stack discipline (emscripten #27364, proven red/green by
+// tests/apps/standalone/jspi-stack): JSPI switches the native stack per
+// activation but NOT the C spill stack. Every coroutine therefore owns a
+// dedicated spill region ("green-region" mitigation): the entry wrapper points
+// __stack_pointer at the region before invoking the promising export, and
+// every suspending import saves/restores ITS activation's SP across its await.
+//
+// Completion: a suspended-forever final jumpOut would leak the activation's
+// engine stack, so callerStub calls finish_fcontext() first (see coroutine.h);
+// the finishing yield resolves the caller and RETURNS a sentinel immediately —
+// jumpOut's continuation runs on the still-live COROUTINE, callerStub returns,
+// the entry export returns, and the engine reclaims the activation.
+//
+// Lifetime: records are never freed (tombstones, ~48B each, censused) — only
+// the spill regions are reclaimed. That makes stale handles, double releases,
+// and ghost resumes safe and observable, replacing the fiber backend's grace
+// ring + ghost-resume epochs wholesale.
+#include <emscripten.h>
+#include <emscripten/em_js.h>
+#include <emscripten/threading.h>
+
+#include <cstdlib>
+#include <cstring>
+#include <map>
+
+namespace libcontext {
+namespace {
+
+enum class ctx_kind : int { CORO = 1, ADOPTED = 2 };
+
+struct wasm_fcontext
+{
+    int      id;
+    ctx_kind kind;
+    void   ( *fn )( intptr_t );
+    char*    region;        // C spill stack, owned; freed on completion
+    size_t   region_size;
+    bool     started   = false;
+    bool     finishing = false; // finish_fcontext called; next yield completes
+    bool     finished  = false; // entry export returned; region freed
+    bool     released  = false; // release_fcontext seen
+    bool     dead      = false; // released while suspended mid-body (censused)
+
+    // Who entered this coroutine (start or last resume). Needed for direction
+    // inference in the NESTED case: a child yielding back to its coroutine
+    // parent jumps to a CORO-kind record, which must read as a YIELD, not as
+    // "enter the parent".
+    struct wasm_fcontext* enterer = nullptr;
+};
+
+// 1MB floor: KiCad's advanced-config default (m_CoroutineStackSize, ~256K)
+// was sized for the fiber era; under JSPI the region carries the FULL native
+// C spill of the tool body at -O1 debug codegen, and a 256K region overflows
+// into the heap during board-load tool bursts (corrupted COROUTINE objects,
+// OOB in Resume()). The base canary below turns any residual overflow into a
+// loud beacon instead of silent heap scribbling.
+constexpr size_t MIN_REGION_BYTES = 1024 * 1024;
+constexpr unsigned REGION_CANARY = 0x1B5C0FEEu;
+
+wasm_fcontext  g_root{ 0, ctx_kind::ADOPTED, nullptr, nullptr, 0 };
+wasm_fcontext* g_current = &g_root;
+
+extern "C" EMSCRIPTEN_KEEPALIVE int pcbjam_libctx_current( void )
+{
+    return g_current && g_current->kind == ctx_kind::CORO ? g_current->id : 0;
+} // the record whose code is executing
+int            g_next_id = 1;
+int            g_ghost_jumps = 0;
+int            g_dead_parked = 0;
+
+// The final jumpOut's return value: jumpOut dereferences it (m_callContext =
+// ret->context; type check) on the still-live COROUTINE, so it must be a
+// valid INVOCATION_ARGS-shaped object. FROM_ROUTINE = 1 (coroutine.h), null
+// destination/context — never used again once the coroutine has finished.
+struct sentinel_args_t { int type; void* destination; void* context; };
+sentinel_args_t g_sentinel_args = { 1 /* FROM_ROUTINE */, nullptr, nullptr };
+
+} // namespace
+
+// --- SP shims: leaf exports the EM_JS bodies use for the green-region
+// discipline (the glue's stackSave/stackRestore helpers are not emitted in
+// every build; wasm exports always are). Both compile to bare global get/set —
+// no linear-memory frame of their own.
+extern "C" {
+uintptr_t emscripten_stack_get_current( void );
+void _emscripten_stack_restore( uintptr_t );
+EMSCRIPTEN_KEEPALIVE uintptr_t pcbjam_libctx_sp( void )
+{
+    return emscripten_stack_get_current();
+}
+EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_set_sp( uintptr_t aSp )
+{
+    _emscripten_stack_restore( aSp );
+}
+// g_current handle save/restore for the JS halves: a coroutine SUSPENSION
+// leaves g_current pointing at the parked coroutine (no C code runs on the
+// unwind path), so any activation that runs before its resume would
+// mis-attribute its own suspensions to the parked coroutine. js_libctx_start
+// captures the caller's handle before launching the entry activation and
+// restores it the moment the first slice hands control back.
+EMSCRIPTEN_KEEPALIVE uintptr_t pcbjam_libctx_cur_handle( void )
+{
+    return reinterpret_cast<uintptr_t>( g_current );
+}
+EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_set_cur_handle( uintptr_t aHandle )
+{
+    g_current = reinterpret_cast<wasm_fcontext*>( aHandle );
+}
+// Leaf probe for the wx scheduler's suspension attribution: a FOREIGN yield
+// (sleepYield etc.) fired from inside a coroutine body must be tracked
+// against the COROUTINE's activation, not whatever wx entry is on the JS
+// stack (the enterer's frame is still live there — attributing to it
+// double-books one record across two suspensions and wedges both resumes).
+EMSCRIPTEN_KEEPALIVE int pcbjam_libctx_current( void );
+}
+
+// --- JS side: promise pairs + SP discipline --------------------------------
+EM_JS( void, js_libctx_init, (), {
+    if( globalThis.__libctxJspi )
+        return;
+    globalThis.__libctxJspi = {
+        s: {},          // id -> { yielded, resume, done, finished }
+        tops: {},       // id -> spill-region top (SP swap target at entry)
+        ghosts: 0,      // ghost/refused transitions (Phase-7 census surface)
+        deadParked: 0,
+        mk: function() {
+            const o = {};
+            o.p = new Promise( ( res ) => { o.r = res; } );
+            return o;
+        }
+    };
+} );
+
+EM_JS( void, js_libctx_register, ( int id, uintptr_t top ), {
+    globalThis.__libctxJspi.tops[id] = top;
+} );
+
+EM_JS( void, js_libctx_drop, ( int id ), {
+    delete globalThis.__libctxJspi.s[id];
+    delete globalThis.__libctxJspi.tops[id];
+} );
+
+// Enter a coroutine for the first time: point the shared SP at its spill
+// region, start its promising activation, restore the caller's SP, then
+// suspend until it first yields/finishes. The trailing stackRestore runs
+// right before OUR activation resumes (green-region gate discipline).
+EM_ASYNC_JS( int, js_libctx_start, ( int id, int vp ), {
+    const L = globalThis.__libctxJspi;
+    const st = L.s[id] = {};
+    st.yielded = L.mk();
+    const callerSp = _pcbjam_libctx_sp();
+    const callerCtx = _pcbjam_libctx_cur_handle();
+    _pcbjam_libctx_set_sp( L.tops[id] );
+    st.done = _pcbjam_libctx_entry( id, vp );
+    _pcbjam_libctx_set_sp( callerSp );
+    // The entry's first slice ran synchronously until its first suspension —
+    // which leaves g_current pointing at the (now parked) coroutine. WE are
+    // the caller's activation; restore its context before anything below
+    // (the enter park's attribution!) reads g_current. Idempotent when the
+    // slice ran to completion (pcbjam_libctx_entry restored prev itself).
+    _pcbjam_libctx_set_cur_handle( callerCtx );
+    // Completion backstop: if the entry activation completes (ghost entry,
+    // early return, or a TRAP rejecting its promise) without the body ever
+    // resolving a yield, the enterer's await below would hang forever.
+    // Promise resolution is idempotent, so this -1 (the refusal sentinel)
+    // only lands when nothing legitimate resolved first. Reads st.yielded at
+    // completion time — resume reassigns it per cycle.
+    Promise.resolve( st.done ).then(
+        () => { if( st.yielded ) st.yielded.r( -1 ); },
+        ( e ) => {
+            console.warn( '[libctx-jspi] coroutine ' + id + ' entry REJECTED: '
+                          + ( e && e.stack ? e.stack : e ) );
+            if( st.yielded ) st.yielded.r( -1 );
+        } );
+    // Turnstile integration (jspi-scheduler.js, when present): the CALLER's
+    // activation suspends here and its resume must be serialized with every
+    // other resume, or SP arms interleave and post-resume frames spill into
+    // someone else's region. The completion hook ends the coroutine's own
+    // window (a finishing yield completes the entry synchronously — nothing
+    // else can observe it). The wx-free harness has no scheduler: raw await.
+    const S = globalThis.__wxScheduler;
+    if( S && S.backend === 'jspi' ) {
+        st.done.then( () => S.libctxEnd( id ), () => S.libctxEnd( id ) );
+        const v = await S.promiseYield( st.yielded.p, 'libctx-enter' );
+        _pcbjam_libctx_set_sp( callerSp );
+        return v;
+    }
+    const v = await st.yielded.p;
+    _pcbjam_libctx_set_sp( callerSp );
+    return v;
+} );
+
+EM_ASYNC_JS( int, js_libctx_resume, ( int id, int vp ), {
+    const L = globalThis.__libctxJspi;
+    const st = L.s[id];
+    // doc-15 stale-resume refusal (the fiber backend's epoch contract): a
+    // coroutine parked on a FOREIGN wait (sleep/promise inside its body) has
+    // no live yield pair — st.resume belongs to an already-consumed cycle.
+    // Resuming it would give the activation TWO live resumptions (the timer
+    // and this one) and corrupt it. The coroutine's OWN yield park books
+    // waitKind 'libctx' — that IS the normal resumable state; anything else
+    // (foreign park, armed/in-flight resume, quarantined/unknown) is
+    // refused. The legitimate wake is the foreign wait's own resolution.
+    const SS = globalThis.__wxScheduler;
+    if( SS && SS.backend === 'jspi' && SS._suspended ) {
+        const rec = SS._suspended.get( 'lc' + id );
+        if( !rec || rec.waitKind !== 'libctx' ) {
+            if( SS._note ) SS._note( 'libctxRefusedResume', 'libctx', 'lc' + id );
+            return -1;
+        }
+    }
+    st.yielded = L.mk();
+    const callerSp = _pcbjam_libctx_sp();
+    st.resume.r( vp );
+    const S = globalThis.__wxScheduler;
+    if( S && S.backend === 'jspi' ) {
+        const v = await S.promiseYield( st.yielded.p, 'libctx-enter' );
+        _pcbjam_libctx_set_sp( callerSp );
+        return v;
+    }
+    const v = await st.yielded.p;
+    _pcbjam_libctx_set_sp( callerSp );
+    return v;
+} );
+
+EM_ASYNC_JS( int, js_libctx_yield, ( int id, int vp ), {
+    const L = globalThis.__libctxJspi;
+    const st = L.s[id];
+    st.resume = L.mk();
+    const mySp = _pcbjam_libctx_sp();
+    st.yielded.r( vp );
+    // The COROUTINE'S OWN activation suspends here — libctxSuspend gives it
+    // an explicit turnstile record (attribution by _actStack would blame the
+    // CALLER, which is still on the JS stack) and re-arms mySp at resume.
+    // The set_sp after the await is idempotent with the pump's arm.
+    const S = globalThis.__wxScheduler;
+    if( S && S.backend === 'jspi' ) {
+        const v = await S.libctxSuspend( id, st.resume.p, mySp );
+        _pcbjam_libctx_set_sp( mySp );
+        return v;
+    }
+    const v = await st.resume.p;
+    _pcbjam_libctx_set_sp( mySp );
+    return v;
+} );
+
+// Synchronous: the finishing yield. Resolves the caller's await; the entry
+// export then returns and the engine reclaims the activation.
+EM_JS( void, js_libctx_finish, ( int id, int vp ), {
+    const L = globalThis.__libctxJspi;
+    const st = L.s[id];
+    st.finished = true;
+    st.yielded.r( vp );
+} );
+
+EM_JS( void, js_libctx_beacon, ( int ghosts, int deadParked ), {
+    const L = globalThis.__libctxJspi;
+    L.ghosts = ghosts;
+    L.deadParked = deadParked;
+    console.warn( "[libctx-jspi] ghost/refused transition (ghosts=" + ghosts
+                  + " deadParked=" + deadParked + ")" );
+} );
+
+// Released-while-parked: tell the shim to drop the coroutine's turnstile
+// record (a late resolution of whatever it was parked on must NOT re-enter
+// the freed body), and unhang a parked ENTERER (a mid-foreign-park release
+// leaves the enterer awaiting the yield pair forever — hand it the refusal
+// sentinel; resolution is idempotent, so this is a no-op for the common
+// released-while-yield-parked case whose pair already resolved).
+EM_JS( void, js_libctx_quarantine, ( int id ), {
+    const S = globalThis.__wxScheduler;
+    if( S && S.libctxQuarantine )
+        S.libctxQuarantine( id );
+    const L = globalThis.__libctxJspi;
+    const st = L && L.s ? L.s[id] : null;
+    if( st && st.yielded )
+        st.yielded.r( -1 );
+} );
+
+// --- the promising entry export --------------------------------------------
+extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_entry( int id, intptr_t vp );
+
+namespace {
+wasm_fcontext* find_by_id( int id );
+std::map<int, wasm_fcontext*>& registry()
+{
+    static std::map<int, wasm_fcontext*> r;
+    return r;
+}
+wasm_fcontext* find_by_id( int id )
+{
+    auto it = registry().find( id );
+    return it == registry().end() ? nullptr : it->second;
+}
+} // namespace
+
+// Turnstile arm hook: the scheduler re-points g_current at the activation it
+// is about to resume (coroutine id, or 0 = root for wx activations). Needed
+// because after a FOREIGN wake (sleep/token inside a coroutine body) the
+// resumed slice re-enters through plain C — no libctx frame on the path —
+// and nothing else re-establishes g_current for its next suspension's
+// attribution.
+extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_make_current( int id )
+{
+    wasm_fcontext* c = id > 0 ? find_by_id( id ) : nullptr;
+    g_current = c ? c : &g_root;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_entry( int id, intptr_t vp )
+{
+    wasm_fcontext* c = find_by_id( id );
+
+    if( !c || c->dead || c->finished )
+    {
+        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked ); // ghost entry
+        return;
+    }
+
+    c->started = true;
+    wasm_fcontext* prev = g_current;
+    g_current = c;
+
+    c->fn( vp ); // callerStub; returns only via the finishing-yield path
+
+    g_current = prev;
+    c->finished = true;
+
+    if( c->region )
+    {
+        std::free( c->region );
+        c->region = nullptr;
+    }
+
+    js_libctx_drop( c->id );
+}
+
+fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
+        void (* fn)( intptr_t ) )
+{
+    (void) sp; // LIBCONTEXT_HAS_OWN_STACK: the backend owns the spill region
+
+    if( !emscripten_is_main_runtime_thread() )
+        return nullptr; // coroutines are a main-thread-only concept (doc 21)
+
+    js_libctx_init();
+
+    auto* c = new wasm_fcontext();
+    c->id = g_next_id++;
+    c->kind = ctx_kind::CORO;
+    c->fn = fn;
+    c->region_size = size > MIN_REGION_BYTES ? size : MIN_REGION_BYTES;
+    c->region = static_cast<char*>( std::malloc( c->region_size ) );
+    memcpy( c->region, &REGION_CANARY, sizeof( REGION_CANARY ) );
+
+    registry()[c->id] = c;
+    // The wasm C stack REQUIRES 16-byte alignment; wasm32 malloc guarantees
+    // only 8. A top at region+size can be 8 (mod 16), and a misaligned SP
+    // skews every alignment-derived address in the coroutine body (same bug
+    // as the wx shim's regions: EM_ASM arg buffers assert, musl iov
+    // arithmetic goes 8 off). Align DOWN; the lost <16 bytes are spare.
+    js_libctx_register( c->id,
+            reinterpret_cast<uintptr_t>( c->region + c->region_size ) & ~uintptr_t( 15 ) );
+
+    return c;
+}
+
+intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t nfc,
+        intptr_t vp, bool )
+{
+    auto* target = static_cast<wasm_fcontext*>( nfc );
+    wasm_fcontext* cur = g_current;
+
+    if( !target || target->dead || target->finished )
+    {
+        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked );
+        return -1; // refusal contract: no transition happened
+    }
+
+    *ofc = cur; // symmetric protocol: tell the target who to yield back to
+
+    // Direction inference. Entering a coroutine and yielding back to a
+    // coroutine PARENT both target a CORO record; what distinguishes the
+    // yield is that the target is the record that ENTERED the current one.
+    bool isYield = target->kind == ctx_kind::ADOPTED
+                   || ( cur && cur->kind == ctx_kind::CORO && cur->enterer == target );
+
+    if( !isYield )
+    {
+        // we are the caller: enter (start or resume) and wait for its yield
+        wasm_fcontext* prevEnterer = target->enterer;
+        target->enterer = cur;
+        intptr_t ret = target->started ? js_libctx_resume( target->id, (int) vp )
+                                       : js_libctx_start( target->id, (int) vp );
+        g_current = cur; // our activation is running again
+
+        if( ret == -1 )
+        {
+            // Refused (doc-15 foreign-park refusal, entry backstop, or
+            // quarantine): no transition happened. coroutine.h dereferences
+            // the return as INVOCATION_ARGS* unconditionally, so hand back
+            // the sentinel — to the caller a refusal is indistinguishable
+            // from "yielded, still asleep", which is doc-15's no-op
+            // semantics. (The EARLY dead/finished checks above still return
+            // -1 raw: that is the backend-level ghost contract the harness
+            // pins, and coroutine.h can't reach it through a live COROUTINE.)
+            target->enterer = prevEnterer;
+            return reinterpret_cast<intptr_t>( &g_sentinel_args );
+        }
+
+        return ret;
+    }
+
+    // the current coroutine yields to whoever entered it
+    if( !cur || cur->kind != ctx_kind::CORO )
+    {
+        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked );
+        return -1;
+    }
+
+    // Overflow tripwire: the canary at the region BASE dies first when the
+    // body's spill outgrows the region (stacks grow down).
+    if( cur->region && memcmp( cur->region, &REGION_CANARY, sizeof( REGION_CANARY ) ) != 0 )
+        EM_ASM( { console.error( '[libctx-jspi] REGION OVERFLOW: coroutine ' + $0
+                                 + ' spilled past its ' + $1 + '-byte region' ); },
+                cur->id, (int) cur->region_size );
+
+    if( cur->finishing )
+    {
+        js_libctx_finish( cur->id, (int) vp );
+        return reinterpret_cast<intptr_t>( &g_sentinel_args );
+    }
+
+    intptr_t ret = js_libctx_yield( cur->id, (int) vp );
+    g_current = cur;
+    return ret;
+}
+
+void LIBCONTEXT_CALL_CONVENTION finish_fcontext( fcontext_t ctx )
+{
+    auto* c = static_cast<wasm_fcontext*>( ctx );
+
+    if( c && c->kind == ctx_kind::CORO )
+        c->finishing = true;
+}
+
+void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
+{
+    auto* c = static_cast<wasm_fcontext*>( ctx );
+
+    if( !c || c->kind != ctx_kind::CORO || c == &g_root )
+        return; // adopted handles are scheduler-owned; releases are no-ops
+
+    c->released = true;
+
+    if( !c->started )
+    {
+        // never entered: reclaim everything now
+        if( c->region )
+        {
+            std::free( c->region );
+            c->region = nullptr;
+        }
+        js_libctx_drop( c->id );
+        return;
+    }
+
+    if( !c->finished )
+    {
+        // released while suspended mid-body: the quarantine contract — never
+        // resume it (running live destructors over a parked body is unsafe),
+        // keep the record as a tombstone, census the leaked activation.
+        c->dead = true;
+        js_libctx_quarantine( c->id );
+        js_libctx_beacon( g_ghost_jumps, ++g_dead_parked );
+    }
+    // finished: entry already freed the region and dropped the JS slots.
+}
+
+} // namespace libcontext
+
+#else // !PCBJAM_JSPI — the Asyncify/fiber backend
 #include <emscripten.h>
 
 #include <emscripten/fiber.h>
@@ -896,6 +1389,7 @@ void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
 
 } // namespace libcontext
 
+#endif // !PCBJAM_JSPI
 #endif // LIBCONTEXT_PLATFORM_wasm32
 
 #if defined(LIBCONTEXT_PLATFORM_windows_i386) && defined(LIBCONTEXT_COMPILER_gcc)

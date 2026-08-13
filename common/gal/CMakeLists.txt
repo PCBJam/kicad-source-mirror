@@ -97,7 +97,12 @@ if( EMSCRIPTEN )
     )
 endif()
 
-add_library( gal SHARED ${GAL_SRCS} )
+# WASM: STATIC for the same reason as kicommon (emcc 6 runtime-dynamic .so).
+if( EMSCRIPTEN )
+    add_library( gal STATIC ${GAL_SRCS} )
+else()
+    add_library( gal SHARED ${GAL_SRCS} )
+endif()
 
 if( KICAD_USE_PCH )
     target_precompile_headers( gal
