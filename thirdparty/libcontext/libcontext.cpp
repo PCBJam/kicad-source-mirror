@@ -20,13 +20,12 @@
 // WASM/Emscripten: implement libcontext using Emscripten fibers so KiCad's
 // existing coroutine machinery can switch stacks on the web build too.
 //
-// Phase A of pcbjam docs/features/async/22: this backend is a THIN ADAPTER
-// over the scheduler registry (wx/wasm/private/sched_context.h, header-only).
-// The registry owns every emscripten_fiber_t, its asyncify buffer, and the
-// answer to "is this target safe to enter?"; this file keeps libcontext's
-// protocol exactly as it was — symmetric swap, the INVOCATION_ARGS contract,
-// ghost-resume epochs, refcounting — and keeps its old guards as cross-check
-// tripwires that must agree with the registry (a disagreement beacons).
+// This backend adapts libcontext to the scheduler registry
+// (wx/wasm/private/sched_context.h, header-only). The registry owns each
+// emscripten_fiber_t and its Asyncify buffer. This file owns libcontext's
+// transfer protocol: saved handles, return values, suspension state, resume
+// epochs, and reference counts. Compatibility checks compare both views and
+// report a disagreement before a bad transfer can become silent corruption.
 #if defined(LIBCONTEXT_PLATFORM_wasm32)
 #include <emscripten.h>
 
@@ -35,6 +34,8 @@
 
 #include <cstring>
 #include <new>
+#include <unordered_map>
+#include <vector>
 
 namespace libcontext {
 
@@ -119,12 +120,15 @@ const char* invocation_type_name( int aType )
 
 struct wasm_fcontext
 {
-    // Phase A: the emscripten_fiber_t and its asyncify buffer moved into the
-    // scheduler registry (sched_id names them there); this struct keeps only
-    // libcontext's PROTOCOL state.
+    // The scheduler registry owns the emscripten_fiber_t and its Asyncify
+    // buffer (sched_id names them there). This struct keeps only libcontext's
+    // protocol state.
     pcbjam_sched::ContextId sched_id = 0;
     void (* entry )( intptr_t ) = nullptr;
-    wasm_fcontext* return_to = nullptr;
+    // Public fcontext_t values are opaque, non-reused handles on Wasm. Keep
+    // the fallback handoff as a handle too, so even an unexpected stale
+    // relationship cannot alias a newly allocated wasm_fcontext.
+    fcontext_t return_to = nullptr;
     intptr_t transfer_value = 0;
     bool initialized = false;
     bool running = false;
@@ -137,14 +141,16 @@ struct wasm_fcontext
     // → "unreachable executed" — the 2026-07 production board-load trap) and
     // poisons every later Asyncify entry ("index out of bounds").
     //
-    // Phase A keeps this AUTHORITATIVE (see jump_fcontext): the registry
-    // observes and beacons disagreements, but must not refuse what this
-    // permits. Ownership of the answer moves at Phase B; the flag dies at F.
+    // jump_fcontext uses this compatibility state as a second, conservative
+    // check. The scheduler registry is authoritative: if it refuses the target,
+    // this bit cannot authorize a physical swap.
     bool swap_suspended = false;
+    // A root proxy describes a scheduler-owned stack but never owns that
+    // stack.  Each live dispatch root receives a different immutable proxy;
+    // tool fibers keep their ordinary owning protocol objects.
+    bool root_proxy = false;
+    bool main_stack_root = false;
     bool releasable = true;
-    // On the deferred-release list (see zombie_contexts below): the last
-    // refcount dropped while the fiber was still logically alive.
-    bool zombie = false;
     int refcount = 0;
     uint32_t resume_epoch = 0;
     uint32_t id = 0;
@@ -154,18 +160,144 @@ struct wasm_fcontext
 wasm_fcontext* g_current_context = nullptr;
 wasm_fcontext g_main_context;
 bool g_main_initialized = false;
-// The MAIN STACK's fiber-lane identity, adopted lazily the first time a jump
-// happens while no scheduler context runs (see resolve_root_identity).
+// The MAIN STACK's fiber-lane identity, adopted only while a jump physically
+// originates there. Dispatch contexts use separate non-owning root proxies.
 pcbjam_sched::ContextId g_main_stack_sched_id = 0;
 [[maybe_unused]] int g_log_count = 0;
 uint32_t g_next_context_id = 1;
 uint32_t g_main_refresh_count = 0;
 
+// wx's dispatch pool has a hard live-depth limit of 16. Root protocol objects
+// must be bounded by that physical population, not by the number of browser
+// ticks. Dead physical roots are swept before a new proxy is allocated.
+constexpr size_t MAX_LIVE_DISPATCH_ROOT_PROXIES = 16;
+size_t g_root_proxy_peak = 0;
+uint32_t g_root_proxies_created = 0;
+uint32_t g_root_proxies_released = 0;
+uint32_t g_root_proxy_scheduler_release_attempts = 0;
+uint32_t g_root_proxy_unsafe_sweeps = 0;
 
-// Phase A tripwire: the legacy protocol fields (g_current_context,
-// swap_suspended) and the scheduler registry are maintained in lockstep; any
-// disagreement means the adapter has a hole. MUST stay silent (doc 22 §5A
-// gate); deleted with the legacy fields at Phase F.
+// This backend encodes its token directly in fcontext_t. It is deliberately a
+// wasm32 backend: fail at compile time instead of truncating a future wasm64
+// token and allowing two identities to alias.
+static_assert( sizeof( uintptr_t ) == sizeof( uint32_t ) );
+
+
+// A Wasm fcontext_t is an opaque, monotonically increasing token. It must not
+// be the address of wasm_fcontext: after a finished context is deleted, the
+// allocator may reuse that address and turn a stale KiCad handle into a
+// different live coroutine. Tokens are never reused, so a stale handle can
+// only fail lookup and take jump_fcontext's established ghost-return path.
+std::unordered_map<uint32_t, wasm_fcontext*>& context_registry()
+{
+    static std::unordered_map<uint32_t, wasm_fcontext*> s_registry;
+    return s_registry;
+}
+
+
+// Authoritative physical-stack identity. A scheduler ContextId is monotonic,
+// so this map cannot alias a later stack. It contains both tool fibers and
+// non-owning root proxies; one physical context has exactly one protocol
+// object at a time.
+std::unordered_map<pcbjam_sched::ContextId, wasm_fcontext*>&
+scheduler_context_registry()
+{
+    static std::unordered_map<pcbjam_sched::ContextId, wasm_fcontext*> s_registry;
+    return s_registry;
+}
+
+
+uint32_t handle_id( fcontext_t aHandle )
+{
+    return static_cast<uint32_t>( reinterpret_cast<uintptr_t>( aHandle ) );
+}
+
+
+fcontext_t context_handle( const wasm_fcontext* aCtx )
+{
+    return aCtx ? reinterpret_cast<fcontext_t>( static_cast<uintptr_t>( aCtx->id ) ) : nullptr;
+}
+
+
+wasm_fcontext* resolve_context( fcontext_t aHandle )
+{
+    const uint32_t id = handle_id( aHandle );
+
+    if( !id )
+        return nullptr;
+
+    const auto it = context_registry().find( id );
+    return it != context_registry().end() ? it->second : nullptr;
+}
+
+
+bool register_context( wasm_fcontext* aCtx )
+{
+    if( !aCtx || !g_next_context_id )
+        return false;       // token space is exhausted; never wrap and reuse
+
+    aCtx->id = g_next_context_id++;
+
+    try
+    {
+        return context_registry().emplace( aCtx->id, aCtx ).second;
+    }
+    catch( ... )
+    {
+        return false;
+    }
+}
+
+
+void unregister_context( wasm_fcontext* aCtx )
+{
+    if( aCtx )
+        context_registry().erase( aCtx->id );
+}
+
+
+bool bind_scheduler_context( wasm_fcontext* aCtx )
+{
+    if( !aCtx || !aCtx->sched_id )
+        return false;
+
+    try
+    {
+        const auto result =
+                scheduler_context_registry().emplace( aCtx->sched_id, aCtx );
+        return result.second || result.first->second == aCtx;
+    }
+    catch( ... )
+    {
+        return false;
+    }
+}
+
+
+void unbind_scheduler_context( wasm_fcontext* aCtx )
+{
+    if( !aCtx || !aCtx->sched_id )
+        return;
+
+    auto& registry = scheduler_context_registry();
+    const auto it = registry.find( aCtx->sched_id );
+
+    if( it != registry.end() && it->second == aCtx )
+        registry.erase( it );
+}
+
+
+wasm_fcontext* resolve_scheduler_context( pcbjam_sched::ContextId aId )
+{
+    const auto it = scheduler_context_registry().find( aId );
+    return it != scheduler_context_registry().end() ? it->second : nullptr;
+}
+
+
+// The libcontext protocol fields (g_current_context, swap_suspended) and the
+// scheduler registry must stay in lockstep. A disagreement means the adapter
+// attributed a transfer to the wrong physical context. This beacon must stay
+// silent.
 void divergence_beacon( const char* aKind, const wasm_fcontext* aOld,
                         const wasm_fcontext* aNew )
 {
@@ -183,21 +315,38 @@ void divergence_beacon( const char* aKind, const wasm_fcontext* aOld,
 }
 
 
+// A physical entry needs both views to agree. The registry is authoritative
+// for refusal because it also owns in-place-park attribution, ready claims,
+// exact wake leases, and terminal state. The protocol bit remains a stricter
+// compatibility guard while the duplicate state exists.
+bool target_enterable( const wasm_fcontext* aFrom, const wasm_fcontext* aTo )
+{
+    if( !aTo || !aTo->initialized || !aTo->sched_id || aTo->finished )
+        return false;
+
+    const bool registry_enterable = pcbjam_sched::fiber_enterable( aTo->sched_id );
+
+    if( registry_enterable != aTo->swap_suspended )
+        divergence_beacon( "enterable", aFrom, aTo );
+
+    return registry_enterable && aTo->swap_suspended;
+}
+
+
 // The ONE way a libcontext swap happens now: through the scheduler registry,
 // which records who is on the CPU and performs the emscripten_fiber_swap. A
 // refusal means the target was released while someone still held its
-// fcontext pointer — previously a silent use-after-free; now a loud beacon
+// fcontext handle — previously a silent use-after-free; now a loud beacon
 // and no swap, which the caller's ghost-resume contract contains (the caller
 // sees an unchanged epoch and returns null INVOCATION_ARGS).
-// Phase B: a swap is a STAR TRANSFER — park the source, make the target
+// A scheduler-owned swap is a star transfer: park the source, make the target
 // runnable, and let the scheduler perform the entry. The value handed back is
 // whatever the next transfer into us carries, which is exactly libcontext's
 // return-from-jump_fcontext contract.
 //
-// Falls back to Phase A's direct swap when the source is not the scheduler's
-// current context: that means nothing has moved onto contexts in this build
-// (the standalone coroutine harnesses), and a transfer would have nothing to
-// park.
+// Fall back to a direct registry swap when the source is not the scheduler's
+// current context. Standalone coroutine harnesses use this lane; a star
+// transfer there would have no running dispatch context to park.
 intptr_t sched_swap( wasm_fcontext* aFrom, wasm_fcontext* aTo, intptr_t aValue )
 {
     if( pcbjam_sched::current() == aFrom->sched_id && pcbjam_sched::can_yield_here() )
@@ -231,22 +380,24 @@ void log_wasm_fcontext( const char* aLabel, wasm_fcontext* aCtx, wasm_fcontext* 
     ++g_log_count;
 
     char value_description[160];
+    wasm_fcontext* return_to = aCtx ? resolve_context( aCtx->return_to ) : nullptr;
 
     // stdout (not stderr) so this shows as a [KICAD_OUT] log, not an error.
     std::printf( "[WASM_FCONTEXT] %s ctx=%p[#%u] other=%p[#%u] return_to=%p[#%u] slot=%p prev=%p[#%u] "
-                 "main_refresh=%u value=%s finished=%d running=%d epoch=%u\n",
+                 "main_refresh=%u value=%s refs=%d finished=%d running=%d epoch=%u\n",
                  aLabel,
                  static_cast<void*>( aCtx ),
                  context_id( aCtx ),
                  static_cast<void*>( aOther ),
                  context_id( aOther ),
-                 aCtx ? static_cast<void*>( aCtx->return_to ) : nullptr,
-                 aCtx ? context_id( aCtx->return_to ) : 0,
+                 aCtx ? aCtx->return_to : nullptr,
+                 context_id( return_to ),
                  static_cast<void*>( aSlot ),
                  static_cast<void*>( aPrevious ),
                  context_id( aPrevious ),
                  g_main_refresh_count,
                  describe_transfer_value( aValue, value_description, sizeof( value_description ) ),
+                 aCtx ? aCtx->refcount : 0,
                  aCtx ? aCtx->finished : 0,
                  aCtx ? aCtx->running : 0,
                  aCtx ? aCtx->resume_epoch : 0 );
@@ -262,80 +413,9 @@ void log_wasm_fcontext( const char* aLabel, wasm_fcontext* aCtx, wasm_fcontext* 
 }
 
 
-// -------------------------------------------------------------------------
-// Deferred release: a GRACE RING, not a lifetime fix.
-//
-// KiCad jumps into coroutines whose last refcount has already been dropped —
-// TOOL_MANAGER keeps raw `fcontext_t`s that outlive the COROUTINE that owned
-// them. The legacy backend "supported" this by reading freed memory: the
-// emscripten_fiber_t and its 512K buffer lived INSIDE the struct, so a stale
-// jump swapped into a freed-but-not-yet-reused allocation and usually worked.
-//
-// Absorbing the backend removes that luck — the fiber now lives in the
-// registry, and a freed struct means a garbage `sched_id`, so the swap is
-// refused and the tool wedges (measured 2026-08-06: "click never landed a
-// selection", "box-select never selected anything" — every canvas tool).
-//
-// WHY THE LUCK HELD FOR YEARS, exactly: the freed block was ~512K. malloc
-// parks an allocation that size in a large bin and only hands it back to a
-// request of similar size, so "freed" stayed readable essentially forever.
-// Absorbing the buffer into the registry left a ~64-byte struct behind —
-// tiny allocations are recycled on the next call, which is why the garbage
-// `sched_id` (0x16554B0, a freelist pointer) appears immediately now. The
-// change did not introduce the use-after-free; it removed the size accident
-// that hid it.
-//
-// Phase A must not be the phase that fixes this, and must not be the phase
-// that breaks it either. Two rules reproduce the old behaviour honestly:
-//
-//   1. The STRUCT is never freed. It is protocol state only now, so keeping
-//      every one costs tens of bytes — cheaper than the accident it replaces,
-//      and it makes a stale jump land on a real `sched_id` instead of a
-//      freelist pointer.
-//   2. The FIBER (512K buffer + registry entry) is what the ring bounds.
-//      Eviction prefers coroutines that actually FINISHED — the churn — and
-//      never takes one that is running or never completed, because those are
-//      precisely the ones TOOL_MANAGER still jumps into (measured: a ring
-//      that evicted by age alone dropped tool coroutine #1, and "m"-move and
-//      lock-resist both failed). An evicted context keeps its struct with
-//      `sched_id` zeroed, so a later jump takes the ghost contract that
-//      callers already handle, rather than a refusal or a wild swap.
-//
-// Phase B removes the need by giving coroutines scheduler-owned lifetimes.
-// Until then the eviction beacon is the measurement of how much KiCad leans
-// on this.
-// -------------------------------------------------------------------------
-// 32 × 512K ≈ 16 MB worst case, and only if that many released coroutines are
-// live at once; the steady state after a board load is a handful.
-constexpr size_t GRACE_RING_CAPACITY = 32;
-
-std::vector<wasm_fcontext*>& grace_ring()
-{
-    static std::vector<wasm_fcontext*> s_ring;
-    return s_ring;
-}
-
-
-void drop_from_grace_ring( wasm_fcontext* aCtx )
-{
-    auto& ring = grace_ring();
-
-    for( size_t i = 0; i < ring.size(); ++i )
-    {
-        if( ring[i] == aCtx )
-        {
-            ring.erase( ring.begin() + i );
-            break;
-        }
-    }
-
-    aCtx->zombie = false;
-}
-
-
-// A jump whose target has had its fiber reclaimed. Returns the same null
-// INVOCATION_ARGS the ghost path returns, which every caller already handles.
-void beacon_jump_into_reclaimed( const wasm_fcontext* aCtx )
+// A jump whose target token no longer names a live context. Returns the same
+// null INVOCATION_ARGS the ghost path returns, which callers must handle.
+void beacon_jump_into_reclaimed( fcontext_t aHandle )
 {
     static int s_hits = 0;
     ++s_hits;
@@ -343,18 +423,36 @@ void beacon_jump_into_reclaimed( const wasm_fcontext* aCtx )
     if( s_hits <= 10 || s_hits % 100 == 0 )
     {
         EM_ASM( { console.warn( "[collab-fcontext] jump-into-reclaimed: ctx=" + $0
-                                + " was evicted from the grace ring (occurrence "
+                                + " no longer names a live context (occurrence "
                                 + $1 + ")" ); },
-                (int) aCtx->id, s_hits );
+                (int) handle_id( aHandle ), s_hits );
     }
 }
 
 
-// Give up the fiber, keep the struct. `sched_id = 0` is the recorded "this
-// coroutine's stack is gone" state — a later jump reads it and takes the
-// ghost contract instead of chasing a freelist pointer.
+// Give up the scheduler-owned fiber. A non-current zero-reference context can
+// be reclaimed after completion or at a real suspension. A Running context or
+// one with an in-place handleSleep wake is different: JS still owns a rewind
+// into its caller-owned C stack. fiber_release() refuses that state, and this
+// adapter fail-stops before the COROUTINE destructor can free the stack.
 void reclaim_fiber( wasm_fcontext* aCtx, const char* aWhy )
 {
+    if( aCtx->root_proxy )
+    {
+        ++g_root_proxy_scheduler_release_attempts;
+        EM_ASM( { console.error( "[collab-fcontext] root proxy attempted to release a scheduler-owned stack: ctx=" + $0 ); },
+                (int) aCtx->id );
+        std::abort();
+    }
+
+    if( !pcbjam_sched::fiber_release( aCtx->sched_id ) )
+    {
+        EM_ASM( { console.error( "[collab-fcontext] fiber-release-refused: ctx=" + $0
+                                + " still has live execution state" ); },
+                (int) aCtx->id );
+        std::abort();
+    }
+
     static int s_reclaimed = 0;
     ++s_reclaimed;
 
@@ -365,62 +463,9 @@ void reclaim_fiber( wasm_fcontext* aCtx, const char* aWhy )
                 (int) aCtx->id, s_reclaimed, aWhy );
     }
 
-    pcbjam_sched::fiber_release( aCtx->sched_id );
+    unbind_scheduler_context( aCtx );
     aCtx->sched_id = 0;
     aCtx->swap_suspended = false;   // no stack to enter any more
-}
-
-
-// Is this released context safe to take the fiber from? Only a coroutine that
-// ran to completion is: TOOL_MANAGER re-enters long-lived, never-finished tool
-// coroutines long after their refcount hits zero, and those must keep their
-// stacks.
-bool evictable( const wasm_fcontext* aCtx )
-{
-    return aCtx->finished
-           && aCtx != g_current_context
-           && pcbjam_sched::status_of( aCtx->sched_id ) != pcbjam_sched::Status::Running;
-}
-
-
-void trim_grace_ring()
-{
-    auto& ring = grace_ring();
-
-    while( ring.size() > GRACE_RING_CAPACITY )
-    {
-        size_t victim = ring.size();
-
-        for( size_t i = 0; i < ring.size(); ++i )
-        {
-            if( evictable( ring[i] ) )
-            {
-                victim = i;
-                break;   // oldest evictable
-            }
-        }
-
-        if( victim == ring.size() )
-        {
-            // Everything here is still jumpable-into. Growing is the correct
-            // answer — dropping one of these is what broke the move tools.
-            static bool s_warned = false;
-
-            if( !s_warned )
-            {
-                s_warned = true;
-                EM_ASM( { console.warn( "[collab-fcontext] grace-ring-over-capacity: " + $0
-                                        + " released coroutines, none evictable" ); },
-                        (int) ring.size() );
-            }
-
-            return;
-        }
-
-        wasm_fcontext* ctx = ring[victim];
-        ring.erase( ring.begin() + victim );
-        reclaim_fiber( ctx, "grace-ring-evict" );
-    }
 }
 
 
@@ -429,12 +474,44 @@ void retain_context( wasm_fcontext* aCtx )
     if( !aCtx || !aCtx->releasable )
         return;
 
-    // A slot re-captured a released context: it is owned again, so it leaves
-    // the ring rather than waiting to be evicted out from under its holder.
-    if( aCtx->zombie )
-        drop_from_grace_ring( aCtx );
-
     ++aCtx->refcount;
+    log_wasm_fcontext( "retain", aCtx, g_current_context, aCtx->refcount );
+}
+
+
+void release_context( wasm_fcontext* aCtx );
+
+
+// Remove the opaque token before freeing the protocol object, so every stale
+// copy deterministically fails lookup even if malloc reuses the address. The
+// first-entry fallback target is an owning edge: keep it alive until this
+// context can no longer need its terminal handoff.
+void retire_context( wasm_fcontext* aCtx, const char* aWhy )
+{
+    if( !aCtx || aCtx == &g_main_context )
+        return;
+
+    wasm_fcontext* return_to = resolve_context( aCtx->return_to );
+    aCtx->return_to = nullptr;
+
+    if( aCtx->root_proxy && pcbjam_sched::find( aCtx->sched_id ) )
+    {
+        ++g_root_proxy_unsafe_sweeps;
+        EM_ASM( { console.error( "[collab-fcontext] root proxy sweep while physical scheduler context is live: ctx=" + $0 ); },
+                (int) aCtx->id );
+        std::abort();
+    }
+
+    if( aCtx->sched_id && !aCtx->root_proxy )
+        reclaim_fiber( aCtx, aWhy );
+
+    unbind_scheduler_context( aCtx );
+
+    unregister_context( aCtx );
+    if( aCtx->root_proxy )
+        ++g_root_proxies_released;
+    delete aCtx;
+    release_context( return_to );
 }
 
 
@@ -447,37 +524,52 @@ void release_context( wasm_fcontext* aCtx )
         return;
 
     --aCtx->refcount;
+    log_wasm_fcontext( "release", aCtx, g_current_context, aCtx->refcount );
 
-    if( aCtx->refcount == 0 && !aCtx->zombie )
+    // A root proxy may participate in saved-slot/return ownership so a live
+    // tool fiber can outlast the scheduler root's active turn. Reaching zero
+    // only makes it sweepable; it never releases or deletes the scheduler-
+    // owned stack. sweep_dead_root_proxies performs deletion after BOTH the
+    // last protocol edge and the physical ContextId disappear.
+    if( aCtx->root_proxy )
+        return;
+
+    if( aCtx->refcount == 0 )
     {
-        // Phase F (doc 22 §10, 2026-08-09): a coroutine that RAN TO
-        // COMPLETION can never be validly re-entered — the flip's terminal
-        // finish refuses transfers into it, and a raw jump at sched_id == 0
-        // takes the recorded ghost contract. Reclaim its fiber (the retained
-        // 512K asyncify buffer + registry entry) NOW instead of parking it in
-        // the grace ring until overflow. The ring keeps only its real
-        // clients: released-but-never-finished coroutines, which
-        // TOOL_MANAGER re-enters long after their refcount hits zero.
-        if( evictable( aCtx ) )
+        // Releasing the physical stack that is executing this function would
+        // be an immediate use-after-free. It is an ownership invariant breach,
+        // not a state that can be deferred or recovered locally.
+        if( aCtx == g_current_context )
         {
-            reclaim_fiber( aCtx, "release-reclaimed" );
-            return;
+            EM_ASM( { console.error( "[collab-fcontext] zero-ref-current: ctx=" + $0 ); },
+                    (int) aCtx->id );
+            std::abort();
         }
 
-        static int s_released = 0;
-        ++s_released;
-
-        if( s_released <= 5 || s_released % 500 == 0 )
-        {
-            EM_ASM( { console.warn( "[collab-fcontext] release-deferred: ctx=" + $0
-                                    + " enters the grace ring (occurrence " + $1 + ")" ); },
-                    (int) aCtx->id, s_released );
-        }
-
-        aCtx->zombie = true;
-        grace_ring().push_back( aCtx );
-        trim_grace_ring();
+        retire_context( aCtx, aCtx->finished ? "release-finished" : "release-cancelled" );
     }
+}
+
+
+void assign_return_context( wasm_fcontext* aCtx, wasm_fcontext* aReturnTo )
+{
+    if( !aCtx || !aReturnTo )
+        return;
+
+    // wasm_fcontext_entry uses this target if a raw libcontext entry returns.
+    // It is therefore real ownership, independent of any public saved slot.
+    // A fresh context has no target yet. A suspended context may legitimately
+    // be entered by a different caller later, so replace that edge atomically;
+    // keeping the first root would send terminal completion to the wrong
+    // dispatch stack.
+    wasm_fcontext* previous = resolve_context( aCtx->return_to );
+
+    if( previous == aReturnTo )
+        return;
+
+    retain_context( aReturnTo );
+    aCtx->return_to = context_handle( aReturnTo );
+    release_context( previous );
 }
 
 
@@ -486,139 +578,225 @@ void assign_saved_context( fcontext_t* aSlot, wasm_fcontext* aCtx )
     if( !aSlot )
         return;
 
-    auto* previous = static_cast<wasm_fcontext*>( *aSlot );
+    auto* previous = resolve_context( *aSlot );
     log_wasm_fcontext( "save-slot", aCtx, g_current_context, 0, aSlot, previous );
 
     if( previous == aCtx )
     {
-        *aSlot = aCtx;
+        *aSlot = context_handle( aCtx );
         return;
     }
 
     release_context( previous );
-    *aSlot = aCtx;
+    *aSlot = context_handle( aCtx );
     retain_context( aCtx );
 }
 
 
-// The scheduler identity of "the root" for a jump happening RIGHT NOW.
-//
-// MEASURED PLAN CORRECTION (2026-08-07, nested case 3 + races pump-error).
-// Doc 22 first said "the root adopts the RUNNING context, never the main
-// stack" — binding it ONCE, at first jump. That is wrong while any entry
-// still runs on the main stack (mailbox timers, DOM handlers — everything
-// until Phase E completes): a timer jumping a fiber from the MAIN stack then
-// used the DISPATCH context's fiber struct as its from-side while that
-// context sat PARKED in a modal — overwriting the parked capture and marking
-// it Running, so the modal's later resolve hit "mark_ready() on a running
-// context" and the wake was lost.
-//
-// The root's identity is a PER-JUMP question: the running scheduler context
-// if there is one, else a lazily-adopted main-stack fiber (adopted while
-// provably standing on it — current()==0 means exactly that). The stamp is
-// consumed synchronously: a coroutine entered by this jump yields back
-// before any other stack can jump out of the root, so re-stamping per jump
-// is race-free on a single thread.
-pcbjam_sched::ContextId resolve_root_identity()
+void initialize_main_stack_root()
 {
-    const pcbjam_sched::ContextId cur = pcbjam_sched::current();
-
-    if( cur )
-        return cur;
-
-    if( !g_main_stack_sched_id )
-        g_main_stack_sched_id =
-                pcbjam_sched::fiber_adopt_current( ASYNCIFY_STACK_SIZE, "libctx-main" );
-
-    return g_main_stack_sched_id;
-}
-
-
-void ensure_main_context()
-{
-    if( !g_main_initialized )
-    {
-        g_main_context.initialized = true;
-        g_main_context.releasable = false;
-        g_main_context.id = g_next_context_id++;
-
-        g_main_context.sched_id = resolve_root_identity();
-        ++g_main_refresh_count;
-        g_main_initialized = true;
-        g_main_context.running = true;
-        g_main_context.swap_suspended = false;
-        g_current_context = &g_main_context;
-        log_wasm_fcontext( "main-refresh", &g_main_context, &g_main_context, 0 );
+    if( g_main_initialized )
         return;
+
+    g_main_context.initialized = true;
+    g_main_context.releasable = false;
+    g_main_context.root_proxy = true;
+    g_main_context.main_stack_root = true;
+
+    if( !register_context( &g_main_context ) )
+    {
+        EM_ASM( { console.error( "[collab-fcontext] main-context handle allocation failed" ); } );
+        std::abort();
     }
 
-    if( !g_current_context )
-        g_current_context = &g_main_context;
-
-    g_main_context.running = true;
+    ++g_root_proxies_created;
+    g_main_initialized = true;
 }
 
 
-// QEMU-style trampoline: the entry function NEVER returns.
-// Per Emscripten fiber.h: "If entry_func returns, the entire program will end."
-// The while(true) loop ensures we stay inside the fiber's stack frame forever.
-// After the coroutine body finishes, we swap back to the caller using the
-// coroutine's own heap-allocated fiber (not a stack-local temporary).
+size_t live_dispatch_root_proxies()
+{
+    size_t live = 0;
+
+    for( const auto& entry : scheduler_context_registry() )
+    {
+        const wasm_fcontext* context = entry.second;
+        if( context && context->root_proxy && !context->main_stack_root )
+            ++live;
+    }
+
+    return live;
+}
+
+
+bool root_proxy_capacity_accepts( size_t aLive )
+{
+    return aLive < MAX_LIVE_DISPATCH_ROOT_PROXIES;
+}
+
+
+// A dispatch root proxy owns only protocol identity. Sweep it after wx has
+// released the scheduler context. Opaque libcontext handles remain monotonic,
+// and a proxy with any saved/return edge stays alive until those edges retire.
+void sweep_dead_root_proxies()
+{
+    std::vector<wasm_fcontext*> dead;
+
+    for( const auto& entry : scheduler_context_registry() )
+    {
+        wasm_fcontext* context = entry.second;
+
+        if( context && context->root_proxy && !context->main_stack_root
+            && !pcbjam_sched::find( context->sched_id )
+            && context->refcount == 0 && context != g_current_context )
+        {
+            dead.push_back( context );
+        }
+    }
+
+    for( wasm_fcontext* context : dead )
+        retire_context( context, "release-root-proxy" );
+}
+
+
+wasm_fcontext* make_dispatch_root_proxy( pcbjam_sched::ContextId aId )
+{
+    sweep_dead_root_proxies();
+
+    if( !root_proxy_capacity_accepts( live_dispatch_root_proxies() ) )
+    {
+        EM_ASM( { console.error( "[collab-fcontext] root-proxy-capacity: physical root="
+                                + $0 ); }, (int) aId );
+        std::abort();
+    }
+
+    auto* context = new( std::nothrow ) wasm_fcontext();
+
+    if( !context )
+    {
+        EM_ASM( { console.error( "[collab-fcontext] root proxy allocation failed" ); } );
+        std::abort();
+    }
+
+    context->sched_id = aId;
+    context->initialized = true;
+    context->root_proxy = true;
+    // Saved handles name this object and retain it, but reaching zero only
+    // makes it sweepable. release_context never retires a root proxy; physical
+    // retirement plus zero protocol edges are both required below.
+    context->releasable = true;
+    context->refcount = 0;
+    context->running = true;
+
+    if( !register_context( context ) || !bind_scheduler_context( context ) )
+    {
+        unbind_scheduler_context( context );
+        unregister_context( context );
+        delete context;
+        EM_ASM( { console.error( "[collab-fcontext] root proxy publication failed" ); } );
+        std::abort();
+    }
+
+    ++g_root_proxies_created;
+    const size_t live = live_dispatch_root_proxies();
+    if( live > g_root_proxy_peak )
+        g_root_proxy_peak = live;
+    return context;
+}
+
+
+// Resolve the protocol context from the physical stack on every boundary.
+// This is authoritative even if the compatibility singleton still names a
+// fiber which another dispatch root parked in a modal. ContextId is monotonic,
+// and context_owning_current_stack() proves the caller is inside its exact
+// registered C-stack allocation.
+wasm_fcontext* resolve_current_physical_context()
+{
+    initialize_main_stack_root();
+
+    pcbjam_sched::ContextId physical =
+            pcbjam_sched::context_owning_current_stack();
+
+    if( physical )
+    {
+        if( wasm_fcontext* context = resolve_scheduler_context( physical ) )
+        {
+            context->running = true;
+            return context;
+        }
+
+        // A scheduler context without a protocol object is a new dispatch
+        // root. Tool fibers bind themselves at make_fcontext time.
+        return make_dispatch_root_proxy( physical );
+    }
+
+    // No registered C-stack owns this frame. It is safe to adopt the browser
+    // main stack only when the scheduler also says no context is executing.
+    if( pcbjam_sched::current() == 0 )
+    {
+        if( !g_main_stack_sched_id )
+        {
+            g_main_stack_sched_id = pcbjam_sched::fiber_adopt_current(
+                    ASYNCIFY_STACK_SIZE, "libctx-main" );
+
+            if( !g_main_stack_sched_id )
+                return nullptr;
+
+            g_main_context.sched_id = g_main_stack_sched_id;
+            if( !bind_scheduler_context( &g_main_context ) )
+                return nullptr;
+        }
+
+        g_main_context.running = true;
+        return &g_main_context;
+    }
+
+    return nullptr;
+}
+
+
+// QEMU-style trampoline: this raw Emscripten entry NEVER returns. A libcontext
+// entry may return, so its terminal handoff must happen here before the raw
+// fiber entry could fall through. KiCad uses finish_fcontext() to preserve its
+// final INVOCATION_ARGS value; this fallback also keeps other clients safe.
 [[noreturn]] void wasm_fcontext_entry( void* aArg )
 {
     auto* ctx = static_cast<wasm_fcontext*>( aArg );
+    auto* return_to = resolve_context( ctx->return_to );
 
-    while( true )
+    log_wasm_fcontext( "entry-call", ctx, return_to, ctx->transfer_value );
+    ctx->entry( ctx->transfer_value );
+
+    ctx->finished = true;
+    ctx->running = false;
+    return_to = resolve_context( ctx->return_to );
+    log_wasm_fcontext( "entry-returned", ctx, return_to, 0 );
+
+    if( !target_enterable( ctx, return_to ) )
     {
-        log_wasm_fcontext( "entry-call", ctx, ctx->return_to, ctx->transfer_value );
-        ctx->entry( ctx->transfer_value );
-
-        ctx->finished = true;
-        ctx->running = false;
-        log_wasm_fcontext( "entry-returned", ctx, ctx->return_to, 0 );
-
-        if( !ctx->return_to )
-        {
-            log_wasm_fcontext( "entry-orphaned", ctx, nullptr, 0 );
-            EM_ASM( { console.log( "[collab-fcontext] entry-orphaned ctx=" + $0 ); }, (int) ctx->id );
-            std::abort();
-        }
-
-        // Swap back to whoever started us, through the scheduler.
-        wasm_fcontext* return_to = ctx->return_to;
-        return_to->transfer_value = 0;
-        g_current_context = return_to;
-        return_to->running = true;
-        // Mirror of jump_fcontext's bookkeeping (see wasm_fcontext).
-        ctx->swap_suspended = true;
-        return_to->swap_suspended = false;
-
-        log_wasm_fcontext( "trampoline-swap", ctx, return_to, 0 );
-
-        // Phase B, transfer lane: a finished coroutine's hand-back is
-        // TERMINAL. The legacy while(true) ghost re-entry loop, expressed as
-        // transfers, marked the counterpart Ready on every bounce and
-        // livelocked two finished coroutines across ticks (measured
-        // 2026-08-07, D-on probe). fiber_finish_transfer marks this context
-        // Finished — never re-queued; a later transfer into it is refused
-        // into the caller's ghost contract — and never returns.
-        if( pcbjam_sched::current() == ctx->sched_id && pcbjam_sched::can_yield_here() )
-        {
-            ctx->swap_suspended = false;   // terminal: no valid re-entry capture
-            pcbjam_sched::fiber_finish_transfer( ctx->sched_id, return_to->sched_id, 0 );
-            // Not reached: the registry parks this fiber forever.
-        }
-
-        // Direct-swap fallback (nothing on contexts in this build): legacy
-        // semantics unchanged, including ghost re-entry below.
-        ctx->transfer_value = sched_swap( ctx, return_to, 0 );
-
-        // If someone swaps back to us, the while(true) loops.
-        // Reset state so re-entry is safe (though unlikely in normal operation).
-        log_wasm_fcontext( "trampoline-reenter", ctx, ctx->return_to, ctx->transfer_value );
-        ctx->finished = false;
-        ctx->running = true;
+        log_wasm_fcontext( "entry-orphaned", ctx, nullptr, 0 );
+        EM_ASM( { console.error( "[collab-fcontext] terminal target is not enterable: ctx="
+                                + $0 + " return=" + $1 ); },
+                (int) ctx->id, return_to ? (int) return_to->id : 0 );
+        std::abort();
     }
+
+    // Swap back to whoever started us. Incrementing the target epoch is the
+    // proof, observed by its suspended jump_fcontext(), that this is a real
+    // resume and not a ghost return from a refused swap.
+    ++return_to->resume_epoch;
+    return_to->transfer_value = 0;
+    g_current_context = return_to;
+    return_to->running = true;
+    ctx->swap_suspended = false;
+    return_to->swap_suspended = false;
+
+    log_wasm_fcontext( "trampoline-finish", ctx, return_to, 0 );
+
+    if( pcbjam_sched::current() == ctx->sched_id && pcbjam_sched::can_yield_here() )
+        pcbjam_sched::fiber_finish_transfer( ctx->sched_id, return_to->sched_id, 0 );
+
+    pcbjam_sched::fiber_finish_swap( ctx->sched_id, return_to->sched_id, 0 );
 }
 
 } // namespace
@@ -627,10 +805,6 @@ void ensure_main_context()
 fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
         void (* fn)( intptr_t ) )
 {
-    // A new coroutine is the natural moment to reclaim: whatever the ring
-    // still holds has survived at least one full tool cycle.
-    trim_grace_ring();
-
     auto* ctx = new( std::nothrow ) wasm_fcontext();
 
     if( !ctx )
@@ -639,11 +813,16 @@ fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
     ctx->entry = fn;
     ctx->initialized = true;
     ctx->refcount = 1;
-    ctx->id = g_next_context_id++;
     // A fresh fiber is safely enterable: its first swap-in takes the
     // entry-point path (no rewind of saved data is involved). The registry
     // records the same fact as Status::Fresh.
     ctx->swap_suspended = true;
+
+    if( !register_context( ctx ) )
+    {
+        delete ctx;
+        return nullptr;
+    }
 
     void* stack_bottom = static_cast<char*>( sp ) - size;
 
@@ -653,11 +832,20 @@ fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
 
     if( !ctx->sched_id )
     {
+        unregister_context( ctx );
         delete ctx;
         return nullptr;
     }
 
-    return ctx;
+    if( !bind_scheduler_context( ctx ) )
+    {
+        pcbjam_sched::fiber_release( ctx->sched_id );
+        unregister_context( ctx );
+        delete ctx;
+        return nullptr;
+    }
+
+    return context_handle( ctx );
 }
 
 
@@ -666,87 +854,83 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
 {
     (void) preserve_fpu;
 
-    ensure_main_context();
-
-    auto* old_ctx = g_current_context;
-    auto* new_ctx = static_cast<wasm_fcontext*>( nfc );
+    auto* old_ctx = resolve_current_physical_context();
+    auto* new_ctx = resolve_context( nfc );
 
     if( !old_ctx || !new_ctx || !new_ctx->initialized )
-        return 0;
-
-    // A jump OUT of the root re-resolves which stack the root IS right now
-    // (the running scheduler context, or the lazily-adopted main stack — see
-    // resolve_root_identity). The stamp is read again by the coroutine's
-    // yield-back, which happens synchronously before any other stack can
-    // jump out of the root.
-    if( old_ctx == &g_main_context )
-        old_ctx->sched_id = resolve_root_identity();
-
-    if( !new_ctx->sched_id )
     {
-        // Its fiber was reclaimed from the grace ring: there is no stack to
-        // enter. Drop the dispatch through the established ghost contract.
-        beacon_jump_into_reclaimed( new_ctx );
+        if( nfc && !new_ctx )
+            beacon_jump_into_reclaimed( nfc );
+
         return 0;
     }
 
-    // Phase A moves the BOOKKEEPING, not the decision. `swap_suspended` stays
-    // authoritative here and the registry only observes, because Phase A has
-    // no authority to refuse a dispatch the legacy backend permitted: keying
-    // the refusal on `fiber_enterable()` regressed exactly that way (measured
-    // 2026-08-06, quasimodal-strand — Symbol Properties never opened, because
-    // a fiber the registry still called Running was refused while
-    // `swap_suspended` said it was validly suspended). The decision moves at
-    // Phase B, when the star owns coroutine lifetimes and the registry's view
-    // is the only view there is.
-    //
-    // Until then every disagreement is a recorded fact, not a behaviour
-    // change: these beacons are the evidence Phase B's flip gets designed on.
-    // Who does the registry think is on the CPU? Under the star (Phase B) the
-    // authority is current() — the scheduler enters every context, and the
-    // symmetric lane's fiber_current() is only meaningful while a direct swap
-    // chain owns the CPU. Comparing against the lane alone made this beacon
-    // fire on every transfer jump (28 firings in one battery, all benign),
-    // which is exactly how a tripwire stops being evidence.
-    const pcbjam_sched::ContextId on_cpu = pcbjam_sched::current()
-                                                   ? pcbjam_sched::current()
-                                                   : pcbjam_sched::fiber_current();
+    if( !new_ctx->sched_id )
+    {
+        // A registered context without a physical fiber is already invalid.
+        // Refuse it through the same stale-token contract.
+        beacon_jump_into_reclaimed( nfc );
+        return 0;
+    }
+
+    // The address of this frame is the authoritative witness for a registered
+    // context.  The logical scheduler globals can lag across an in-place
+    // Asyncify wake: current() can still name the underlying star context and
+    // fiber_current() can still name the pre-wake direct-lane occupant while
+    // the resumed code is already running on another registered C stack.
+    // Rejecting a valid yield from that stack makes the coroutine fall through
+    // its suspension point.  Use the exact stack range first and retain the
+    // logical identities only for the main/unregistered-stack case.
+    pcbjam_sched::ContextId on_cpu =
+            pcbjam_sched::context_owning_current_stack();
+    const bool range_owner_is_parked =
+            on_cpu && pcbjam_sched::context_has_inplace_park( on_cpu );
+
+    // An in-place park has unwound the physical stack to JavaScript, but a
+    // later browser entry can still place new frames inside the same broad
+    // linear-memory range. Range membership is therefore not provenance while
+    // that context's exact wake is live. Do not fall back to the deliberately
+    // stale logical globals either: the mismatch below must refuse the new
+    // swap before it launders the browser caller into the parked fiber.
+    if( range_owner_is_parked )
+        on_cpu = 0;
+
+    if( !on_cpu && !range_owner_is_parked )
+    {
+        // current() is authoritative while the scheduler star owns the CPU.
+        // fiber_current() is meaningful only for a direct symmetric swap
+        // chain which has no registered C-stack witness here.
+        on_cpu = pcbjam_sched::current() ? pcbjam_sched::current()
+                                         : pcbjam_sched::fiber_current();
+    }
 
     // "The registry says nobody is running" and "we are the root, on the main
     // stack" are the SAME fact, not a disagreement: entries that still arrive
-    // on the main stack (mailbox timers, DOM handlers, everything until Phase
-    // E) run there with no context on the CPU.
-    const bool root_on_main_stack = old_ctx == &g_main_context && on_cpu == 0
+    // on the main stack (for example mailbox timers and DOM handlers) run
+    // there with no context on the CPU.
+    const bool root_on_main_stack = old_ctx->main_stack_root && on_cpu == 0
                                     && old_ctx->sched_id == g_main_stack_sched_id;
 
     if( !root_on_main_stack && old_ctx->sched_id != on_cpu )
+    {
         divergence_beacon( "current", old_ctx, new_ctx );
 
-    if( pcbjam_sched::fiber_enterable( new_ctx->sched_id ) != new_ctx->swap_suspended )
-        divergence_beacon( "enterable", old_ctx, new_ctx );
+        // g_current_context can be stale while that context is suspended by
+        // an in-place handleSleep.  Treating it as the source of a new swap
+        // would save the stack which is actually on the CPU into the parked
+        // context's fiber record.  That attribution laundering destroys the
+        // parked context's exact wake capture.  Refuse before changing either
+        // protocol record; the caller receives the established null/ghost
+        // result and the real parked wake remains authoritative.
+        return 0;
+    }
 
-    // Phase F F2/F3 finding (doc 22 §10, 2026-08-09): a registry-informed
-    // REFUSAL here (swap_suspended true but fiber_enterable false — the
-    // laundered in-place-park case) was built, measured, and REMOVED. The
-    // ghost contract is the wrong recovery for a misrouted YIELD-BACK: the
-    // yielding coroutine ghost-resumes and runs on, where the JS quarantine's
-    // drop leaves it suspended. Until attribution is registry-authoritative
-    // (the gap-3 redesign), the quarantine owns this case; the registry keeps
-    // the in-place-park fact as observability (divergence beacons above) and
-    // as a hard refusal on the transfer lane, where attribution cannot rot.
-
-    if( !new_ctx->swap_suspended )
+    if( !target_enterable( old_ctx, new_ctx ) )
     {
-        // The target is mid-execution: its body is asyncify-parked inside
-        // handleSleep somewhere below a JS turn (TOOL_MANAGER cannot tell —
-        // natively a coroutine cannot be suspended without yielding). Its
-        // saved fiber suspension is STALE; swapping in would rewind it
-        // regardless (finishContextSwitch → doRewind → "unreachable
-        // executed", the production board-load trap) and poison all later
-        // Asyncify entries. REFUSE instead — the same null-INVOCATION_ARGS
-        // contract the jump-ghost path below already established. The parked
-        // body completes via its own wake and suspends properly; only this
-        // one dispatch is dropped.
+        // Return before saving the caller or changing either protocol record.
+        // This is libcontext's established ghost contract: null
+        // INVOCATION_ARGS, no swap, and the target's legitimate wake or later
+        // suspension remains intact.
         log_wasm_fcontext( "jump-refused-parked", new_ctx, old_ctx, vp );
 
         static int s_refused = 0;
@@ -755,67 +939,19 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
         if( s_refused <= 10 || s_refused % 100 == 0 )
         {
             EM_ASM( { console.warn( "[collab-fcontext] jump-refused: ctx=" + $0
-                                    + " is asyncify-parked, not suspended (occurrence "
-                                    + $1 + ")" ); },
-                    (int) new_ctx->id, s_refused );
+                                    + " has no enterable registry capture (occurrence "
+                                    + $1 + ")" ); }, (int) new_ctx->id, s_refused );
         }
 
         return 0;
     }
 
-    // REFUSAL RETRACTED 2026-08-03 (round 6): refusing this swap DOES prevent
-    // the unrewindable write (the "unreachable executed" cascade disappears),
-    // but the dropped dispatch strands the tool coroutine and the load dies
-    // anyway — the frame tears down, ~wxTopLevelWindowWasm fires the host quit
-    // notification, and the teardown itself traps "index out of bounds". Same
-    // dead board, different obituary. Kept as a BEACON so field logs still name
-    // the exact fatal interleave; the cure has to stop the situation from
-    // arising (fiber-first runtime / requeueing the dispatch to a fresh JS
-    // entry), not veto it after the fact.
-    if( false && old_ctx == &g_main_context && new_ctx != &g_main_context
-            && wasm_root_wake_in_flight() )
-    {
-        // Swapping OUT of main into a fiber inside main's own live wake window
-        // would write an unrewindable MAIN suspension (see
-        // wasm_root_wake_in_flight above) — the 2026-07/08 production
-        // board-load killer, reproduced locally 2026-08-03 (warm load of a
-        // 110MB+ project stretches one wake slice long enough for an event
-        // dispatch to land inside it). REFUSE with the same
-        // null-INVOCATION_ARGS ghost contract as the parked guard above: this
-        // one dispatch is dropped, the target stays validly suspended, and the
-        // next fresh-entry tick redelivers.
-        //
-        // Jumps INTO main are always allowed — they consume main's EXISTING
-        // suspension (a fiber's yield-back, possibly with g_current_context
-        // laundered to null→main); refusing one mid-yield strands the fiber's
-        // completion and took the whole frame down (guard round 1, 2026-08-03:
-        // the refused into-main jump cascaded into a real top-window close).
-        log_wasm_fcontext( "jump-refused-hot-main", new_ctx, old_ctx, vp );
-
-        static int s_hot_refused = 0;
-        ++s_hot_refused;
-
-        if( s_hot_refused <= 10 || s_hot_refused % 100 == 0 )
-        {
-            // The stack names the JS entry that drove this dispatch (timer,
-            // RAF, message) plus the wasm frame chain — the only way to
-            // identify the refused dispatch's owner in a release build.
-            EM_ASM( { console.warn( "[collab-fcontext] jump-refused-hot-main: old=" + $0
-                                    + " new=" + $1
-                                    + " dispatch inside main's live wake window (occurrence "
-                                    + $2 + ")\n" + new Error( "refusal-site" ).stack ); },
-                    (int) old_ctx->id, (int) new_ctx->id, s_hot_refused );
-        }
-
-        return 0;
-    }
-
-    // THE fatal interleave, observed not vetoed: main swapping OUT into a fiber
-    // inside its own live sleep-wake continuation. emscripten_fiber_swap stamps
-    // exportCallStack[0] (the wake's re-invoked __main_argc_argv) as the rewind
-    // entry of a capture that only spans the swap-site frames — an unrewindable
-    // pairing. Exactly one of these precedes every reproduced board-load death.
-    if( old_ctx == &g_main_context && new_ctx != &g_main_context
+    // The native-entry arbiter should make this state unreachable. If that
+    // invariant is ever broken, the proposed swap would write a capture which
+    // cannot be rewound. Stop before mutating either protocol record or fiber:
+    // a terminal native trap is recoverable by replacing the module, while a
+    // knowingly corrupt suspension is not.
+    if( old_ctx->root_proxy && new_ctx != old_ctx
             && wasm_root_wake_in_flight() )
     {
         static int s_hot_out = 0;
@@ -823,17 +959,20 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
 
         if( s_hot_out <= 10 || s_hot_out % 100 == 0 )
         {
-            EM_ASM( { console.warn( "[collab-fcontext] hot-main-swap-out: old=" + $0
+            EM_ASM( { console.error( "[collab-fcontext] hot-main-swap-refused: old=" + $0
                                     + " new=" + $1
-                                    + " — unrewindable main suspension written (occurrence "
+                                    + " — unrewindable main suspension refused (occurrence "
                                     + $2 + ")" ); },
                     (int) old_ctx->id, (int) new_ctx->id, s_hot_out );
         }
+
+        std::abort();
     }
 
-    // A hot jump INTO main is either a fiber's legit yield-back or the return
-    // half of the pair above; beaconed for field correlation.
-    if( new_ctx == &g_main_context && wasm_root_wake_in_flight() )
+    // A hot jump into the physical root is either a fiber's legitimate
+    // yield-back or the return half of the pair above; beaconed for field
+    // correlation.
+    if( new_ctx->root_proxy && wasm_root_wake_in_flight() )
     {
         static int s_hot_into_main = 0;
         ++s_hot_into_main;
@@ -847,11 +986,13 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     }
 
     log_wasm_fcontext( "jump-enter", new_ctx, old_ctx, vp, ofc,
-                       ofc ? static_cast<wasm_fcontext*>( *ofc ) : nullptr );
+                       ofc ? resolve_context( *ofc ) : nullptr );
     assign_saved_context( ofc, old_ctx );
 
-    if( new_ctx->entry && !new_ctx->return_to )
-        new_ctx->return_to = old_ctx;
+    // The terminal fallback follows the physical caller of THIS entry, not
+    // the first root which ever started the reusable coroutine.
+    if( new_ctx->entry )
+        assign_return_context( new_ctx, old_ctx );
 
     const uint32_t expected_resume_epoch = old_ctx->resume_epoch;
     ++new_ctx->resume_epoch;
@@ -889,9 +1030,84 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
 }
 
 
+[[noreturn]] void LIBCONTEXT_CALL_CONVENTION finish_fcontext( fcontext_t* ofc,
+        fcontext_t nfc, intptr_t vp )
+{
+    auto* old_ctx = resolve_current_physical_context();
+    auto* new_ctx = resolve_context( nfc );
+
+    // This operation is the physical end of a coroutine. Returning on an
+    // invalid handoff would let the caller free a C stack still referenced by
+    // a parked fiber, so every invalid state is terminal too.
+    if( !ofc || !old_ctx || !new_ctx || old_ctx == new_ctx || old_ctx->root_proxy
+            || !old_ctx->initialized || !new_ctx->initialized
+            || !old_ctx->sched_id || !new_ctx->sched_id
+            || old_ctx->finished || !old_ctx->running
+            || !target_enterable( old_ctx, new_ctx ) )
+    {
+        EM_ASM( { console.error( "[collab-fcontext] invalid terminal handoff old=" + $0
+                                + " new=" + $1 ); },
+                old_ctx ? (int) old_ctx->id : 0,
+                new_ctx ? (int) new_ctx->id : 0 );
+        std::abort();
+    }
+
+    log_wasm_fcontext( "finish-enter", old_ctx, new_ctx, vp, ofc,
+                       ofc ? resolve_context( *ofc ) : nullptr );
+    assign_saved_context( ofc, old_ctx );
+
+    old_ctx->finished = true;
+    old_ctx->running = false;
+    old_ctx->swap_suspended = false;
+    ++new_ctx->resume_epoch;
+    new_ctx->transfer_value = vp;
+    new_ctx->running = true;
+    new_ctx->swap_suspended = false;
+    g_current_context = new_ctx;
+
+    log_wasm_fcontext( "finish-swap", old_ctx, new_ctx, vp );
+
+    if( pcbjam_sched::current() == old_ctx->sched_id && pcbjam_sched::can_yield_here() )
+        pcbjam_sched::fiber_finish_transfer( old_ctx->sched_id, new_ctx->sched_id, vp );
+
+    pcbjam_sched::fiber_finish_swap( old_ctx->sched_id, new_ctx->sched_id, vp );
+}
+
+
 void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
 {
-    release_context( static_cast<wasm_fcontext*>( ctx ) );
+    release_context( resolve_context( ctx ) );
+}
+
+
+wasm_root_proxy_stats wasm_root_proxy_stats_for_test()
+{
+    sweep_dead_root_proxies();
+    return { live_dispatch_root_proxies(), g_root_proxy_peak,
+             MAX_LIVE_DISPATCH_ROOT_PROXIES, g_root_proxies_created,
+             g_root_proxies_released,
+             g_root_proxy_scheduler_release_attempts,
+             g_root_proxy_unsafe_sweeps };
+}
+
+
+uint32_t wasm_current_context_id_for_test()
+{
+    wasm_fcontext* context = resolve_current_physical_context();
+    return context ? context->id : 0;
+}
+
+
+uint32_t wasm_return_context_id_for_test( fcontext_t aContext )
+{
+    wasm_fcontext* context = resolve_context( aContext );
+    return context_id( resolve_context( context ? context->return_to : nullptr ) );
+}
+
+
+bool wasm_root_proxy_capacity_accepts_for_test( size_t aLive )
+{
+    return root_proxy_capacity_accepts( aLive );
 }
 
 } // namespace libcontext

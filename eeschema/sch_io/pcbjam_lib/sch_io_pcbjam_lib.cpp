@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <mutex>
 #include <optional>
 
 #include <nlohmann/json.hpp>
@@ -66,53 +65,67 @@ EM_JS( void, pcbjam_libs_request_start,
        ( int aToken, const char* aOp, const char* aLib, const char* aArg, const char* aKind ), {
     const op = UTF8ToString( aOp ), lib = UTF8ToString( aLib );
     const arg = UTF8ToString( aArg ), kind = UTF8ToString( aKind );
-    const finish = ( ptr ) => globalThis.__wxScheduler.resolveWait( aToken, ptr );
+    const scheduler = globalThis.__wxScheduler;
+    const normalize = ( value ) => {
+        if( value == null || typeof value === 'string' || value instanceof Uint8Array )
+            return value;
+        try { return String( value ); }
+        catch( e ) {
+            console.error( 'kicadLibs.request returned an invalid result:', e );
+            return null;
+        }
+    };
+    const finish = ( value ) => {
+        const res = normalize( value );
+
+        if( !scheduler || typeof scheduler.runWaitCompletion !== 'function' )
+            return false;
+
+        // This completion owns the exact token whose caller is parked. Putting
+        // it in the physical-entry FIFO can self-deadlock when YieldUntil used
+        // its in-place fallback: readiness stays closed until this very token
+        // resolves. Prepare the caller's result and publish it as one exact edge.
+        return scheduler.runWaitCompletion(
+            'symbol-library wait completion', aToken, () => {
+                let ptr = 0;
+                if( res instanceof Uint8Array )
+                {
+                    ptr = _pcbjam_libs_alloc( res.length + 1 );
+
+                    if( ptr )
+                    {
+                        HEAPU8.set( res, ptr );
+                        HEAPU8[ptr + res.length] = 0;
+                    }
+                }
+                else if( res != null )
+                {
+                    const len = lengthBytesUTF8( res ) + 1;
+                    ptr = _pcbjam_libs_alloc( len );
+
+                    if( ptr )
+                        stringToUTF8( res, ptr, len );
+                }
+                return ptr;
+            } );
+    };
 
     const hook = globalThis.kicadLibs;
 
     if( !hook || !hook.request )
     {
-        Promise.resolve().then( () => finish( 0 ) );
+        Promise.resolve().then( () => finish( null ) );
         return;
     }
 
-    let req;
-
-    try
-    {
-        req = Promise.resolve( hook.request( op, lib, arg, kind ) );
-    }
-    catch( e )
-    {
-        console.error( 'kicadLibs.request failed:', e );
-        Promise.resolve().then( () => finish( 0 ) );
-        return;
-    }
-
-    req.then( ( res ) => {
-        if( res == null )
-            return finish( 0 );
-
-        // "Copy as-is": the fat list (list/bodies) returns the raw item bytes as a
-        // Uint8Array — memcpy straight into the wasm heap, no string/JSON detour.
-        // s-expr never contains a NUL byte, so NUL-terminate and the C++ side reads
-        // it as a std::string exactly like the string ops (get/save).
-        if( res instanceof Uint8Array )
-        {
-            const p = _pcbjam_libs_alloc( res.length + 1 );
-            HEAPU8.set( res, p );
-            HEAPU8[p + res.length] = 0;
-            return finish( p );
-        }
-
-        const len = lengthBytesUTF8( res ) + 1;
-        const ptr = _pcbjam_libs_alloc( len );
-        stringToUTF8( res, ptr, len );
-        finish( ptr );
-    } ).catch( ( e ) => {
-        console.error( 'kicadLibs.request failed:', e );
-        finish( 0 );
-    } );
+    Promise.resolve()
+        // This is pure JavaScript/service work. It deliberately stays outside
+        // native admission so independent fetches can overlap.
+        .then( () => hook.request( op, lib, arg, kind ) )
+        .then( finish, ( e ) => {
+            console.error( 'kicadLibs.request failed:', e );
+            return finish( null );
+        } );
 } );
 
 // Token waits live in the wx wasm port (evtloop.cpp); this is the first
@@ -142,70 +155,89 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
     PCBJAM_LIBS_REQ* req = (PCBJAM_LIBS_REQ*) aArg;
 
     EM_ASM( {
+        // Copy the worker-owned strings while this leaf proxy callback is on
+        // the stack. The callback then returns immediately; only its proxying
+        // context and result slot remain retained until completion.
+        // The C preprocessor parses EM_ASM as a variadic macro. Keep each
+        // declaration separate so an unparenthesized JavaScript comma cannot
+        // split the macro arguments.
+        const op = UTF8ToString( $0 );
+        const lib = UTF8ToString( $1 );
+        const arg = UTF8ToString( $2 );
+        const kind = UTF8ToString( $3 );
         const hook = globalThis.kicadLibs;
         const resultPtr = $4;
         const ctx = $5;
-
-        const done = ( ptr ) => {
-            HEAPU32[resultPtr >> 2] = ptr;
-            _pcbjam_libs_finish( ctx );
+        const normalize = ( value ) => {
+            if( value == null || typeof value === 'string' || value instanceof Uint8Array )
+                return value;
+            try { return String( value ); }
+            catch( e ) {
+                console.error( 'kicadLibs.request returned an invalid result:', e );
+                return null;
+            }
         };
+        const enqueue = ( res ) => {
+            const site = 'proxied symbol-library completion';
+            const deliver = () => {
+                let ptr = 0;
+                if( res instanceof Uint8Array )
+                {
+                    ptr = _pcbjam_libs_alloc( res.length + 1 );
+
+                    if( ptr )
+                    {
+                        HEAPU8.set( res, ptr );
+                        HEAPU8[ptr + res.length] = 0;
+                    }
+                }
+                else if( res != null )
+                {
+                    const len = lengthBytesUTF8( res ) + 1;
+                    ptr = _pcbjam_libs_alloc( len );
+
+                    if( ptr )
+                        stringToUTF8( res, ptr, len );
+                }
+                HEAPU32[resultPtr >> 2] = ptr;
+                _pcbjam_libs_finish( ctx );
+            };
+
+            const scheduler = globalThis.__wxScheduler;
+            if( scheduler )
+            {
+                if( typeof scheduler.enqueueNativeCompletion !== 'function' )
+                    return false;
+                const retainedBytes = res instanceof Uint8Array
+                    ? res.buffer.byteLength : ( typeof res === 'string' ? res.length * 2 : 0 );
+                return scheduler.enqueueNativeCompletion( site, retainedBytes, deliver );
+            }
+
+            // Scheduler-less fallback is for the converter diet.
+            return globalThis.__wxNativeIntegrityUnknown ? false : ( deliver(), true );
+        };
+        const done = ( value ) => enqueue( normalize( value ) );
 
         if( !hook || !hook.request )
         {
-            done( 0 );
+            done( null );
             return;
         }
 
-        hook.request( UTF8ToString( $0 ), UTF8ToString( $1 ), UTF8ToString( $2 ),
-                      UTF8ToString( $3 ) )
-            .then( ( res ) => {
-                if( res == null )
-                {
-                    done( 0 );
-                    return;
-                }
-
-                // "Copy as-is": raw item bytes (fat list) → memcpy; NUL-terminate
-                // so the C++ side reads a std::string like the string ops.
-                if( res instanceof Uint8Array )
-                {
-                    const p = _pcbjam_libs_alloc( res.length + 1 );
-                    HEAPU8.set( res, p );
-                    HEAPU8[p + res.length] = 0;
-                    done( p );
-                    return;
-                }
-
-                const len = lengthBytesUTF8( res ) + 1;
-                const ptr = _pcbjam_libs_alloc( len );
-                stringToUTF8( res, ptr, len );
-                done( ptr );
-            } )
-            .catch( ( e ) => {
+        Promise.resolve()
+            .then( () => hook.request( op, lib, arg, kind ) )
+            .then( done, ( e ) => {
                 console.error( 'kicadLibs.request failed:', e );
-                done( 0 );
+                return done( null );
             } );
     }, req->op, req->lib, req->arg, req->kind, &req->result, aCtx );
 }
 
-
-// Serialize worker-thread proxied requests. The symbol chooser enumerates every
-// library concurrently (SYMBOL_LIBRARY_ADAPTER::AsyncLoad submits one thread-pool
-// task per lib), so multiple pthreads would proxy into the main thread at once.
-// Each proxied task runs a tiny C function on the main thread (pcbjam_libs_
-// request_on_main) — and the main thread is typically Asyncify-suspended in the
-// chooser's modal pump at that moment. Concurrent C reentry into a suspended
-// runtime corrupts the Asyncify/function-table state (observed as "table index
-// out of bounds"). Sequential reentry is fine (proven with a single lib), so a
-// global lock held across the whole proxy+fetch round-trip serializes them. The
-// lock parks extra worker threads (not the main thread), so the UI stays live.
-static std::mutex g_pcbjamProxyMutex;
-
 // Dispatch on the calling thread.  Library loads come in on KiCad thread-pool
-// pthreads (SYMBOL_LIBRARY_ADAPTER::AsyncLoad); there we proxy to the main
-// thread and futex-block until the fetch settles — legal on a worker.  Calls
-// already on the main thread use the Asyncify suspension instead (blocking
+// pthreads. Each worker independently proxies a leaf request starter to the
+// main thread and futex-blocks until its own fetch settles. Fetches overlap;
+// their short heap-copy/finish steps pass through the native-entry arbiter.
+// Calls already on the main thread use the scheduler wait instead (blocking
 // the main thread is not an option, and proxy-to-self would deadlock).
 static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, const char* aArg,
                                            const char* aKind )
@@ -216,6 +248,10 @@ static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, co
             return nullptr;   // converter diet: no wait registry, no provider
 
         const int token = wxWasmBeginWait( "lib" );
+
+        if( token <= 0 )
+            return nullptr;
+
         pcbjam_libs_request_start( token, aOp, aLib, aArg, aKind );
 
         // The result is the malloc'd pointer, carried through the wait as an
@@ -227,10 +263,6 @@ static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, co
     PCBJAM_LIBS_REQ req{ aOp, aLib, aArg, aKind, nullptr };
 
     em_proxying_queue* queue = emscripten_proxy_get_system_queue();
-
-    // Held across the blocking proxy call (which returns only after the JS fetch
-    // resolves and calls emscripten_proxy_finish) → one in-flight request at a time.
-    std::lock_guard<std::mutex> serialize( g_pcbjamProxyMutex );
 
     if( !emscripten_proxy_sync_with_ctx( queue, emscripten_main_runtime_thread_id(),
                                          pcbjam_libs_request_on_main, &req ) )

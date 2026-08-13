@@ -131,7 +131,12 @@ bool KIWAY_PLAYER::ShowModal( wxString* aResult, wxWindow* aResultantFocusWindow
 
         WINDOW_DISABLER raii_parent_disabler( parent );
 
+#ifdef __EMSCRIPTEN__
+        // Give the Wasm nested-loop lease its exact modal top-level.
+        wxGUIEventLoop event_loop( this );
+#else
         wxGUIEventLoop event_loop;
+#endif
         m_modal_loop = &event_loop;
         event_loop.Run();
     }
@@ -174,7 +179,14 @@ void KIWAY_PLAYER::DismissModal( bool aRetVal, const wxString& aResult )
 
     if( m_modal_loop )
     {
-        m_modal_loop->Exit();
+        // Exit() is valid only for the currently active loop. A child dialog
+        // can be active when a KIWAY player is dismissed; in that case record
+        // the exit on this exact ancestor and let it unwind after the child.
+        if( m_modal_loop->IsRunning() )
+            m_modal_loop->Exit();
+        else
+            m_modal_loop->ScheduleExit();
+
         m_modal_loop = nullptr;      // this marks it as dismissed.
     }
 
@@ -261,4 +273,3 @@ void KIWAY_PLAYER::OnSockRequestServer( wxSocketEvent& evt )
     socket->SetEventHandler( *this, ID_EDA_SOCKET_EVENT );
     socket->SetNotify( wxSOCKET_INPUT_FLAG | wxSOCKET_LOST_FLAG );
 }
-

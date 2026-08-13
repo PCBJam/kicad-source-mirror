@@ -120,8 +120,33 @@ void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx );
 
 intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t nfc,
         intptr_t vp, bool preserve_fpu = true );
+#if defined(LIBCONTEXT_PLATFORM_wasm32)
+[[noreturn]] void LIBCONTEXT_CALL_CONVENTION finish_fcontext( fcontext_t* ofc,
+        fcontext_t nfc, intptr_t vp );
+#endif
 fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
         void (* fn)( intptr_t ) );
+
+#if defined(LIBCONTEXT_PLATFORM_wasm32)
+// Test/telemetry only: number of live non-main scheduler-root proxies, the
+// high-water mark, and cumulative creation/release counts. Root proxies own no
+// scheduler stack and therefore never call fiber_release().
+struct wasm_root_proxy_stats
+{
+    size_t live;
+    size_t peak;
+    size_t capacity;
+    uint32_t created;
+    uint32_t released;
+    uint32_t scheduler_release_attempts;
+    uint32_t unsafe_sweeps;
+};
+
+wasm_root_proxy_stats wasm_root_proxy_stats_for_test();
+uint32_t wasm_current_context_id_for_test();
+uint32_t wasm_return_context_id_for_test( fcontext_t ctx );
+bool wasm_root_proxy_capacity_accepts_for_test( size_t live );
+#endif
 
 #ifdef __cplusplus
 }    // namespace

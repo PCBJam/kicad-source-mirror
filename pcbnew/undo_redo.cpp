@@ -626,10 +626,11 @@ void PCB_BASE_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList, bool
         }
     }
 
-    // Not a modal: dropped entries are routine when a collaborative remote apply
-    // deletes items behind the undo stack's back (remote applies skip the stack).
+    // Dropped entries are routine when a collaborative remote apply deletes
+    // items behind the undo stack's back.  Use the status line: wxLogWarning
+    // is flushed through wxLogGui as a warning dialog.
     if( not_found )
-        wxLogWarning( wxS( "Incomplete undo/redo operation: some items not found" ) );
+        wxLogStatus( this, wxS( "Incomplete undo/redo operation: some items not found" ) );
 
     // We have now swapped all the group parent and group member pointers.  But it is a
     // risky proposition to bet on the pointers being invariant, so validate them all.

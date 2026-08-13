@@ -164,6 +164,24 @@ using namespace std::placeholders;
 #define INSPECT_CONSTRAINTS_DIALOG_NAME wxT( "InspectConstraintsDialog" )
 #define FOOTPRINT_DIFF_DIALOG_NAME      wxT( "FootprintDiffDialog" )
 
+#ifdef __EMSCRIPTEN__
+namespace
+{
+unsigned int s_wasmPluginAvailabilityFrameEvents = 0;
+}
+
+
+// Browser regression oracle: the Preferences reload completion is deliberately
+// panel-targeted on Wasm. A non-zero increment during that operation means the
+// event escaped to wxTheApp's parked PCB-frame listener and rebuilt its native
+// ACTION_TOOLBAR contents. DOM identity cannot observe that operation because
+// KiCad uses canvas-painted wxAuiToolBar windows whose roots stay allocated.
+unsigned int pcbWasmPluginAvailabilityFrameEventsForTest()
+{
+    return s_wasmPluginAvailabilityFrameEvents;
+}
+#endif
+
 
 BEGIN_EVENT_TABLE( PCB_EDIT_FRAME, PCB_BASE_FRAME )
     EVT_SOCKET( ID_EDA_SOCKET_EVENT_SERV, PCB_EDIT_FRAME::OnSockRequestServer )
@@ -3381,6 +3399,9 @@ void PCB_EDIT_FRAME::onCloseModelessBookReporterDialogs( wxCommandEvent& aEvent 
 #ifdef KICAD_IPC_API
 void PCB_EDIT_FRAME::onPluginAvailabilityChanged( wxCommandEvent& aEvt )
 {
+#ifdef __EMSCRIPTEN__
+    ++s_wasmPluginAvailabilityFrameEvents;
+#endif
     wxLogTrace( traceApi, "PCB frame: EDA_EVT_PLUGIN_AVAILABILITY_CHANGED" );
     RecreateToolbars();
     aEvt.Skip();

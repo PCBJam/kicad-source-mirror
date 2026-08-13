@@ -30,6 +30,7 @@
 
 class REPORTER;
 class wxTimer;
+class wxWindow;
 
 /// Internal event used for handling async tasks
 wxDECLARE_EVENT( EDA_EVT_PLUGIN_MANAGER_JOB_FINISHED, wxCommandEvent );
@@ -55,6 +56,17 @@ public:
                         std::shared_ptr<REPORTER> aReporter = nullptr );
 
     void RecreatePluginEnvironment( const wxString& aIdentifier );
+
+#ifdef __EMSCRIPTEN__
+    // Continue one exact modal operation without associating the process-wide
+    // plugin manager with every modal window.
+    void ReloadPlugins( std::optional<wxString> aDirectoryToScan,
+                        std::shared_ptr<REPORTER> aReporter,
+                        wxWindow* aEventOwner );
+
+    void RecreatePluginEnvironment( const wxString& aIdentifier,
+                                    wxWindow* aEventOwner );
+#endif
 
     void InvokeAction( const wxString& aIdentifier,
                        std::shared_ptr<REPORTER> aReporter = nullptr );

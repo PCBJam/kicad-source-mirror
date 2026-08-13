@@ -505,8 +505,11 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
         }
     }
 
+    // A stale picker is expected when a collaborative remote apply deletes an
+    // item behind the local undo stack.  Keep this informational and
+    // non-modal: wxLogWarning is flushed through wxLogGui as a warning dialog.
     if( not_found )
-        wxLogWarning( wxS( "Incomplete undo/redo operation: some items not found" ) );
+        wxLogStatus( this, wxS( "Incomplete undo/redo operation: some items not found" ) );
 
     // We have now swapped all the group parent and group member pointers.  But it is a
     // risky proposition to bet on the pointers being invariant, so validate them all.
@@ -661,5 +664,4 @@ void SCH_EDIT_FRAME::ClearUndoORRedoList( UNDO_REDO_LIST whichList, int aItemCou
         }
     }
 }
-
 

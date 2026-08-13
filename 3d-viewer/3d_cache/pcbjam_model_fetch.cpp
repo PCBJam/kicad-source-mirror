@@ -48,49 +48,57 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_3d_finish( em_proxying_ctx* aCtx )
 // no longer Asyncify-parks the stack it stands on — token wait via
 // wxWasmYieldUntil, resolution ALWAYS deferred to at least a microtask (the
 // early-resolve contract, doc 22 §10 Phase E retry entry). The provider fetches
-// the model body (IDB, then R2) and writes it into the MEMFS model root itself
-// (FS.writeFile) — the response is just an ack string, so no binary framing
-// crosses the bridge.
+// the model body (IDB, then R2) without touching native state. Its synchronous
+// prepared apply writes MEMFS, allocates the result path, and resolves this
+// exact wait in one immediate completion edge.
 EM_JS( void, pcbjam_3d_request_start,
        ( int aToken, const char* aOp, const char* aLib, const char* aArg, const char* aKind ), {
     const op = UTF8ToString( aOp ), lib = UTF8ToString( aLib );
     const arg = UTF8ToString( aArg ), kind = UTF8ToString( aKind );
-    const finish = ( ptr ) => globalThis.__wxScheduler.resolveWait( aToken, ptr );
+    const scheduler = globalThis.__wxScheduler;
+    const finish = ( value ) => {
+        if( !scheduler || typeof scheduler.runWaitCompletion !== 'function' )
+            return false;
+
+        // The model apply is a dependency of this exact waiter. Queueing it in
+        // the physical FIFO can self-deadlock when YieldUntil used its in-place
+        // fallback, because readiness stays closed until this token resolves.
+        return scheduler.runWaitCompletion( '3D-model wait completion', aToken, () => {
+            let res = value;
+            if( res && res.__pcbjamPreparedModel3d === true
+                && typeof res.apply === 'function' )
+                res = res.apply();
+
+            // Only the returned path is meaningful. Keep legacy providers which
+            // used a non-string success marker compatible with the old bridge.
+            res = res == null ? null : ( typeof res === 'string' ? res : '1' );
+            let ptr = 0;
+            if( res != null )
+            {
+                const len = lengthBytesUTF8( res ) + 1;
+                ptr = _pcbjam_3d_alloc( len );
+
+                if( ptr )
+                    stringToUTF8( res, ptr, len );
+            }
+            return ptr;
+        } );
+    };
 
     const hook = globalThis.kicadLibs;
 
     if( !hook || !hook.request )
     {
-        Promise.resolve().then( () => finish( 0 ) );
+        Promise.resolve().then( () => finish( null ) );
         return;
     }
 
-    let req;
-
-    try
-    {
-        req = Promise.resolve( hook.request( op, lib, arg, kind ) );
-    }
-    catch( e )
-    {
-        console.error( 'kicadLibs.request (model3d) failed:', e );
-        Promise.resolve().then( () => finish( 0 ) );
-        return;
-    }
-
-    req.then( ( res ) => {
-        if( res == null )
-            return finish( 0 );
-
-        const str = typeof res === 'string' ? res : '1';
-        const len = lengthBytesUTF8( str ) + 1;
-        const ptr = _pcbjam_3d_alloc( len );
-        stringToUTF8( str, ptr, len );
-        finish( ptr );
-    } ).catch( ( e ) => {
-        console.error( 'kicadLibs.request (model3d) failed:', e );
-        finish( 0 );
-    } );
+    Promise.resolve()
+        .then( () => hook.request( op, lib, arg, kind ) )
+        .then( finish, ( e ) => {
+            console.error( 'kicadLibs.request (model3d) failed:', e );
+            return finish( null );
+        } );
 } );
 
 // Token waits live in the wx wasm port (evtloop.cpp).
@@ -116,57 +124,83 @@ static void pcbjam_3d_request_on_main( em_proxying_ctx* aCtx, void* aArg )
     PCBJAM_3D_REQ* req = (PCBJAM_3D_REQ*) aArg;
 
     EM_ASM( {
+        // EM_ASM is a variadic C macro. Avoid unparenthesized JavaScript
+        // commas which the preprocessor can mistake for macro separators.
+        const op = UTF8ToString( $0 );
+        const lib = UTF8ToString( $1 );
+        const arg = UTF8ToString( $2 );
+        const kind = UTF8ToString( $3 );
         const hook = globalThis.kicadLibs;
         const resultPtr = $4;
         const ctx = $5;
+        const enqueue = ( value ) => {
+            const site = 'proxied 3D-model completion';
+            const deliver = () => {
+                let res = value;
+                if( res && res.__pcbjamPreparedModel3d === true
+                    && typeof res.apply === 'function' )
+                    res = res.apply();
+                res = res == null ? null : ( typeof res === 'string' ? res : '1' );
 
-        const done = ( ptr ) => {
-            HEAPU32[resultPtr >> 2] = ptr;
-            _pcbjam_3d_finish( ctx );
+                let ptr = 0;
+                if( res != null )
+                {
+                    const len = lengthBytesUTF8( res ) + 1;
+                    ptr = _pcbjam_3d_alloc( len );
+
+                    if( ptr )
+                        stringToUTF8( res, ptr, len );
+                }
+                HEAPU32[resultPtr >> 2] = ptr;
+                _pcbjam_3d_finish( ctx );
+            };
+
+            const scheduler = globalThis.__wxScheduler;
+            if( scheduler )
+            {
+                if( typeof scheduler.enqueueNativeCompletion !== 'function' )
+                    return false;
+                let retainedBytes = value == null ? 0
+                    : ( typeof value === 'string' ? value.length * 2 : 0 );
+                if( value && value.__pcbjamPreparedModel3d === true
+                    && typeof value.apply === 'function' )
+                    retainedBytes = Number.isSafeInteger( value.retainedBytes )
+                        && value.retainedBytes >= 0
+                        ? value.retainedBytes : Number.MAX_SAFE_INTEGER;
+                return scheduler.enqueueNativeCompletion( site, retainedBytes, deliver );
+            }
+            return globalThis.__wxNativeIntegrityUnknown ? false : ( deliver(), true );
         };
+        const done = ( value ) => enqueue( value );
 
         if( !hook || !hook.request )
         {
-            done( 0 );
+            done( null );
             return;
         }
 
-        hook.request( UTF8ToString( $0 ), UTF8ToString( $1 ), UTF8ToString( $2 ),
-                      UTF8ToString( $3 ) )
-            .then( ( res ) => {
-                if( res == null )
-                {
-                    done( 0 );
-                    return;
-                }
-
-                const str = typeof res === 'string' ? res : '1';
-                const len = lengthBytesUTF8( str ) + 1;
-                const ptr = _pcbjam_3d_alloc( len );
-                stringToUTF8( str, ptr, len );
-                done( ptr );
-            } )
-            .catch( ( e ) => {
+        Promise.resolve()
+            .then( () => hook.request( op, lib, arg, kind ) )
+            .then( done, ( e ) => {
                 console.error( 'kicadLibs.request (model3d) failed:', e );
-                done( 0 );
+                return done( null );
             } );
     }, req->op, req->lib, req->arg, req->kind, &req->result, aCtx );
 }
 
-
-// Serialize worker-thread proxied requests — concurrent C reentry into the
-// Asyncify-suspended runtime corrupts its state (same reasoning as the symbol
-// and footprint bridges; a distinct lock for this bridge).
-static std::mutex g_pcbjam3dProxyMutex;
-
 // Dispatch on the calling thread: workers proxy to the main thread and
-// futex-block; main-thread calls use the Asyncify suspension.
+// futex-block. Their fetches overlap and only short native completions serialize;
+// main-thread calls use the scheduler wait.
 static char* pcbjam_3d_request_dispatch( const char* aOp, const char* aLib, const char* aArg,
                                          const char* aKind )
 {
     if( emscripten_is_main_runtime_thread() )
     {
         const int token = wxWasmBeginWait( "3d" );
+
+        if( token <= 0 )
+            return nullptr;
+
         pcbjam_3d_request_start( token, aOp, aLib, aArg, aKind );
 
         // The result is the malloc'd pointer, carried through the wait as an
@@ -178,8 +212,6 @@ static char* pcbjam_3d_request_dispatch( const char* aOp, const char* aLib, cons
     PCBJAM_3D_REQ req{ aOp, aLib, aArg, aKind, nullptr };
 
     em_proxying_queue* queue = emscripten_proxy_get_system_queue();
-
-    std::lock_guard<std::mutex> serialize( g_pcbjam3dProxyMutex );
 
     if( !emscripten_proxy_sync_with_ctx( queue, emscripten_main_runtime_thread_id(),
                                          pcbjam_3d_request_on_main, &req ) )

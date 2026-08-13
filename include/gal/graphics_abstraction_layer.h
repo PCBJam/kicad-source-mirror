@@ -1223,7 +1223,7 @@ public:
         m_gal->beginUpdate();
     }
 
-    ~GAL_UPDATE_CONTEXT()
+    ~GAL_UPDATE_CONTEXT() noexcept( false )
     {
         m_gal->endUpdate();
     }

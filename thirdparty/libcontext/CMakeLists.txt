@@ -43,8 +43,7 @@ target_include_directories( libcontext PUBLIC
     )
 
 if( EMSCRIPTEN )
-    # The wasm backend is a thin adapter over the scheduler registry
-    # (wx/wasm/private/sched_context.h, header-only — pcbjam
-    # docs/features/async/22 Phase A), so it needs wx's include paths.
+    # The wasm backend uses wx's header-only scheduler fiber registry, so it
+    # needs wx's include paths.
     target_include_directories( libcontext PRIVATE ${wxWidgets_INCLUDE_DIRS} )
 endif()

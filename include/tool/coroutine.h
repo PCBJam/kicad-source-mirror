@@ -29,6 +29,7 @@
 
 #include <cassert>
 #include <cstdlib>
+#include <new>
 #include <type_traits>
 
 #ifdef KICAD_USE_VALGRIND
@@ -139,8 +140,22 @@ private:
 
         ~CALL_CONTEXT()
         {
-            if( m_mainStackContext )
-                libcontext::release_fcontext( m_mainStackContext->ctx );
+            if( !m_mainStackContext || !m_mainStackContext->ctx )
+                return;
+
+#ifdef __EMSCRIPTEN__
+            // SetMainStack() makes this saved-context slot an owning edge.  A
+            // root-style Resume() can also run while another coroutine is the
+            // physical caller, so the slot can own that currently executing
+            // coroutine.  Consume the edge exactly once: leaving the released
+            // handle in the slot makes the next jump mistake it for an already
+            // retained value and eventually release the current fiber to zero.
+            libcontext::fcontext_t owned = m_mainStackContext->ctx;
+            m_mainStackContext->ctx = nullptr;
+            libcontext::release_fcontext( owned );
+#else
+            libcontext::release_fcontext( m_mainStackContext->ctx );
+#endif
         }
 
 
@@ -151,6 +166,9 @@ private:
 
         void RunMainStack( COROUTINE* aCor, std::function<void()> aFunc )
         {
+            if( !aCor || !m_mainStackContext || !m_mainStackContext->ctx )
+                return;
+
             m_mainStackFunction = std::move( aFunc );
             INVOCATION_ARGS args{ INVOCATION_ARGS::CONTINUE_AFTER_ROOT, aCor, this };
 
@@ -174,7 +192,7 @@ private:
 
         void Continue( INVOCATION_ARGS* args )
         {
-            while( args->type == INVOCATION_ARGS::CONTINUE_AFTER_ROOT )
+            while( args && args->type == INVOCATION_ARGS::CONTINUE_AFTER_ROOT )
             {
                 m_mainStackFunction();
                 args->type = INVOCATION_ARGS::FROM_ROOT;
@@ -271,7 +289,9 @@ public:
      */
     void RunMainStack( std::function<void()> func )
     {
-        assert( m_callContext );
+        if( !m_running || !m_callee.ctx || !m_callContext )
+            return;
+
         m_callContext->RunMainStack( this, std::move( func ) );
     }
 
@@ -331,6 +351,9 @@ public:
      */
     bool Resume()
     {
+        if( !m_running || !m_callee.ctx )
+            return false;
+
         CALL_CONTEXT ctx;
         INVOCATION_ARGS args{ INVOCATION_ARGS::FROM_ROOT, this, &ctx };
 
@@ -357,6 +380,9 @@ public:
      */
     bool Resume( const COROUTINE& aCor )
     {
+        if( !m_running || !m_callee.ctx )
+            return false;
+
         INVOCATION_ARGS args{ INVOCATION_ARGS::FROM_ROUTINE, this, aCor.m_callContext };
 
         wxLogTrace( kicadTraceCoroutineStack, wxT( "COROUTINE::Resume (from routine)" ) );
@@ -436,6 +462,10 @@ private:
 #endif
 
         m_callee.ctx = libcontext::make_fcontext( sp, stackSize, callerStub );
+
+        if( !m_callee.ctx )
+            throw std::bad_alloc();
+
         m_running = true;
 
         // off we go!
@@ -511,6 +541,9 @@ private:
 
     INVOCATION_ARGS* doResume( INVOCATION_ARGS* args )
     {
+        if( !m_running || !m_callee.ctx )
+            return nullptr;
+
         return jumpIn( args );
     }
 
@@ -589,6 +622,17 @@ private:
 
         wxLogTrace( kicadTraceCoroutineStack, wxT( "COROUTINE::jumpOut" ) );
 
+#ifdef __EMSCRIPTEN__
+        // A normal yield remains a symmetric jump. After the body returns,
+        // however, the source fiber is physically terminal: mark it Finished
+        // before the caller can destroy this coroutine and free its C stack.
+        if( !m_running )
+        {
+            libcontext::finish_fcontext( &( m_callee.ctx ), m_caller.ctx,
+                                         reinterpret_cast<intptr_t>( &args ) );
+        }
+#endif
+
         ret = reinterpret_cast<INVOCATION_ARGS*>(
             libcontext::jump_fcontext( &( m_callee.ctx ), m_caller.ctx,
                                        reinterpret_cast<intptr_t>( &args ) )
@@ -598,6 +642,9 @@ private:
         __sanitizer_finish_switch_fiber( fake_stack_save,
                                          &m_asanCallerStackBottom, &m_asanCallerStackSize );
 #endif
+
+        if( !ret )
+            return;
 
         m_callContext = ret->context;
 

@@ -107,7 +107,11 @@ void PLUGINS_GRID_TRICKS::doPopupSelection( wxCommandEvent& event )
         if( std::optional<const PLUGIN_ACTION*> action = mgr.GetAction( id );
             action && ( *action )->plugin.Runtime().type == PLUGIN_RUNTIME_TYPE::PYTHON )
         {
+#ifdef __EMSCRIPTEN__
+            mgr.RecreatePluginEnvironment( ( *action )->plugin.Identifier(), m_grid );
+#else
             mgr.RecreatePluginEnvironment( ( *action )->plugin.Identifier() );
+#endif
         }
 #endif
     }
@@ -137,16 +141,30 @@ PANEL_PCBNEW_ACTION_PLUGINS::PANEL_PCBNEW_ACTION_PLUGINS( wxWindow* aParent ) :
     m_errorDialog = new DIALOG_HTML_REPORTER( aParent );
     m_allowErrorDialog = false;
 
-    wxTheApp->Bind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
+#ifdef __EMSCRIPTEN__
+    // The browser stub has no process-wide plugin state to publish.  Its one
+    // completion belongs only to this Preferences operation, so keep the
+    // event on the panel instead of dispatching it through wxTheApp and every
+    // global listener while the main frame is parked behind the modal lease.
+    Bind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
           &PANEL_PCBNEW_ACTION_PLUGINS::onPluginAvailabilityChanged, this );
+#else
+    wxTheApp->Bind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
+                    &PANEL_PCBNEW_ACTION_PLUGINS::onPluginAvailabilityChanged, this );
+#endif
 }
 
 
 PANEL_PCBNEW_ACTION_PLUGINS::~PANEL_PCBNEW_ACTION_PLUGINS()
 {
     delete m_errorDialog;
-    wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
+#ifdef __EMSCRIPTEN__
+    Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
             &PANEL_PCBNEW_ACTION_PLUGINS::onPluginAvailabilityChanged, this );
+#else
+    wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
+                      &PANEL_PCBNEW_ACTION_PLUGINS::onPluginAvailabilityChanged, this );
+#endif
     m_grid->PopEventHandler( true );
 }
 
@@ -163,7 +181,12 @@ void PANEL_PCBNEW_ACTION_PLUGINS::onPluginAvailabilityChanged( wxCommandEvent& a
         m_errorDialog->ShowModal();
     }
 
+#ifndef __EMSCRIPTEN__
+    // Native availability notifications remain process-wide and continue to
+    // the editor-frame listener.  The browser completion is panel-targeted;
+    // allowing a command event to propagate would reintroduce that fan-out.
     aEvt.Skip();
+#endif
 }
 
 
@@ -223,7 +246,11 @@ void PANEL_PCBNEW_ACTION_PLUGINS::OnReloadButtonClick( wxCommandEvent& event )
     m_errorDialog->m_Reporter->Clear();
     auto reporter = std::make_shared<REDIRECT_REPORTER>( m_errorDialog->m_Reporter );
     m_allowErrorDialog = true;
+#ifdef __EMSCRIPTEN__
+    mgr.ReloadPlugins( std::nullopt, reporter, this );
+#else
     mgr.ReloadPlugins( std::nullopt, reporter );
+#endif
     m_grid->Disable();
 #else
     TransferDataToWindow();

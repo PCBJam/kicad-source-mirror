@@ -60,6 +60,10 @@
 #include <wx/radiobut.h>
 #include <wx/variant.h>
 
+#ifdef __EMSCRIPTEN__
+#include <wx/wasm/private/execution_owner.h>
+#endif
+
 #include <algorithm>
 #include <functional>
 #include <nlohmann/json.hpp>
@@ -867,11 +871,22 @@ void DIALOG_SHIM::ExcludeFromControlUndoRedo( wxWindow* aWindow )
 void DIALOG_SHIM::RegisterUnitBinder( UNIT_BINDER* aUnitBinder, wxWindow* aWindow )
 {
     m_unitBinders[ aWindow ] = aUnitBinder;
+
+#ifdef __EMSCRIPTEN__
+    // UNIT_BINDER is a non-window wxEvtHandler. Its CallAfter work belongs to
+    // this dialog's exact modal family, not to an arbitrary active lease.
+    if( !wxWasmExecutionAssociatePendingEventHandler( aUnitBinder, this ) )
+        wxWasmExecutionFailStop( "could not associate a unit binder with its dialog" );
+#endif
 }
 
 
 void DIALOG_SHIM::UnregisterUnitBinder( UNIT_BINDER* aUnitBinder )
 {
+#ifdef __EMSCRIPTEN__
+    wxWasmExecutionForgetPendingEventHandler( aUnitBinder );
+#endif
+
     // Erase by binder identity rather than window key, so that a stale entry whose window has
     // already been reused by a newer binder is left untouched.
     std::erase_if( m_unitBinders,
@@ -1440,7 +1455,13 @@ int DIALOG_SHIM::ShowQuasiModal()
 
     m_qmodal_showing = true;
 
+#ifdef __EMSCRIPTEN__
+    // The Wasm owner coordinator needs an explicit lease target. Focus is
+    // mutable and cannot safely serve as authority while another owner parks.
+    wxGUIEventLoop event_loop( this );
+#else
     wxGUIEventLoop event_loop;
+#endif
 
     m_qmodal_loop = &event_loop;
 
