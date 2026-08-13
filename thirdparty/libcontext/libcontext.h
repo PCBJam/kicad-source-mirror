@@ -135,6 +135,11 @@ fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
 void LIBCONTEXT_CALL_CONVENTION finish_fcontext( fcontext_t ctx );
 #endif
 
+// Liveness probe: false when the context is known-dead (released while
+// suspended mid-body, or finished). Backends without liveness tracking
+// (all native ones) return true for any non-null handle.
+bool LIBCONTEXT_CALL_CONVENTION context_alive( fcontext_t ctx );
+
 #ifdef __cplusplus
 }    // namespace
 #endif
