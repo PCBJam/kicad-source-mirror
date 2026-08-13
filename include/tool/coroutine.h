@@ -541,7 +541,7 @@ private:
         cor->m_retVal = cor->m_func( *(cor->m_args) );
         cor->m_running = false;
 
-#ifdef PCBJAM_JSPI
+#ifdef __EMSCRIPTEN__
         // JSPI backend: mark the next jumpOut as a completion so the entry
         // activation returns (freeing its engine stack) instead of suspending
         // forever. See libcontext.cpp's JSPI backend reclaim path.

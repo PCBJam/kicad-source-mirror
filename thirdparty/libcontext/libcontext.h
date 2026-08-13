@@ -23,16 +23,11 @@
 
 
 #if defined(__EMSCRIPTEN__)
-    // WebAssembly/Emscripten. Two backends live in libcontext.cpp's wasm32
-    // section: the historical Asyncify/fiber one, and (PCBJAM_JSPI) one where
-    // each coroutine is a WebAssembly.promising activation. Under JSPI the
-    // engine manages the native stacks and the backend allocates the C spill
-    // region itself, so the caller must NOT allocate a stack.
-    #if defined(PCBJAM_JSPI)
-        #define LIBCONTEXT_HAS_OWN_STACK
-    #else
-        #undef LIBCONTEXT_HAS_OWN_STACK
-    #endif
+    // WebAssembly/Emscripten: the JSPI backend — each coroutine is a
+    // WebAssembly.promising activation. The engine manages the native stacks
+    // and the backend allocates the C spill region itself, so the caller must
+    // NOT allocate a stack.
+    #define LIBCONTEXT_HAS_OWN_STACK
     #define LIBCONTEXT_COMPILER_gcc
     #define LIBCONTEXT_PLATFORM_wasm32
     #define LIBCONTEXT_CALL_CONVENTION
@@ -131,7 +126,7 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
 fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
         void (* fn)( intptr_t ) );
 
-#if defined(PCBJAM_JSPI)
+#if defined(__EMSCRIPTEN__)
 // JSPI backend only: the coroutine entry (COROUTINE::callerStub) calls this
 // right before its FINAL jump back to the caller. It tells the backend that
 // the next yield is a completion: instead of suspending the activation forever
