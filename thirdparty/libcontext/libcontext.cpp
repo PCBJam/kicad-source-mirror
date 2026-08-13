@@ -238,7 +238,11 @@ EM_ASYNC_JS( int, js_libctx_resume, ( int id, int vp ), {
     if( SS && SS.backend === 'jspi' && SS._suspended ) {
         const rec = SS._suspended.get( 'lc' + id );
         if( !rec || rec.waitKind !== 'libctx' ) {
-            if( SS._note ) SS._note( 'libctxRefusedResume', 'libctx', 'lc' + id );
+            // note args: a = the refused coroutine ('lc<id>'), b = its current
+            // waitKind tag — the ring stores b|0, so keep the id in `a`.
+            if( SS._note )
+                SS._note( 'libctxRefusedResume', 'lc' + id,
+                          rec ? String( rec.waitKind ) : 'absent' );
             return -1;
         }
     }
@@ -286,12 +290,20 @@ EM_JS( void, js_libctx_finish, ( int id, int vp ), {
     st.yielded.r( vp );
 } );
 
-EM_JS( void, js_libctx_beacon, ( int ghosts, int deadParked ), {
+// reason: 1=ghost-enter (dead/finished/null enter target), 2=yield-no-cur
+// (yield outside any coroutine), 3=released-while-parked, 4=dead-cur
+// substituted on enter, 5=yield-to-dead-enterer (proceeding anyway),
+// 6=release-of-running-ignored (legacy phantom-release shape refused).
+EM_JS( void, js_libctx_beacon, ( int ghosts, int deadParked, int id, int reason ), {
     const L = globalThis.__libctxJspi;
     L.ghosts = ghosts;
     L.deadParked = deadParked;
+    const names = { 1: "ghost-enter", 2: "yield-no-cur", 3: "released-while-parked",
+                    4: "dead-cur-substituted", 5: "yield-to-dead-enterer",
+                    6: "release-of-running-ignored" };
     console.warn( "[libctx-jspi] ghost/refused transition (ghosts=" + ghosts
-                  + " deadParked=" + deadParked + ")" );
+                  + " deadParked=" + deadParked + ") id=" + id
+                  + " reason=" + ( names[reason] || reason ) );
 } );
 
 // Released-while-parked: tell the shim to drop the coroutine's turnstile
@@ -345,7 +357,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_entry( int id, intptr_t vp )
 
     if( !c || c->dead || c->finished )
     {
-        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked ); // ghost entry
+        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked,
+                          c ? c->id : id, 1 /* ghost entry */ );
         return;
     }
 
@@ -403,25 +416,50 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     auto* target = static_cast<wasm_fcontext*>( nfc );
     wasm_fcontext* cur = g_current;
 
-    if( !target || target->dead || target->finished )
-    {
-        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked );
-        return -1; // refusal contract: no transition happened
-    }
-
-    *ofc = cur; // symmetric protocol: tell the target who to yield back to
-
-    // Direction inference. Entering a coroutine and yielding back to a
-    // coroutine PARENT both target a CORO record; what distinguishes the
-    // yield is that the target is the record that ENTERED the current one.
-    bool isYield = target->kind == ctx_kind::ADOPTED
-                   || ( cur && cur->kind == ctx_kind::CORO && cur->enterer == target );
+    // Direction inference FIRST — refusals depend on it. Entering a
+    // coroutine and yielding back to a coroutine PARENT both target a CORO
+    // record; what distinguishes the yield is that the target is the record
+    // that ENTERED the current one. A dead target must not short-circuit
+    // this: a yield towards a dead enterer record still has to park the
+    // (live, running) current coroutine.
+    bool isYield = target != nullptr
+                   && ( target->kind == ctx_kind::ADOPTED
+                        || ( cur && cur->kind == ctx_kind::CORO
+                             && cur->enterer == target ) );
 
     if( !isYield )
     {
+        if( !target || target->dead || target->finished )
+        {
+            // Ghost/dead enter: no transition. coroutine.h dereferences the
+            // return as INVOCATION_ARGS* unconditionally (jumpIn ->
+            // Continue), so this must be the sentinel, never raw -1. A live
+            // COROUTINE CAN reach this path — e.g. resuming a coroutine
+            // whose record died mid-flight (doc 22: released-but-never-
+            // finished tool coroutines are routine in production).
+            js_libctx_beacon( ++g_ghost_jumps, g_dead_parked,
+                              target ? target->id : 0, 1 /* ghost-enter */ );
+            return reinterpret_cast<intptr_t>( &g_sentinel_args );
+        }
+
+        // Symmetric protocol: tell the target who to yield back to — but
+        // never propagate a dead/finished CORO as the caller slot (it would
+        // poison the target's m_caller.ctx and turn its next yield into a
+        // jump at a corpse). The root is the only safe substitute.
+        wasm_fcontext* callerSlot = cur;
+
+        if( cur && cur->kind == ctx_kind::CORO && ( cur->dead || cur->finished ) )
+        {
+            js_libctx_beacon( ++g_ghost_jumps, g_dead_parked,
+                              cur->id, 4 /* dead-cur-substituted */ );
+            callerSlot = &g_root;
+        }
+
+        *ofc = callerSlot;
+
         // we are the caller: enter (start or resume) and wait for its yield
         wasm_fcontext* prevEnterer = target->enterer;
-        target->enterer = cur;
+        target->enterer = callerSlot;
         intptr_t ret = target->started ? js_libctx_resume( target->id, (int) vp )
                                        : js_libctx_start( target->id, (int) vp );
         g_current = cur; // our activation is running again
@@ -433,9 +471,7 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
             // the return as INVOCATION_ARGS* unconditionally, so hand back
             // the sentinel — to the caller a refusal is indistinguishable
             // from "yielded, still asleep", which is doc-15's no-op
-            // semantics. (The EARLY dead/finished checks above still return
-            // -1 raw: that is the backend-level ghost contract the harness
-            // pins, and coroutine.h can't reach it through a live COROUTINE.)
+            // semantics.
             target->enterer = prevEnterer;
             return reinterpret_cast<intptr_t>( &g_sentinel_args );
         }
@@ -446,8 +482,25 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
     // the current coroutine yields to whoever entered it
     if( !cur || cur->kind != ctx_kind::CORO )
     {
-        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked );
-        return -1;
+        // Protocol violation (yield with no coroutine running). The callers
+        // of the yield direction (jumpOut) dereference the return too —
+        // sentinel, never raw -1.
+        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked,
+                          target ? target->id : 0, 2 /* yield-no-cur */ );
+        return reinterpret_cast<intptr_t>( &g_sentinel_args );
+    }
+
+    *ofc = cur; // idempotent for jumpOut: m_callee.ctx already is cur
+
+    if( target->dead || target->finished )
+    {
+        // The ENTERER record died (it was released, or falsely killed before
+        // the ownership fix) but the awaiting activation behind it is real
+        // and alive — the yield's st.yielded resolution is what wakes it.
+        // Park normally; a later legitimate root wake heals m_caller.ctx via
+        // the *ofc write above. Beacon for observability, then proceed.
+        js_libctx_beacon( ++g_ghost_jumps, g_dead_parked,
+                          target->id, 5 /* yield-to-dead-enterer */ );
     }
 
     // Overflow tripwire: the canary at the region BASE dies first when the
@@ -483,6 +536,26 @@ void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
     if( !c || c->kind != ctx_kind::CORO || c == &g_root )
         return; // adopted handles are scheduler-owned; releases are no-ops
 
+    if( c->released )
+        return; // idempotent: a second release must not double-count or
+                // re-quarantine
+
+    // Refuse to kill a RUNNING record (g_current or anything on its enterer
+    // chain): only a caller holding a BORROWED handle can reach this — the
+    // owner (~COROUTINE) cannot run while its own body is mid-slice. This is
+    // the legacy ~CALL_CONTEXT phantom-release shape; ignoring it (instead of
+    // quarantining a live coroutine) keeps any residual caller harmless. The
+    // body finishes normally and the entry epilogue reclaims everything.
+    for( wasm_fcontext* p = g_current; p; p = p->enterer )
+    {
+        if( p == c )
+        {
+            js_libctx_beacon( ++g_ghost_jumps, g_dead_parked,
+                              c->id, 6 /* release-of-running-ignored */ );
+            return;
+        }
+    }
+
     c->released = true;
 
     if( !c->started )
@@ -503,10 +576,28 @@ void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
         // resume it (running live destructors over a parked body is unsafe),
         // keep the record as a tombstone, census the leaked activation.
         c->dead = true;
+
+        if( g_current == c )
+            g_current = &g_root; // never leave g_current at a dead record
+
         js_libctx_quarantine( c->id );
-        js_libctx_beacon( g_ghost_jumps, ++g_dead_parked );
+        js_libctx_beacon( g_ghost_jumps, ++g_dead_parked,
+                          c->id, 3 /* released-while-parked */ );
     }
     // finished: entry already freed the region and dropped the JS slots.
+}
+
+bool LIBCONTEXT_CALL_CONVENTION context_alive( fcontext_t ctx )
+{
+    auto* c = static_cast<wasm_fcontext*>( ctx );
+
+    if( !c )
+        return false;
+
+    if( c->kind != ctx_kind::CORO )
+        return true; // adopted/root handles are always live
+
+    return !c->dead && !c->finished;
 }
 
 } // namespace libcontext
@@ -2076,6 +2167,12 @@ namespace libcontext
 void LIBCONTEXT_CALL_CONVENTION release_fcontext( fcontext_t ctx )
 {
 	// do nothing...
+}
+
+bool LIBCONTEXT_CALL_CONVENTION context_alive( fcontext_t ctx )
+{
+	// no liveness tracking on native backends
+	return ctx != nullptr;
 }
 #endif
 
