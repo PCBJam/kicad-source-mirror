@@ -43,8 +43,9 @@ target_include_directories( libcontext PUBLIC
     )
 
 if( EMSCRIPTEN )
-    # The wasm backend is a thin adapter over the scheduler registry
-    # (wx/wasm/private/sched_context.h, header-only — pcbjam
-    # docs/features/async/22 Phase A), so it needs wx's include paths.
+    # Legacy of the fiber-era backend, which adapted over wx's scheduler
+    # registry; the JSPI backend is self-contained (emscripten headers only).
+    # Harmless — droppable after a wasm compile check confirms nothing else
+    # reaches wx headers through this target.
     target_include_directories( libcontext PRIVATE ${wxWidgets_INCLUDE_DIRS} )
 endif()

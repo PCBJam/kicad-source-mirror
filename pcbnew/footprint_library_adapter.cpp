@@ -60,7 +60,7 @@ void FOOTPRINT_LIBRARY_ADAPTER::enumerateLibrary( LIB_DATA* aLib, const wxString
     // Lazy load: the bulk async preload (LIBRARY_MANAGER_ADAPTER::AsyncLoad) calls this hook
     // to parse every library's footprints up front. For the WASM port's network-backed
     // (pcbjam/CDN) footprint libraries that turns startup into hundreds of serialized,
-    // main-thread-blocking enumerations -- each FootprintEnumerate is an Asyncify CDN fetch.
+    // main-thread-blocking enumerations -- each FootprintEnumerate is a suspending CDN fetch.
     // The full ~222-library set ran inline during the PCB editor's boot (single_top -> IFACE::
     // PreloadLibraries -> AsyncLoad), so the frame never reached its first paint and the tab
     // appeared frozen. Skip the eager parse here; preloadLibrary() populates PreloadedFootprints

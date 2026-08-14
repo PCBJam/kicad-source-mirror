@@ -52,7 +52,7 @@
  *   request( "save", uri, json )    -> persist one symbol; json is
  *                                      {"name":..,"body":<kicad_symbol_lib>}
  *
- * The call suspends via Asyncify (EM_ASYNC_JS) on the main thread, or proxies
+ * The call suspends via the JSPI token wait on the main thread, or proxies
  * to the main thread and futex-blocks on a worker, until the provider's
  * promise resolves.  Outside Emscripten builds every operation throws IO_ERROR.
  */

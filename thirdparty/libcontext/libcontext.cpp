@@ -212,7 +212,7 @@ EM_ASYNC_JS( int, js_libctx_start, ( int id, int vp ), {
     // window (a finishing yield completes the entry synchronously — nothing
     // else can observe it). The wx-free harness has no scheduler: raw await.
     const S = globalThis.__wxScheduler;
-    if( S && S.backend === 'jspi' ) {
+    if( S ) {
         st.done.then( () => S.libctxEnd( id ), () => S.libctxEnd( id ) );
         const v = await S.promiseYield( st.yielded.p, 'libctx-enter' );
         _pcbjam_libctx_set_sp( callerSp );
@@ -226,16 +226,17 @@ EM_ASYNC_JS( int, js_libctx_start, ( int id, int vp ), {
 EM_ASYNC_JS( int, js_libctx_resume, ( int id, int vp ), {
     const L = globalThis.__libctxJspi;
     const st = L.s[id];
-    // doc-15 stale-resume refusal (the fiber backend's epoch contract): a
-    // coroutine parked on a FOREIGN wait (sleep/promise inside its body) has
-    // no live yield pair — st.resume belongs to an already-consumed cycle.
-    // Resuming it would give the activation TWO live resumptions (the timer
-    // and this one) and corrupt it. The coroutine's OWN yield park books
-    // waitKind 'libctx' — that IS the normal resumable state; anything else
-    // (foreign park, armed/in-flight resume, quarantined/unknown) is
-    // refused. The legitimate wake is the foreign wait's own resolution.
+    // Stale-resume refusal: a coroutine parked on a FOREIGN wait
+    // (sleep/promise inside its body) has no live yield pair — st.resume
+    // belongs to an already-consumed cycle. Resuming it would give the
+    // activation TWO live resumptions (the timer and this one) and corrupt
+    // it. The coroutine's OWN yield park books waitKind 'libctx' — that IS
+    // the only resumable state; anything else (foreign park, armed/in-flight
+    // resume, quarantined/unknown) is refused. The legitimate wake is the
+    // foreign wait's own resolution. (Ports the retired fiber backend's
+    // doc-15 epoch contract.)
     const SS = globalThis.__wxScheduler;
-    if( SS && SS.backend === 'jspi' && SS._suspended ) {
+    if( SS && SS._suspended ) {
         const rec = SS._suspended.get( 'lc' + id );
         if( !rec || rec.waitKind !== 'libctx' ) {
             // note args: a = the refused coroutine ('lc<id>'), b = its current
@@ -250,7 +251,7 @@ EM_ASYNC_JS( int, js_libctx_resume, ( int id, int vp ), {
     const callerSp = _pcbjam_libctx_sp();
     st.resume.r( vp );
     const S = globalThis.__wxScheduler;
-    if( S && S.backend === 'jspi' ) {
+    if( S ) {
         const v = await S.promiseYield( st.yielded.p, 'libctx-enter' );
         _pcbjam_libctx_set_sp( callerSp );
         return v;
@@ -271,7 +272,7 @@ EM_ASYNC_JS( int, js_libctx_yield, ( int id, int vp ), {
     // CALLER, which is still on the JS stack) and re-arms mySp at resume.
     // The set_sp after the await is idempotent with the pump's arm.
     const S = globalThis.__wxScheduler;
-    if( S && S.backend === 'jspi' ) {
+    if( S ) {
         const v = await S.libctxSuspend( id, st.resume.p, mySp );
         _pcbjam_libctx_set_sp( mySp );
         return v;

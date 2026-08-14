@@ -724,20 +724,6 @@ void TOOL_MANAGER::RunMainStack( TOOL_BASE* aTool, std::function<void()> aFunc )
 }
 
 
-bool TOOL_MANAGER::RunOnMainStackIfActiveTool( std::function<void()> aFunc )
-{
-    if( !m_activeState || !m_activeState->cofunc || !m_activeState->cofunc->Running()
-            || !m_activeState->cofunc->CanResume() )
-    {
-        aFunc();
-        return false;
-    }
-
-    m_activeState->cofunc->RunMainStack( std::move( aFunc ) );
-    return true;
-}
-
-
 TOOL_EVENT* TOOL_MANAGER::ScheduleWait( TOOL_BASE* aTool, const TOOL_EVENT_LIST& aConditions )
 {
     TOOL_STATE* st = m_toolState[aTool];

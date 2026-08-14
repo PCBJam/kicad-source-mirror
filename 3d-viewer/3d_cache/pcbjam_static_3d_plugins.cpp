@@ -72,8 +72,8 @@ namespace
 // rare (once per unique file) and this is the only field-visible signal of a
 // parse failure, wxLogTrace being mask-gated — and (b) an exception barrier:
 // OCCT throws Standard_Failure on malformed STEP internals, and letting that
-// unwind into the Asyncify-instrumented scene build would kill the whole
-// viewer instead of skipping one model.
+// unwind out of the scene build would kill the whole viewer instead of
+// skipping one model.
 SCENEGRAPH* loggedLoad( const char* aPlugin, SCENEGRAPH* ( *aLoad )( char const* ),
                         char const* aFileName )
 {

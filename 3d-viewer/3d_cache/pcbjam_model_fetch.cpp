@@ -45,9 +45,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_3d_finish( em_proxying_ctx* aCtx )
 }
 
 // Main-thread path, Phase E shape (docs/features/async/22 §5, K3): the request
-// no longer Asyncify-parks the stack it stands on — token wait via
-// wxWasmYieldUntil, resolution ALWAYS deferred to at least a microtask (the
-// early-resolve contract, doc 22 §10 Phase E retry entry). The provider fetches
+// does not park the stack it stands on — token wait via wxWasmYieldUntil,
+// resolution ALWAYS deferred to at least a microtask (the early-resolve
+// contract, doc 22 §10 Phase E retry entry). The provider fetches
 // the model body (IDB, then R2) and writes it into the MEMFS model root itself
 // (FS.writeFile) — the response is just an ack string, so no binary framing
 // crosses the bridge.
@@ -154,13 +154,13 @@ static void pcbjam_3d_request_on_main( em_proxying_ctx* aCtx, void* aArg )
 }
 
 
-// Serialize worker-thread proxied requests — concurrent C reentry into the
-// Asyncify-suspended runtime corrupts its state (same reasoning as the symbol
-// and footprint bridges; a distinct lock for this bridge).
+// Single-flight throttle for worker-thread proxied requests — one proxy+fetch
+// round-trip in flight at a time (same reasoning as the symbol and footprint
+// bridges; a distinct lock for this bridge).
 static std::mutex g_pcbjam3dProxyMutex;
 
 // Dispatch on the calling thread: workers proxy to the main thread and
-// futex-block; main-thread calls use the Asyncify suspension.
+// futex-block; main-thread calls suspend via the JSPI token wait.
 static char* pcbjam_3d_request_dispatch( const char* aOp, const char* aLib, const char* aArg,
                                          const char* aKind )
 {

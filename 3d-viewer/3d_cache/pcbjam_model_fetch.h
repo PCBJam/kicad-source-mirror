@@ -54,8 +54,9 @@ namespace PCBJAM_3D
 
     // Resolve a footprint model reference against files ALREADY staged under
     // MODELS_MEMFS_ROOT — a pure path probe, no JS bridge, usable where the
-    // runtime cannot suspend (the occ_service worker's EXPORTER_STEP, built
-    // -sASYNCIFY=0; bodies are staged up front by the export request there).
+    // runtime cannot suspend (the occ_service worker's EXPORTER_STEP — that
+    // build has no scheduler shim or suspending bridge; bodies are staged up
+    // front by the export request there).
     // Tries the exact ref, then the same-stem format fallbacks (a .wrl ref is
     // served by its .step sibling — kicad-packages3D is STEP-only from 10.x —
     // and vice versa), mirroring the JS models-bridge refCandidates. Returns
