@@ -1931,8 +1931,8 @@ void SHAPE_POLY_SET::splitCollinearOutlines()
             // RTree instantiations in KiCad use `double` for that fourth argument; this
             // one was using `intptr_t`, which silently overflowed on wasm32 (where
             // intptr_t is 32-bit) and tripped an assertion deep in PickSeeds during
-            // PCB load. See features/fix-asyncify-O2-and-modal-promise-rejection/
-            // rtree-debug-findings.md for the full diagnosis trail.
+            // PCB load. Full diagnosis trail (asyncify-era doc dir):
+            // features/fix-asyncify-O2-and-modal-promise-rejection/rtree-debug-findings.md.
             RTree<intptr_t, intptr_t, 2, double> rtree;
 
             for( intptr_t i = 0; i < count; ++i )

@@ -620,13 +620,11 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
         };
 
 #ifdef __EMSCRIPTEN__
-    // WASM: the KiCad thread-pool is inline-shimmed (tasks run on the calling thread)
-    // because an Asyncify stack cannot be rewound on a pthread worker. std::async(
-    // launch::async ) bypasses that shim and spawns a real worker; on it the pcbjam
-    // symbol-library bridge takes its proxy-to-main path and deadlocks, because the
-    // main thread is still inside OpenProjectFiles and never returns to the event loop
-    // to pump the proxying queue. Run the preload inline on the main thread so the
-    // bridge uses its working main-thread Asyncify path.
+    // WASM: std::async( launch::async ) would run the preload on a real pthread
+    // worker; on it the pcbjam symbol-library bridge takes its proxy-to-main path
+    // and deadlocks, because the main thread is still inside OpenProjectFiles and
+    // never returns to the event loop to pump the proxying queue. Run the preload
+    // inline on the main thread so the bridge uses its suspending main-thread path.
     preload();
     std::promise<void> preloadDone;
     preloadDone.set_value();

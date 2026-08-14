@@ -663,7 +663,7 @@ void WEBGL_GAL::BeginDrawing()
                         static_cast<float>( -m_depthRange.y ) );
 
     // Validate compositor shaders are still valid in the GL context.
-    // After Asyncify modal transitions, shader programs can become stale.
+    // After modal suspensions, shader programs can become stale.
     if( m_isFramebufferInitialized && !m_compositor->ValidateShaders() )
     {
         fprintf( stderr, "[GAL] BeginDrawing: compositor shaders stale, forcing re-init\n" );

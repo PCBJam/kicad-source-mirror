@@ -101,7 +101,7 @@ public:
 
     /**
      * Check if compositor shaders are still valid in the current GL context.
-     * After Asyncify modal transitions, shader programs can become stale.
+     * After modal suspensions, shader programs can become stale.
      * @return true if shaders are valid, false if re-initialization is needed.
      */
     bool ValidateShaders();
