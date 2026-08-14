@@ -265,7 +265,7 @@ void FOOTPRINT_LIST_IMPL::loadFootprints()
     // thread while the future-wait below busy-spins the main thread on the
     // workers' futures: deadlock (this is how CvPcb's LoadFootprintFiles hung
     // the whole tab). Run the per-library loads serially inline instead; the
-    // bridge then suspends via Asyncify exactly like every other lazy library
+    // bridge then suspends via JSPI exactly like every other lazy library
     // load on the main thread.
     (void) tp;
     (void) returns;

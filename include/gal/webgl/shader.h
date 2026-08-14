@@ -122,7 +122,7 @@ public:
 
     /**
      * Check if the shader program is still valid in the current GL context.
-     * Can return false after WebGL context loss or Asyncify modal transitions.
+     * Can return false after WebGL context loss or modal suspensions.
      */
     bool IsValid() const
     {

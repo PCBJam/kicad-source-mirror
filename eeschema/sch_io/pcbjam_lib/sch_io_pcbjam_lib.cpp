@@ -51,11 +51,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libs_finish( em_proxying_ctx* aCtx )
     emscripten_proxy_finish( aCtx );
 }
 
-// Main-thread path, Phase E shape (docs/features/async/22 §5): the request no
-// longer Asyncify-parks the stack it stands on. It opens a wait token, starts
-// the JS request, and waits via wxWasmYieldUntil — which parks the owning
-// scheduler context when the frame stands on one, and falls back to the
-// in-place park (the pre-Phase-E behaviour) when it does not.
+// Main-thread path, Phase E shape (docs/features/async/22 §5): the request
+// does not park the stack it stands on. It opens a wait token, starts the JS
+// request, and waits via wxWasmYieldUntil — which parks the owning scheduler
+// context when the frame stands on one, and falls back to the in-place park
+// (the pre-Phase-E behaviour) when it does not.
 //
 // Every resolution is deferred to at least a microtask, NEVER delivered
 // synchronously from this call: the C++ caller has not parked yet, and a
@@ -190,22 +190,19 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
 }
 
 
-// Serialize worker-thread proxied requests. The symbol chooser enumerates every
-// library concurrently (SYMBOL_LIBRARY_ADAPTER::AsyncLoad submits one thread-pool
-// task per lib), so multiple pthreads would proxy into the main thread at once.
-// Each proxied task runs a tiny C function on the main thread (pcbjam_libs_
-// request_on_main) — and the main thread is typically Asyncify-suspended in the
-// chooser's modal pump at that moment. Concurrent C reentry into a suspended
-// runtime corrupts the Asyncify/function-table state (observed as "table index
-// out of bounds"). Sequential reentry is fine (proven with a single lib), so a
-// global lock held across the whole proxy+fetch round-trip serializes them. The
-// lock parks extra worker threads (not the main thread), so the UI stays live.
+// Single-flight throttle for worker-thread proxied requests. The symbol chooser
+// enumerates every library concurrently (SYMBOL_LIBRARY_ADAPTER::AsyncLoad
+// submits one thread-pool task per lib), so multiple pthreads would proxy into
+// the main thread at once, fanning the whole library set out as parallel
+// provider fetches. A global lock held across the whole proxy+fetch round-trip
+// keeps it to one in-flight request at a time; it parks extra worker threads
+// (not the main thread), so the UI stays live.
 static std::mutex g_pcbjamProxyMutex;
 
 // Dispatch on the calling thread.  Library loads come in on KiCad thread-pool
 // pthreads (SYMBOL_LIBRARY_ADAPTER::AsyncLoad); there we proxy to the main
 // thread and futex-block until the fetch settles — legal on a worker.  Calls
-// already on the main thread use the Asyncify suspension instead (blocking
+// already on the main thread suspend via the JSPI token wait instead (blocking
 // the main thread is not an option, and proxy-to-self would deadlock).
 static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, const char* aArg,
                                            const char* aKind )
@@ -509,9 +506,9 @@ void SCH_IO_PCBJAM_LIB::fatLoad( const wxString& aLibraryPath )
     // parseLibDoc is pure (no member/global state, no bridge call), so this is safe
     // off the app thread; the wait() yields via the build's main-thread
     // nanosleep->yield shim, mirroring the 3D raytracer's submit_blocks/wait. This
-    // spreads the dominant per-symbol s-expr parse over all cores; fetch (Asyncify,
-    // above) and the cache merge (below) stay on the calling app thread; the lib
-    // path is passed as UTF-8 std::string so no shared wxString crosses threads.
+    // spreads the dominant per-symbol s-expr parse over all cores; the suspending
+    // fetch (above) and the cache merge (below) stay on the calling app thread; the
+    // lib path is passed as UTF-8 std::string so no shared wxString crosses threads.
     const size_t                count = offs.size();
     std::vector<LIB_SYMBOL_MAP> maps( count );
 
