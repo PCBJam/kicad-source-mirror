@@ -61,11 +61,30 @@
 #include <sim/toolbars_simulator_frame.h>
 #include <settings/settings_manager.h>
 
+#include <atomic>
 #include <memory>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 
 // Reporter is stored by pointer in KIBIS, so keep this here to avoid crashes
 static WX_STRING_REPORTER s_reporter;
+static std::atomic<uint32_t> s_nextSimRunGeneration{ 1 };
+
+
+static uint32_t allocateSimRunGeneration()
+{
+    uint32_t generation = s_nextSimRunGeneration.fetch_add( 1, std::memory_order_relaxed );
+
+    // Zero is reserved for simulator state changes which do not belong to a
+    // Run().  This branch is reachable only after a uint32_t wrap.
+    if( generation == 0 )
+        generation = s_nextSimRunGeneration.fetch_add( 1, std::memory_order_relaxed );
+
+    return generation;
+}
 
 
 class SIM_THREAD_REPORTER : public SIMULATOR_REPORTER
@@ -89,22 +108,58 @@ public:
         return false;       // Technically "indeterminate" rather than false.
     }
 
+    void SetRunGeneration( uint32_t aGeneration )
+    {
+        m_pendingRunGeneration.store( aGeneration, std::memory_order_release );
+    }
+
     void OnSimStateChange( SIMULATOR* aObject, SIM_STATE aNewState ) override
     {
         wxCommandEvent* event = nullptr;
+        uint32_t        generation = 0;
 
         switch( aNewState )
         {
-        case SIM_IDLE:    event = new wxCommandEvent( EVT_SIM_FINISHED ); break;
-        case SIM_RUNNING: event = new wxCommandEvent( EVT_SIM_STARTED );  break;
-        default:          wxFAIL;                                         return;
+        case SIM_RUNNING:
+            generation = m_pendingRunGeneration.exchange( 0, std::memory_order_acq_rel );
+
+            if( generation == 0 )
+                generation = m_activeRunGeneration.load( std::memory_order_acquire );
+            else
+                m_activeRunGeneration.store( generation, std::memory_order_release );
+
+            event = new wxCommandEvent( EVT_SIM_STARTED );
+            break;
+
+        case SIM_IDLE:
+            // Keep a newly queued generation separate from the active one.  If
+            // an old run finishes after the next Run() was requested but before
+            // its RUNNING transition, this event still carries the old token.
+            generation = m_activeRunGeneration.exchange( 0, std::memory_order_acq_rel );
+            event = new wxCommandEvent( EVT_SIM_FINISHED );
+            break;
+
+        default:
+            wxFAIL;
+            return;
         }
 
+        // State transitions before the first Run(), and duplicate IDLE
+        // transitions after a run, do not own a completion generation.
+        if( generation == 0 )
+        {
+            delete event;
+            return;
+        }
+
+        event->SetExtraLong( static_cast<long>( generation ) );
         wxQueueEvent( m_parent, event );
     }
 
 private:
-    SIMULATOR_FRAME* m_parent;
+    SIMULATOR_FRAME*      m_parent;
+    std::atomic<uint32_t> m_pendingRunGeneration{ 0 };
+    std::atomic<uint32_t> m_activeRunGeneration{ 0 };
 };
 
 
@@ -120,6 +175,8 @@ SIMULATOR_FRAME::SIMULATOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
         m_schematicFrame( nullptr ),
         m_toolBar( nullptr ),
         m_ui( nullptr ),
+        m_simRunGeneration( 0 ),
+        m_lastAppliedSimRunGeneration( 0 ),
         m_simFinished( false ),
         m_workbookModified( false )
 {
@@ -472,7 +529,7 @@ void SIMULATOR_FRAME::StartSimulation()
         m_simFinished = false;
 
         m_ui->OnSimUpdate();
-        m_simulator->Run();
+        runSimulator();
 
         // Netlist from schematic may have changed; update signals list, measurements list,
         // etc.
@@ -801,12 +858,28 @@ void SIMULATOR_FRAME::setupUIConditions()
 
 void SIMULATOR_FRAME::onSimStarted( wxCommandEvent& aEvent )
 {
+    const uint32_t generation = static_cast<uint32_t>( aEvent.GetExtraLong() );
+
+    if( generation == 0 || generation != m_simRunGeneration
+            || generation <= m_lastAppliedSimRunGeneration )
+    {
+        return;
+    }
+
     SetCursor( wxCURSOR_ARROWWAIT );
 }
 
 
 void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
 {
+    const uint32_t generation = static_cast<uint32_t>( aEvent.GetExtraLong() );
+
+    if( generation == 0 || generation != m_simRunGeneration
+            || generation <= m_lastAppliedSimRunGeneration )
+    {
+        return;
+    }
+
     // Sometimes (for instance with a directive like wrdata my_file.csv "my_signal")
     // the simulator is in idle state (simulation is finished), but still running, during
     // the time the file is written. So gives a slice of time to fully finish the work:
@@ -825,6 +898,12 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
         } while( max_time && m_simulator->IsRunning() );
     }
 
+    // wxYield() above can dispatch an update which starts a newer run.  The
+    // older finish event must not apply or publish the newer run's state.
+    if( generation != m_simRunGeneration
+            || generation <= m_lastAppliedSimRunGeneration )
+        return;
+
     // ensure the shown cursor is the default cursor, not the wxCURSOR_ARROWWAIT set when
     // staring the simulator in onSimStarted:
     SetCursor( wxNullCursor );
@@ -839,6 +918,40 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
 
     m_schematicFrame->RefreshOperatingPointDisplay();
     m_schematicFrame->GetCanvas()->Refresh();
+
+    m_lastAppliedSimRunGeneration = generation;
+
+#ifdef __EMSCRIPTEN__
+    // This is deliberately after every final native refresh.  The browser
+    // harness uses it as exact completion evidence; it is optional in the
+    // application and has no mainline/native behavior.
+    EM_ASM( {
+        const hook = globalThis.__pcbjamNgspiceFinalRefreshApplied;
+
+        if( typeof hook === 'function' )
+        {
+            try
+            {
+                hook( $0 >>> 0 );
+            }
+            catch( error )
+            {
+                console.error( '[ngspice] final-refresh hook failed', error );
+            }
+        }
+    }, generation );
+#endif
+}
+
+
+void SIMULATOR_FRAME::runSimulator()
+{
+    // The process-wide value remains exact if a simulator frame is closed and
+    // reopened.  Publish it before Run() can report RUNNING.
+    m_simRunGeneration = allocateSimRunGeneration();
+
+    m_reporter->SetRunGeneration( m_simRunGeneration );
+    m_simulator->Run();
 }
 
 
@@ -860,7 +973,7 @@ void SIMULATOR_FRAME::onUpdateSim( wxCommandEvent& aEvent )
     if( simulatorLock.owns_lock() )
     {
         m_ui->OnSimUpdate();
-        m_simulator->Run();
+        runSimulator();
     }
     else
     {
