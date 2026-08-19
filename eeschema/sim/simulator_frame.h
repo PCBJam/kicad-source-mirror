@@ -38,6 +38,7 @@
 #include <wx/event.h>
 
 #include <list>
+#include <cstdint>
 #include <memory>
 #include <map>
 
@@ -224,6 +225,7 @@ private:
     void onUpdateSim( wxCommandEvent& aEvent );
     void onSimStarted( wxCommandEvent& aEvent );
     void onSimFinished( wxCommandEvent& aEvent );
+    void runSimulator();
 
     void onExit( wxCommandEvent& event );
 
@@ -237,6 +239,8 @@ private:
     SIM_FRAME_STATE_LISTENER*            m_stateListener;
     std::shared_ptr<SPICE_CIRCUIT_MODEL> m_circuitModel;
 
+    uint32_t                             m_simRunGeneration;
+    uint32_t                             m_lastAppliedSimRunGeneration;
     bool                                 m_simFinished;
     bool                                 m_workbookModified;
 };
