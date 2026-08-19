@@ -83,7 +83,21 @@ NGSPICE::NGSPICE() :
 }
 
 
-NGSPICE::~NGSPICE() = default;
+#ifdef __EMSCRIPTEN__
+// wasm/stubs/sharedspice_client.cpp — unregisters this instance's callbacks.
+extern "C" void pcbjam_ngspice_reset_callbacks( void* aUser );
+#endif
+
+
+NGSPICE::~NGSPICE()
+{
+#ifdef __EMSCRIPTEN__
+    // E-9: a late ngspice_service worker event dispatches through the client
+    // stub's registered callbacks; after this destructor they would
+    // dereference a dead NGSPICE (use-after-free on simulator close).
+    pcbjam_ngspice_reset_callbacks( this );
+#endif
+}
 
 
 void NGSPICE::updateNgspiceSettings()
