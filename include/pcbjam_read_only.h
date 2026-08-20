@@ -3,12 +3,20 @@
  * (read-only-viewer).
  *
  * While active, the tool system swallows every action except an explicit
- * allowlist of view-only actions (zoom/pan/cursor/grid/units/display), and
- * the selection tools report nothing selectable — the canvas becomes a
- * pannable, zoomable viewer. Mouse wheel/drag zoom-pan is untouched by
- * construction (WX_VIEW_CONTROLS binds those on the GAL panel directly,
- * below the tool system). The collab bridge keeps working: remote peer
- * edits apply via BOARD_COMMIT, not tool actions.
+ * allowlist of view-only actions (zoom/pan/cursor/grid/units/display) — the
+ * canvas becomes a pannable, zoomable viewer. SELECTION stays live
+ * (viewer-panels): viewers may click items to inspect them (the shell's
+ * inspector panel reads the selection through the presence bridge), but
+ * everything downstream of a selection is blocked — move/properties/delete
+ * are gated actions, the point editors carry their own read-only guards
+ * (their point drags mutate without actions), and the right-click CONTEXT
+ * menu is skipped in the selection tools' own RMB arms (the
+ * click-disambiguation clarify list stays — it is pure selection, and both
+ * menu kinds are CMENU_NOW so they cannot be told apart downstream in
+ * TOOL_MANAGER). Mouse wheel/drag zoom-pan
+ * is untouched by construction (WX_VIEW_CONTROLS binds those on the GAL
+ * panel directly, below the tool system). The collab bridge keeps working:
+ * remote peer edits apply via BOARD_COMMIT, not tool actions.
  *
  * Set from the wasm bindings (kicadSetReadOnly) for sessions with read-only
  * access (e.g. anonymous viewers on public projects). Native builds compile
