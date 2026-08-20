@@ -78,8 +78,10 @@ bool IsActionAllowed( const std::string& aActionName )
         "common.Control.highContrastModeCycle",
 
         // Tool-system plumbing: Esc, menu state refresh, and the selection
-        // tool's activation/idle loop (Selectable() already reports nothing
-        // selectable, so keeping the tool alive is inert but necessary).
+        // tool's activation/idle loop. Selection itself is ALLOWED for
+        // viewers (viewer-panels — the inspector panel reads it); the tool's
+        // mutating follow-ups (move/properties/delete) are actions this
+        // gate swallows.
         "common.Interactive.cancel",
         "common.Interactive.updateMenu",
         "common.InteractiveSelection",
