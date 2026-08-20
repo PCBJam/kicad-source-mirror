@@ -374,7 +374,12 @@ int PCB_SELECTION_TOOL::Main( const TOOL_EVENT& aEvent )
             // Show selection before opening menu
             m_frame->GetCanvas()->ForceRefresh();
 
-            if( !selectionCancelled )
+            // pcbjam WASM addition (read-only-viewer): no right-click CONTEXT
+            // menu for viewers — it offers edit entries whose actions the
+            // read-only gate silently swallows. The right-click SELECTION
+            // above (incl. the clarify list) stays — viewer-panels. Skipping
+            // the show is safe: nothing waits on this menu's outcome.
+            if( !selectionCancelled && !PCBJAM_READ_ONLY::IsReadOnly() )
             {
                 m_toolMgr->VetoContextMenuMouseWarp();
                 m_menu->ShowContextMenu( m_selection );
@@ -3605,11 +3610,13 @@ void PCB_SELECTION_TOOL::RebuildSelection()
 
 bool PCB_SELECTION_TOOL::Selectable( const BOARD_ITEM* aItem, bool checkVisibilityOnly ) const
 {
-    // pcbjam WASM addition (read-only-viewer): nothing is selectable, which
-    // also starves drag-move acquisition, double-click properties and the
-    // point editor (it wakes on selection events).
-    if( PCBJAM_READ_ONLY::IsReadOnly() )
-        return false;
+    // pcbjam WASM addition (read-only-viewer): selection stays LIVE for
+    // viewers — the shell's inspector panel reads it (viewer-panels). Every
+    // mutation downstream of a selection is still blocked: move/properties/
+    // delete dispatch TOOL_ACTIONs the TOOL_MANAGER gate swallows, the point
+    // editor has its own read-only guard (it mutates without actions), and
+    // the right-click CONTEXT menu is skipped in this tool's own RMB arm
+    // (the clarify list stays — pure selection).
 
     const RENDER_SETTINGS* settings = getView()->GetPainter()->GetSettings();
     const PCB_DISPLAY_OPTIONS& options = frame()->GetDisplayOptions();

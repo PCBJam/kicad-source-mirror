@@ -672,7 +672,12 @@ int SCH_SELECTION_TOOL::Main( const TOOL_EVENT& aEvent )
                 }
             }
 
-            if( !selCancelled )
+            // pcbjam WASM addition (read-only-viewer): no right-click CONTEXT
+            // menu for viewers — it offers edit entries whose actions the
+            // read-only gate silently swallows. The right-click SELECTION
+            // above (incl. the clarify list) stays — viewer-panels. Skipping
+            // the show is safe: nothing waits on this menu's outcome.
+            if( !selCancelled && !PCBJAM_READ_ONLY::IsReadOnly() )
                 m_menu->ShowContextMenu( m_selection );
         }
         else if( evt->IsDblClick( BUT_LEFT ) )
@@ -3628,11 +3633,13 @@ void SCH_SELECTION_TOOL::RebuildSelection()
 bool SCH_SELECTION_TOOL::Selectable( const EDA_ITEM* aItem, const VECTOR2I* aPos,
                                      bool checkVisibilityOnly ) const
 {
-    // pcbjam WASM addition (read-only-viewer): nothing is selectable, which
-    // also starves drag-move acquisition, double-click properties and the
-    // point editor (it wakes on selection events).
-    if( PCBJAM_READ_ONLY::IsReadOnly() )
-        return false;
+    // pcbjam WASM addition (read-only-viewer): selection stays LIVE for
+    // viewers — the shell's inspector panel reads it (viewer-panels). Every
+    // mutation downstream of a selection is still blocked: move/properties/
+    // delete dispatch TOOL_ACTIONs the TOOL_MANAGER gate swallows, the point
+    // editor has its own read-only guard (it mutates without actions), and
+    // the right-click CONTEXT menu is skipped in this tool's own RMB arm
+    // (the clarify list stays — pure selection).
 
     // NOTE: in the future this is where Eeschema layer/itemtype visibility will be handled
 

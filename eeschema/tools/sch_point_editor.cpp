@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <ee_grid_helper.h>
+#include <pcbjam_read_only.h>
 #include <tool/tool_manager.h>
 #include <sch_commit.h>
 #include <view/view_controls.h>
@@ -1127,6 +1128,12 @@ void SCH_POINT_EDITOR::updateEditedPoint( const TOOL_EVENT& aEvent )
 
 int SCH_POINT_EDITOR::Main( const TOOL_EVENT& aEvent )
 {
+    // pcbjam WASM addition (read-only-viewer): selection is live for viewers
+    // (inspection), but the point editor must never wake — its point drags
+    // mutate the model directly, without dispatching gated TOOL_ACTIONs.
+    if( PCBJAM_READ_ONLY::IsReadOnly() )
+        return 0;
+
     if( !m_selectionTool )
         return 0;
 

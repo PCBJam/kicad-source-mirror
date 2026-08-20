@@ -39,6 +39,7 @@ using namespace std::placeholders;
 #include <geometry/vector_utils.h>
 #include <math/util.h>
 #include <confirm.h>
+#include <pcbjam_read_only.h>
 #include <tool/tool_manager.h>
 #include <tool/point_editor_behavior.h>
 #include <tool/selection_conditions.h>
@@ -2169,6 +2170,12 @@ void PCB_POINT_EDITOR::updateEditedPoint( const TOOL_EVENT& aEvent )
 
 int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
 {
+    // pcbjam WASM addition (read-only-viewer): selection is live for viewers
+    // (inspection), but the point editor must never wake — its point drags
+    // mutate the model directly, without dispatching gated TOOL_ACTIONs.
+    if( PCBJAM_READ_ONLY::IsReadOnly() )
+        return 0;
+
     if( !m_selectionTool || aEvent.Matches( EVENTS::InhibitSelectionEditing ) )
         return 0;
 
