@@ -306,7 +306,28 @@ bool PL_EDITOR_FRAME::InsertDrawingSheetFile( const wxString& aFullFileName )
 // Implemented in the wasm layer (wasm/bindings/pl_editor_embind.cpp): notifies the
 // web app after a successful save so it can persist the MEMFS bytes. Same pattern
 // as kicadCollabOnModify in pl_editor_frame.cpp.
+extern "C" bool kicadCollabBeforeSave();
+extern "C" void kicadCollabAfterSave();
 extern "C" void kicadCollabOnSave( const char* aPath );
+
+namespace
+{
+class COLLAB_SAVE_GUARD
+{
+public:
+    COLLAB_SAVE_GUARD() : m_acquired( kicadCollabBeforeSave() ) {}
+    ~COLLAB_SAVE_GUARD()
+    {
+        if( m_acquired )
+            kicadCollabAfterSave();
+    }
+
+    explicit operator bool() const { return m_acquired; }
+
+private:
+    bool m_acquired;
+};
+}
 #endif
 
 
@@ -314,6 +335,15 @@ bool PL_EDITOR_FRAME::SaveDrawingSheetFile( const wxString& aFullFileName )
 {
     if( !aFullFileName.IsEmpty() )
     {
+#ifdef __EMSCRIPTEN__
+        // Hold the frozen projection cut from before temp-file creation until
+        // the writer/rename sequence has completed or failed.
+        COLLAB_SAVE_GUARD collabSaveGuard;
+
+        if( !collabSaveGuard )
+            return false;
+#endif
+
         wxString tempFile = wxFileName::CreateTempFileName( "pledit" );
 
         try

@@ -982,7 +982,28 @@ void SCH_EDIT_FRAME::OnImportProject()
 // Implemented in the wasm layer (wasm/bindings/eeschema_embind.cpp): notifies the
 // web app after a successful save so it can persist the MEMFS bytes. Same pattern
 // as the kicadCollabOnModify hook.
+extern "C" bool kicadCollabBeforeSave();
+extern "C" void kicadCollabAfterSave();
 extern "C" void kicadCollabOnSave( const char* aPath );
+
+namespace
+{
+class COLLAB_SAVE_GUARD
+{
+public:
+    COLLAB_SAVE_GUARD() : m_acquired( kicadCollabBeforeSave() ) {}
+    ~COLLAB_SAVE_GUARD()
+    {
+        if( m_acquired )
+            kicadCollabAfterSave();
+    }
+
+    explicit operator bool() const { return m_acquired; }
+
+private:
+    bool m_acquired;
+};
+}
 #endif
 
 
@@ -1023,6 +1044,15 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 
     if( !IsWritable( schematicFileName ) )
         return false;
+
+#ifdef __EMSCRIPTEN__
+    // Acquire before project-settings mutation and retain the cut through the
+    // schematic writer.  Destruction releases it on every return path.
+    COLLAB_SAVE_GUARD collabSaveGuard;
+
+    if( !collabSaveGuard )
+        return false;
+#endif
 
     wxFileName projectFile( schematicFileName );
 

@@ -1038,7 +1038,28 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 // Implemented in the wasm layer (wasm/bindings/pcbnew_embind.cpp): notifies the
 // web app after a successful save so it can persist the MEMFS bytes. Same pattern
 // as the kicadCollabOnModify hook.
+extern "C" bool kicadCollabBeforeSave();
+extern "C" void kicadCollabAfterSave();
 extern "C" void kicadCollabOnSave( const char* aPath );
+
+namespace
+{
+class COLLAB_SAVE_GUARD
+{
+public:
+    COLLAB_SAVE_GUARD() : m_acquired( kicadCollabBeforeSave() ) {}
+    ~COLLAB_SAVE_GUARD()
+    {
+        if( m_acquired )
+            kicadCollabAfterSave();
+    }
+
+    explicit operator bool() const { return m_acquired; }
+
+private:
+    bool m_acquired;
+};
+}
 #endif
 
 
@@ -1062,6 +1083,16 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
         DisplayError( this, msg );
         return false;
     }
+
+#ifdef __EMSCRIPTEN__
+    // Freeze the accepted Yjs projection cut before *any* save-side model or
+    // project mutation.  The guard retains it through the writer and releases
+    // it on every success, error and exception return.
+    COLLAB_SAVE_GUARD collabSaveGuard;
+
+    if( !collabSaveGuard )
+        return false;
+#endif
 
     // TODO: these will break if we ever go multi-board
     wxFileName projectFile( pcbFileName );
