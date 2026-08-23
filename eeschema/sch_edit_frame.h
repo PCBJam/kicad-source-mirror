@@ -45,6 +45,8 @@
 #include <sch_base_frame.h>
 #include <template_fieldnames.h>
 
+#include "collab_save_scope.h"
+
 class SCH_ITEM;
 class EDA_ITEM;
 class SCH_LINE;
@@ -1016,7 +1018,8 @@ private:
      * @param aSavePath is the full path of the destination file
      * @return True if the file has been saved.
      */
-    bool saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath );
+    bool saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath,
+                            const EESCHEMA_COLLAB_SAVE_SCOPE* aOuterSaveScope = nullptr );
 
     /**
      * Fill a map of uuid -> reference from the currently loaded schematic.

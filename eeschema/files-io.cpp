@@ -986,28 +986,12 @@ extern "C" bool kicadCollabBeforeSave();
 extern "C" void kicadCollabAfterSave();
 extern "C" void kicadCollabOnSave( const char* aPath );
 
-namespace
-{
-class COLLAB_SAVE_GUARD
-{
-public:
-    COLLAB_SAVE_GUARD() : m_acquired( kicadCollabBeforeSave() ) {}
-    ~COLLAB_SAVE_GUARD()
-    {
-        if( m_acquired )
-            kicadCollabAfterSave();
-    }
-
-    explicit operator bool() const { return m_acquired; }
-
-private:
-    bool m_acquired;
-};
-}
 #endif
 
 
-bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath )
+bool SCH_EDIT_FRAME::saveSchematicFile(
+        SCH_SHEET* aSheet, const wxString& aSavePath,
+        const EESCHEMA_COLLAB_SAVE_SCOPE* aOuterSaveScope )
 {
     wxString msg;
     wxFileName schematicFileName;
@@ -1046,12 +1030,17 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
         return false;
 
 #ifdef __EMSCRIPTEN__
-    // Acquire before project-settings mutation and retain the cut through the
-    // schematic writer.  Destruction releases it on every return path.
-    COLLAB_SAVE_GUARD collabSaveGuard;
+    // A direct single-sheet save owns its cut.  SaveProject passes its outer
+    // project scope so every child writer borrows the same cut; attempting a
+    // second native acquisition here would fail closed as a nested save.
+    EESCHEMA_COLLAB_SAVE_SCOPE collabSaveScope( aOuterSaveScope,
+                                                kicadCollabBeforeSave,
+                                                kicadCollabAfterSave );
 
-    if( !collabSaveGuard )
+    if( !collabSaveScope )
         return false;
+#else
+    (void) aOuterSaveScope;
 #endif
 
     wxFileName projectFile( schematicFileName );
@@ -1113,7 +1102,7 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
         // above — route it through the save hook too, or it stays MEMFS-only and
         // is lost on reload (project-sync 0001). Subsheet stems have no project
         // file, so this fires only for the root.
-        if( projectFile.FileExists() )
+        if( !aOuterSaveScope && projectFile.FileExists() )
             kicadCollabOnSave( projectFile.GetFullPath().utf8_str() );
 #endif
     }
@@ -1193,6 +1182,18 @@ bool PrepareSaveAsFiles( SCHEMATIC& aSchematic, SCH_SCREENS& aScreens,
 
 bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 {
+#ifdef __EMSCRIPTEN__
+    // One frozen projection cut covers the complete logical project save:
+    // hierarchy traversal, save-side model mutations, every sheet writer,
+    // the final sheet map/project settings write, and all persistence hooks.
+    EESCHEMA_COLLAB_SAVE_SCOPE collabSaveScope( nullptr,
+                                                kicadCollabBeforeSave,
+                                                kicadCollabAfterSave );
+
+    if( !collabSaveScope )
+        return false;
+#endif
+
     wxString msg;
     SCH_SCREEN* screen;
     SCH_SCREENS screens( Schematic().Root() );
@@ -1437,7 +1438,12 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         if( !saveCopy && tmpFn.GetFullPath() != screen->GetFileName() )
             screen->AssignNewUuid();
 
-        bool savedThisSheet = saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath() );
+        bool savedThisSheet = saveSchematicFile(
+                screens.GetSheet( i ), tmpFn.GetFullPath()
+#ifdef __EMSCRIPTEN__
+                , &collabSaveScope
+#endif
+        );
 
         if( savedThisSheet )
             savedSheetPaths.push_back( tmpFn.GetFullPath() );
@@ -1495,6 +1501,15 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         SaveProjectLocalSettings();
         saveProjectSettings();
     }
+
+#ifdef __EMSCRIPTEN__
+    // saveSchematicFile deliberately suppresses its early project callback
+    // while borrowing the project scope.  The sheet-name map and project
+    // settings above are the final .kicad_pro write, so only this callback can
+    // expose a complete project snapshot to synchronous MEMFS persistence.
+    if( success && projectPath.FileExists() )
+        kicadCollabOnSave( projectPath.GetFullPath().utf8_str() );
+#endif
 
     // Record a full project snapshot so related files (symbols, libs, sheets) are captured.
     // Skip when running standalone without a project loaded - the save path can land
