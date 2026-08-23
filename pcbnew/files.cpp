@@ -1238,6 +1238,17 @@ bool PCB_EDIT_FRAME::SavePcbCopy( const wxString& aFileName, bool aCreateProject
         return false;
     }
 
+#ifdef __EMSCRIPTEN__
+    // Save-a-Copy reads and mutates the same live native model as SavePcbFile.
+    // Retain one frozen projection cut across those mutations, the board writer,
+    // and the optional project/rules exports.  The shared guard fails closed on
+    // a nested/re-entrant save and releases the lease on every exit path.
+    COLLAB_SAVE_GUARD collabSaveGuard;
+
+    if( !collabSaveGuard )
+        return false;
+#endif
+
     // Save various DRC parameters, such as violation severities (which may have been
     // edited via the DRC dialog as well as the Board Setup dialog), DRC exclusions, etc.
     SaveProjectLocalSettings();
