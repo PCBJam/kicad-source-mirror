@@ -144,13 +144,18 @@ public:
             return;
         }
 
+#ifdef __EMSCRIPTEN__
         // State transitions before the first Run(), and duplicate IDLE
-        // transitions after a run, do not own a completion generation.
+        // transitions after a run, do not own a completion generation.  The
+        // drop is confined to the wasm build (findings E-7): native keeps
+        // upstream delivery semantics exactly; the generation stamped below
+        // is inert bookkeeping there.
         if( generation == 0 )
         {
             delete event;
             return;
         }
+#endif
 
         event->SetExtraLong( static_cast<long>( generation ) );
         wxQueueEvent( m_parent, event );
@@ -858,6 +863,9 @@ void SIMULATOR_FRAME::setupUIConditions()
 
 void SIMULATOR_FRAME::onSimStarted( wxCommandEvent& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // Generation acceptance is confined to the wasm build (findings E-7);
+    // native keeps upstream behavior exactly.
     const uint32_t generation = static_cast<uint32_t>( aEvent.GetExtraLong() );
 
     if( generation == 0 || generation != m_simRunGeneration
@@ -865,6 +873,7 @@ void SIMULATOR_FRAME::onSimStarted( wxCommandEvent& aEvent )
     {
         return;
     }
+#endif
 
     SetCursor( wxCURSOR_ARROWWAIT );
 }
@@ -874,11 +883,15 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
 {
     const uint32_t generation = static_cast<uint32_t>( aEvent.GetExtraLong() );
 
+#ifdef __EMSCRIPTEN__
+    // Generation acceptance is confined to the wasm build (findings E-7);
+    // native keeps upstream behavior exactly.
     if( generation == 0 || generation != m_simRunGeneration
             || generation <= m_lastAppliedSimRunGeneration )
     {
         return;
     }
+#endif
 
     // Sometimes (for instance with a directive like wrdata my_file.csv "my_signal")
     // the simulator is in idle state (simulation is finished), but still running, during
@@ -898,11 +911,14 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
         } while( max_time && m_simulator->IsRunning() );
     }
 
+#ifdef __EMSCRIPTEN__
     // wxYield() above can dispatch an update which starts a newer run.  The
     // older finish event must not apply or publish the newer run's state.
+    // (Wasm-only, findings E-7 — native keeps upstream behavior exactly.)
     if( generation != m_simRunGeneration
             || generation <= m_lastAppliedSimRunGeneration )
         return;
+#endif
 
     // ensure the shown cursor is the default cursor, not the wxCURSOR_ARROWWAIT set when
     // staring the simulator in onSimStarted:
