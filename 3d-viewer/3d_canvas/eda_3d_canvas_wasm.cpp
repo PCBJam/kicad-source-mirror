@@ -160,7 +160,18 @@ void EDA_3D_CANVAS::blitRaytracerImage()
 
     // Draw it across the whole canvas. Reset any GL state left bound by other
     // rendering so the quad actually reaches the visible default framebuffer.
+    // The client-array disables matter on the wasm/gl1 stack: an interrupted
+    // fixed-function window (e.g. the MODEL_3D::BeginDrawMulti loops, which
+    // enable GL_VERTEX_ARRAY across per-model draws) can leave the shim's
+    // routing flag set, and a set flag makes the shim treat THIS quad's
+    // glDrawArrays as FFP traffic — misrouted through stale attribute state
+    // instead of the blit program. FFP draws re-enable per draw, so clearing
+    // here needs no restore.
     const wxSize clientSize = GetNativePixelSize();
+    glDisableClientState( GL_VERTEX_ARRAY );
+    glDisableClientState( GL_NORMAL_ARRAY );
+    glDisableClientState( GL_COLOR_ARRAY );
+    glDisableClientState( GL_TEXTURE_COORD_ARRAY );
     glBindFramebuffer( GL_FRAMEBUFFER, 0 );
     glViewport( 0, 0, clientSize.x, clientSize.y );
     glDisable( GL_DEPTH_TEST );
