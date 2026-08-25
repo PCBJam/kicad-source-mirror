@@ -144,6 +144,15 @@ void EDA_3D_CANVAS::blitRaytracerImage()
         glEnableVertexAttribArray( 0 );
         glVertexAttribPointer( 0, 2, GL_FLOAT, GL_FALSE, 0, nullptr );
         glBindVertexArray( 0 );
+        // CRITICAL: GL_ARRAY_BUFFER is NOT VAO state — unbinding the VAO leaves
+        // the quad VBO bound. GL1 semantics make the next FFP gl*Pointer call
+        // capture its client-memory pointer as an OFFSET into whatever
+        // GL_ARRAY_BUFFER is bound, so a leaked binding here poisons the
+        // display lists the OpenGL engine records on the raytracing->OpenGL
+        // switch-back (heap addresses baked in as offsets into a 48-byte quad
+        // buffer -> INVALID_OPERATION on every draw -> permanently blank
+        // viewer until the canvas is recreated).
+        glBindBuffer( GL_ARRAY_BUFFER, 0 );
 
         glGenTextures( 1, &m_rtBlitTexture );
     }
