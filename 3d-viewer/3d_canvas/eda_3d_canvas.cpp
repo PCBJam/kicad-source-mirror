@@ -420,7 +420,12 @@ void EDA_3D_CANVAS::DoRePaint()
     // This is dependent of the platform.
     // Especially on OSX, but also on Windows, it frequently happens
     if( !GetParent()->GetParent()->IsShownOnScreen() )
+    {
+        // Clear the latch like every other early return does — leaving it set
+        // blocks all future repaints of this canvas permanently.
+        m_is_currently_painting.clear();
         return; // The parent board editor frame is no more alive
+    }
 
     wxString            err_messages;
     INFOBAR_REPORTER    warningReporter( m_parentInfoBar );
