@@ -336,6 +336,14 @@ void FOOTPRINT_LIBRARY_ADAPTER::RefreshLibraryIfChanged( const wxString& aNickna
 }
 
 
+void FOOTPRINT_LIBRARY_ADAPTER::InvalidatePreloaded( const wxString& aNickname )
+{
+    std::unique_lock lock( PreloadedFootprintsMutex );
+    PreloadedFootprints.Get().erase( aNickname );
+    m_preloadedTimestamps.erase( aNickname );
+}
+
+
 bool FOOTPRINT_LIBRARY_ADAPTER::FootprintExists( const wxString& aNickname, const wxString& aName )
 {
     if( std::optional<const LIB_DATA*> maybeLib = fetchIfLoaded( aNickname ) )

@@ -86,6 +86,15 @@ public:
      */
     void RefreshLibraryIfChanged( const wxString& aNickname );
 
+    /**
+     * Drop the parsed copies of one library from PreloadedFootprints (and its recorded
+     * timestamp) so the next tree access / LoadFootprint re-reads the plugin. For
+     * providers whose GetLibraryTimestamp() is a constant (network-backed libraries)
+     * RefreshLibraryIfChanged() can never notice a change; the host calls this when it
+     * knows the library moved (pcbjam wasm port: a collaborator's remote edit).
+     */
+    void InvalidatePreloaded( const wxString& aNickname );
+
     bool FootprintExists( const wxString& aNickname, const wxString& aName );
 
     /**
