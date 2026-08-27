@@ -213,6 +213,13 @@ static char* pcbjam_libs_request_dispatch( const char* aOp, const char* aLib, co
             return nullptr;   // converter diet: no wait registry, no provider
 
         const int token = wxWasmBeginWait( "lib" );
+
+        // Token 0 = the scheduler refused the wait (dead or terminal
+        // instance): never start a request whose completion could not be
+        // admitted.
+        if( token <= 0 )
+            return nullptr;
+
         pcbjam_libs_request_start( token, aOp, aLib, aArg, aKind );
 
         // The result is the malloc'd pointer, carried through the wait as an
