@@ -167,6 +167,13 @@ static char* pcbjam_3d_request_dispatch( const char* aOp, const char* aLib, cons
     if( emscripten_is_main_runtime_thread() )
     {
         const int token = wxWasmBeginWait( "3d" );
+
+        // Token 0 = the scheduler refused the wait (dead or terminal
+        // instance): never start a request whose completion could not be
+        // admitted. nullptr is the "no model" shape.
+        if( token <= 0 )
+            return nullptr;
+
         pcbjam_3d_request_start( token, aOp, aLib, aArg, aKind );
 
         // The result is the malloc'd pointer, carried through the wait as an

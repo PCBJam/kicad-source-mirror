@@ -66,6 +66,10 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+
+// wasm/stubs/sharedspice_client.cpp — the browser harness's final-refresh
+// receipt (findings E-7).
+extern "C" void pcbjam_sim_run_applied( uint32_t aGeneration );
 #endif
 
 
@@ -136,6 +140,19 @@ public:
             // an old run finishes after the next Run() was requested but before
             // its RUNNING transition, this event still carries the old token.
             generation = m_activeRunGeneration.exchange( 0, std::memory_order_acq_rel );
+
+#ifdef __EMSCRIPTEN__
+            // A crash exit can deliver IDLE before its RUNNING ever fired
+            // (ControlledExit on an early fatal error — cbBGThreadRunning may
+            // never fire); that owned run's only completion must not be
+            // swallowed by the unowned-event drop below.  Fall back to the
+            // launch's pending token.  (Wasm-only, findings E-12 — native
+            // keeps upstream delivery exactly; pre-first-run and duplicate
+            // IDLE transitions still read 0 from both counters.)
+            if( generation == 0 )
+                generation = m_pendingRunGeneration.exchange( 0, std::memory_order_acq_rel );
+#endif
+
             event = new wxCommandEvent( EVT_SIM_FINISHED );
             break;
 
@@ -938,24 +955,10 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
     m_lastAppliedSimRunGeneration = generation;
 
 #ifdef __EMSCRIPTEN__
-    // This is deliberately after every final native refresh.  The browser
-    // harness uses it as exact completion evidence; it is optional in the
-    // application and has no mainline/native behavior.
-    EM_ASM( {
-        const hook = globalThis.__pcbjamNgspiceFinalRefreshApplied;
-
-        if( typeof hook === 'function' )
-        {
-            try
-            {
-                hook( $0 >>> 0 );
-            }
-            catch( error )
-            {
-                console.error( '[ngspice] final-refresh hook failed', error );
-            }
-        }
-    }, generation );
+    // Final-refresh receipt (findings E-7) — deliberately after every final
+    // native refresh; implemented in wasm/stubs/sharedspice_client.cpp.
+    // Optional test evidence, no mainline/native behavior.
+    pcbjam_sim_run_applied( generation );
 #endif
 }
 
@@ -967,7 +970,23 @@ void SIMULATOR_FRAME::runSimulator()
     m_simRunGeneration = allocateSimRunGeneration();
 
     m_reporter->SetRunGeneration( m_simRunGeneration );
+
+#ifdef __EMSCRIPTEN__
+    // A failed launch emits no RUNNING/IDLE, so nothing later would clear the
+    // busy state — and a stale pending token would let some future unrelated
+    // IDLE mis-deliver this launch's completion through the crash-exit
+    // fallback above.  Withdraw the token and reset the cursor explicitly.
+    // (Wasm-only, findings E-13 — native keeps upstream behavior exactly.
+    // Publishing m_simRunGeneration BEFORE Run() must stay: under JSPI the
+    // run's own events can dispatch while Run() is still parked in the rpc.)
+    if( !m_simulator->Run() )
+    {
+        m_reporter->SetRunGeneration( 0 );
+        SetCursor( wxNullCursor );
+    }
+#else
     m_simulator->Run();
+#endif
 }
 
 
