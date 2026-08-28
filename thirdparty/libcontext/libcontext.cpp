@@ -203,6 +203,9 @@ EM_ASYNC_JS( int, js_libctx_start, ( int id, int vp ), {
         ( e ) => {
             console.warn( '[libctx-jspi] coroutine ' + id + ' entry REJECTED: '
                           + ( e && e.stack ? e.stack : e ) );
+            // The activation is a corpse: flag the record dead BEFORE the
+            // enterer wakes so its CanResume() already reads false.
+            _pcbjam_libctx_entry_rejected( id );
             if( st.yielded ) st.yielded.r( -1 );
         } );
     // Turnstile integration (jspi-scheduler.js, when present): the CALLER's
@@ -350,6 +353,27 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_make_current( int id )
 {
     wasm_fcontext* c = id > 0 ? find_by_id( id ) : nullptr;
     g_current = c ? c : &g_root;
+}
+
+// Entry-activation rejection: the promising entry's promise REJECTED (a JS
+// exception thrown out of an EM_ASM callback inside the body, or a trap). The
+// body never reaches its finishing yield, so without this the record reads as
+// "parked" forever and COROUTINE::CanResume() keeps saying yes to a resume that
+// can never come — an owner waiting on it (the collab apply slot, findings P-1)
+// wedges for the page's life. Mark the corpse so owners can reap it.
+extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_entry_rejected( int id )
+{
+    wasm_fcontext* c = find_by_id( id );
+
+    if( !c || c->finished || c->dead )
+        return;
+
+    c->dead = true;
+
+    if( g_current == c )
+        g_current = &g_root;
+
+    js_libctx_beacon( g_ghost_jumps, ++g_dead_parked, c->id, 5 /* entry-rejected */ );
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void pcbjam_libctx_entry( int id, intptr_t vp )
