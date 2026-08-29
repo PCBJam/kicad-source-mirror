@@ -129,6 +129,13 @@ bool IsActionAllowed( const std::string& aActionName )
         "3DViewer.Control.showNavigator",
         "3DViewer.Control.showLayersManager",
 
+        // Sheet navigation (eeschema SCH_NAVIGATE_TOOL): changes which sheet
+        // is SHOWN, never the document — the floating sheet panel and the
+        // wx hierarchy pane both dispatch changeSheet (sheet-panel).
+        "eeschema.NavigateTool.changeSheet",
+        "eeschema.NavigateTool.enterSheet",
+        "eeschema.NavigateTool.leaveSheet",
+
         "common.Interactive.cancel",
         "common.Interactive.updateMenu",
         "common.InteractiveSelection",
