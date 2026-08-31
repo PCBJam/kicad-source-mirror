@@ -323,6 +323,17 @@ public:
     // Allows subclasses to nominate a context menu handler.
     virtual TOOL_INTERACTIVE* GetContextMenuTool() { return nullptr; }
 
+    /**
+     * Hook invoked just before a tree node is expanded (by LIB_TREE).
+     *
+     * Adapters that populate their contents lazily can override this to fill in
+     * the item's children on demand. The default does nothing (children are
+     * assumed to be already present). It runs synchronously before the control
+     * builds the node's child rows, so any children added here become visible
+     * as part of the same expand.
+     */
+    virtual void OnExpanding( const wxDataViewItem& aItem ) {}
+
     void PinLibrary( LIB_TREE_NODE* aTreeNode );
     void UnpinLibrary( LIB_TREE_NODE* aTreeNode );
 

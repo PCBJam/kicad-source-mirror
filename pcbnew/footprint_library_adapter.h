@@ -86,6 +86,15 @@ public:
      */
     void RefreshLibraryIfChanged( const wxString& aNickname );
 
+    /**
+     * Drop the parsed copies of one library from PreloadedFootprints (and its recorded
+     * timestamp) so the next tree access / LoadFootprint re-reads the plugin. For
+     * providers whose GetLibraryTimestamp() is a constant (network-backed libraries)
+     * RefreshLibraryIfChanged() can never notice a change; the host calls this when it
+     * knows the library moved (pcbjam wasm port: a collaborator's remote edit).
+     */
+    void InvalidatePreloaded( const wxString& aNickname );
+
     bool FootprintExists( const wxString& aNickname, const wxString& aName );
 
     /**
@@ -179,6 +188,15 @@ protected:
     std::shared_mutex& globalLibsMutex() const override { return GlobalLibraryMutex; }
 
     void enumerateLibrary( LIB_DATA* aLib, const wxString& aUri ) override;
+
+    /**
+     * Parse every footprint in one library into PreloadedFootprints.  This is the eager work
+     * that enumerateLibrary() used to do for the bulk async preload; it is now invoked lazily
+     * (GetFootprints() on first access, RefreshLibraryIfChanged() on a disk change) so the
+     * WASM port doesn't enumerate all ~222 network-backed libraries on the main thread at
+     * startup.  Idempotent: skips libraries already present in PreloadedFootprints.
+     */
+    void preloadLibrary( const LIB_DATA* aLib, const wxString& aUri );
 
     LIBRARY_RESULT<IO_BASE*> createPlugin( const LIBRARY_TABLE_ROW* row ) override;
 

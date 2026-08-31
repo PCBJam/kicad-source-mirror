@@ -27,10 +27,13 @@ set(3D-VIEWER_SRCS
     3d_cache/3d_cache.cpp
     3d_cache/3d_plugin_manager.cpp
     3d_cache/model_substitution_helpers.cpp
+    $<$<BOOL:${EMSCRIPTEN}>:3d_cache/pcbjam_static_3d_plugins.cpp>
+    $<$<BOOL:${EMSCRIPTEN}>:3d_cache/pcbjam_model_fetch.cpp>
     3d_canvas/board_adapter.cpp
     3d_canvas/create_layer_items.cpp
     3d_canvas/create_3Dgraphic_brd_items.cpp
     3d_canvas/eda_3d_canvas.cpp
+    $<$<BOOL:${EMSCRIPTEN}>:3d_canvas/eda_3d_canvas_wasm.cpp>
     3d_canvas/eda_3d_canvas_pivot.cpp
     3d_model_viewer/eda_3d_model_viewer.cpp
     3d_rendering/opengl/3d_model.cpp
@@ -47,7 +50,7 @@ set(3D-VIEWER_SRCS
     ${DIR_RAY}/PerlinNoise.cpp
     ${DIR_RAY}/create_scene.cpp
     ${DIR_RAY}/render_3d_raytrace_base.cpp
-    ${DIR_RAY}/render_3d_raytrace_gl.cpp
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:${DIR_RAY}/render_3d_raytrace_gl.cpp>
     ${DIR_RAY}/render_3d_raytrace_ram.cpp
     ${DIR_RAY}/frustum.cpp
     ${DIR_RAY}/material.cpp
@@ -134,6 +137,21 @@ target_link_libraries( 3d-viewer
         ${wxWidgets_LIBRARIES}
         ${OPENGL_LIBRARIES}
         kicad_3dsg )
+
+if( EMSCRIPTEN )
+    # No dlopen in WASM: the 3D format plugins are static archives consumed by
+    # pcbjam_static_3d_plugins.cpp (PUBLIC so the final link pulls them in).
+    if( KICAD_OCC_SERVICE_WASM )
+        # The occ_service tree links the real OCC-backed loader.
+        target_link_libraries( 3d-viewer PUBLIC s3d_plugin_vrml s3d_plugin_oce )
+    else()
+        # The editor carries no OCC: the oce3d_* surface is satisfied by the
+        # occ_service bridge shadow (superproject wasm/stubs/oce_plugin_stub.cpp,
+        # appended to PCBNEW_WASM_STUBS) — .step/.iges models parse in the
+        # worker (docs/features/occ-split/).
+        target_link_libraries( 3d-viewer PUBLIC s3d_plugin_vrml )
+    endif()
+endif()
 
 add_subdirectory( 3d_cache )
 

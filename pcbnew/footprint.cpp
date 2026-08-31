@@ -181,6 +181,16 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
             ptrMap[field] = existingField;
             *existingField = *field;
             existingField->SetParent( this );
+
+            // The mandatory fields already exist (the ctor above created them, each with a
+            // fresh KIID), so they are ASSIGNED rather than copy-constructed — and
+            // EDA_ITEM::operator= deliberately does not touch the const m_Uuid. Without this
+            // the four mandatory fields silently get NEW uuids on every FOOTPRINT::Clone(),
+            // while pads, zones, drawings and user fields (which go through the copy ctor,
+            // eda_item.cpp `m_Uuid( base.m_Uuid )`) keep theirs. Anything keyed by uuid — our
+            // collab wire, undo/redo bookkeeping, cross-references — sees those four fields
+            // vanish and reappear under new ids.
+            const_cast<KIID&>( existingField->m_Uuid ) = field->m_Uuid;
         }
         else
         {

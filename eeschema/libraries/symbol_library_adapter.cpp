@@ -70,9 +70,18 @@ SCH_IO* SYMBOL_LIBRARY_ADAPTER::schplugin( const LIB_DATA* aRow )
 
 void SYMBOL_LIBRARY_ADAPTER::enumerateLibrary( LIB_DATA* aLib, const wxString& aUri )
 {
-    wxArrayString dummyList;
-    std::map<std::string, UTF8> options = aLib->row->GetOptionsMap();
-    schplugin( aLib )->EnumerateSymbolLib( dummyList, aUri, &options );
+    // Lazy load: the bulk async preload (LIBRARY_MANAGER_ADAPTER::AsyncLoad) calls this
+    // hook to warm each library's plugin cache up front. For the WASM port's
+    // network-backed (pcbjam/CDN) libraries that turns startup into hundreds of
+    // serialized, main-thread-blocking fetches — the full ~222-library KiCad set left
+    // the symbol tree empty for minutes and a library's '+' expander did nothing because
+    // the UI thread was saturated. Skip eager enumeration here and let a library's
+    // symbols be fetched on demand: on first chooser/editor access (LoadOne(), which
+    // still enumerates) or on symbol-tree expansion
+    // (SYMBOL_TREE_SYNCHRONIZING_ADAPTER::OnExpanding -> SYMBOL_LIBRARY_MANAGER::EnumerateSymbols).
+    wxLogTrace( traceLibraries, "Sym: %s: plugin ready (lazy enumerate)", aLib->row->Nickname() );
+
+    (void) aUri;
 }
 
 

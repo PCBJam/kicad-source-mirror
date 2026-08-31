@@ -1034,6 +1034,14 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/pcbnew_embind.cpp): notifies the
+// web app after a successful save so it can persist the MEMFS bytes. Same pattern
+// as the kicadCollabOnModify hook.
+extern "C" void kicadCollabOnSave( const char* aPath );
+#endif
+
+
 bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
                                   bool aChangeProject )
 {
@@ -1170,6 +1178,17 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     m_autoSavePending = false;
     m_autoSaveRequired = false;
+
+#ifdef __EMSCRIPTEN__
+    kicadCollabOnSave( pcbFileName.GetFullPath().utf8_str() );
+
+    // The project settings (netclasses, DRC exclusions, board setup) were written
+    // above when the project file exists — route that file through the save hook
+    // too, or it stays MEMFS-only and is lost on reload (project-sync 0001).
+    if( projectFile.FileExists() )
+        kicadCollabOnSave( projectFile.GetFullPath().utf8_str() );
+#endif
+
     return true;
 }
 

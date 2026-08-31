@@ -142,8 +142,16 @@ void SYMBOL_TREE_SYNCHRONIZING_ADAPTER::Sync( const wxString& aForceRefresh,
             bool pinned = alg::contains( cfg->m_Session.pinned_symbol_libs, libName )
                             || alg::contains( project.m_PinnedSymbolLibs, libName );
 
-            LIB_TREE_NODE_LIBRARY& lib_node = DoAddLibraryNode( libName, ( *optRow )->Description(), pinned );
+            LIB_TREE_NODE_LIBRARY& lib_node =
+                    DoAddLibraryNode( libName, ( *optRow )->Description(), pinned );
 
+            // Eager: enumerate this library's symbols into the tree now (via the
+            // fast fatLoad in the pcbjam plugin), so the symbol editor's filter
+            // searches across ALL libraries — the lazy per-expand load lost that
+            // global search (docs/features/libs/0013). The boot-time bulk preload
+            // (SYMBOL_LIBRARY_ADAPTER::enumerateLibrary) stays a no-op, so this is
+            // the single place the full set is enumerated, on symbol-editor tree
+            // build (covered by the React load overlay).
             updateLibrary( lib_node );
         }
     }

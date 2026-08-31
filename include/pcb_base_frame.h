@@ -69,6 +69,7 @@ class SPNAV_2D_PLUGIN;
 class NL_PCBNEW_PLUGIN;
 #endif
 
+#if wxUSE_FSWATCHER
 #ifdef wxHAS_INOTIFY
 #define wxFileSystemWatcher wxInotifyFileSystemWatcher
 #elif defined( wxHAS_KQUEUE ) && defined( wxHAVE_FSEVENTS_FILE_NOTIFICATIONS )
@@ -83,6 +84,7 @@ class NL_PCBNEW_PLUGIN;
 
 class wxFileSystemWatcher;
 class wxFileSystemWatcherEvent;
+#endif // wxUSE_FSWATCHER
 
 wxDECLARE_EVENT( EDA_EVT_BOARD_CHANGING, wxCommandEvent );
 wxDECLARE_EVENT( EDA_EVT_BOARD_CHANGED, wxCommandEvent );
@@ -387,6 +389,7 @@ public:
      */
     void RemoveBoardChangeListener( wxEvtHandler* aListener );
 
+#if wxUSE_FSWATCHER
     /**
      * Handler for FP change events.  Responds to the filesystem watcher set in #setFPWatcher.
     */
@@ -396,6 +399,7 @@ public:
      * Handler for the filesystem watcher debounce timer.
      */
     void OnFpChangeDebounceTimer( wxTimerEvent& aEvent );
+#endif
 
     void GetLibraryItemsForListDialog( wxArrayString& aHeaders,
                                        std::vector<wxArrayString>& aItemsToDisplay );
@@ -443,11 +447,13 @@ private:
     std::unique_ptr<NL_PCBNEW_PLUGIN>    m_spaceMouse;
 #endif
 
+#if wxUSE_FSWATCHER
     std::unique_ptr<wxFileSystemWatcher> m_watcher;
     wxFileName                           m_watcherFileName;
     wxDateTime                           m_watcherLastModified;
     wxTimer                              m_watcherDebounceTimer;
     bool                                 m_inFpChangeTimerEvent;
+#endif
 };
 
 #endif  // PCB_BASE_FRAME_H

@@ -413,7 +413,9 @@ protected:
     std::unique_ptr<BACKGROUND_JOBS_MONITOR> m_background_jobs_monitor;
     std::unique_ptr<NOTIFICATIONS_MANAGER> m_notifications_manager;
 
+#ifdef KICAD_SCRIPTING
     std::unique_ptr<SCRIPTING> m_python_scripting;
+#endif
 
     /// Check if there is another copy of Kicad running at the same time.
     std::unique_ptr<wxSingleInstanceChecker> m_pgm_checker;

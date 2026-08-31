@@ -76,6 +76,7 @@
 #include <gendrill_gerber_writer.h>
 #include <kiface_base.h>
 #include <macros.h>
+#include <string_utils.h>
 #include <pad.h>
 #include <pcb_marker.h>
 #include <project/project_file.h>
@@ -90,8 +91,10 @@
 #include <pcb_edit_frame.h>
 #include <pcb_track.h>
 #include <pgm_base.h>
+#ifndef __EMSCRIPTEN__
 #include <3d_rendering/raytracing/render_3d_raytrace_ram.h>
 #include <3d_rendering/track_ball.h>
+#endif
 #include <project_pcb.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <reporter.h>
@@ -143,6 +146,7 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
                   DIALOG_EXPORT_STEP dlg( editFrame, aParent, "", svgJob );
                   return dlg.ShowModal() == wxID_OK;
               } );
+#ifndef __EMSCRIPTEN__
     Register( "render",
               std::bind( &PCBNEW_JOBS_HANDLER::JobExportRender, this, std::placeholders::_1 ),
               []( JOB* job, wxWindow* aParent ) -> bool
@@ -154,6 +158,7 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
                   DIALOG_RENDER_JOB dlg( aParent, renderJob );
                   return dlg.ShowModal() == wxID_OK;
               } );
+#endif
     Register( "upgrade", std::bind( &PCBNEW_JOBS_HANDLER::JobUpgrade, this, std::placeholders::_1 ),
               []( JOB* job, wxWindow* aParent ) -> bool
               {
@@ -651,6 +656,7 @@ int PCBNEW_JOBS_HANDLER::JobExportStep( JOB* aJob )
 }
 
 
+#ifndef __EMSCRIPTEN__
 int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
 {
     JOB_PCB_RENDER* aRenderJob = dynamic_cast<JOB_PCB_RENDER*>( aJob );
@@ -929,6 +935,7 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
     }
 }
+#endif  // __EMSCRIPTEN__
 
 
 int PCBNEW_JOBS_HANDLER::JobExportSvg( JOB* aJob )

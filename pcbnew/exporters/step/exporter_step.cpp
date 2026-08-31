@@ -58,6 +58,12 @@
 
 #include <wx/crt.h>
 #include <wx/log.h>
+
+#ifdef __EMSCRIPTEN__
+// pcbjam: staged-model probe for refs the resolver can't expand in the wasm
+// runtime (this TU is compiled only into the occ_service worker there).
+#include <3d_cache/pcbjam_model_fetch.h>
+#endif
 #include <wx/tokenzr.h>
 #include <core/profile.h>        // To use GetRunningMicroSecs or another profiling utility
 
@@ -582,6 +588,20 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
 
         wxString mainPath = m_resolver->ResolvePath( fp_model.m_Filename, footprintBasePath,
                                                      embeddedFilesStack );
+
+#ifdef __EMSCRIPTEN__
+        // pcbjam: ${KICAD*_3DMODEL_DIR} refs never resolve in the wasm runtime
+        // (env expansion is broken there, and this worker has no lib files of
+        // its own) — the export request stages the board's model bodies under
+        // the shared MEMFS model root up front; probe it on a resolver miss.
+        if( mainPath.empty() || !wxFileName::FileExists( mainPath ) )
+        {
+            const wxString staged = PCBJAM_3D::FindStagedModel( fp_model.m_Filename );
+
+            if( !staged.empty() )
+                mainPath = staged;
+        }
+#endif
 
         if( mainPath.empty() || !wxFileName::FileExists( mainPath ) )
         {

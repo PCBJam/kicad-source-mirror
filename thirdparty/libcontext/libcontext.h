@@ -22,7 +22,17 @@
 #include <cstdio>
 
 
-#if defined(__GNUC__) || defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(__EMSCRIPTEN__)
+    // WebAssembly/Emscripten: the JSPI backend — each coroutine is a
+    // WebAssembly.promising activation. The engine manages the native stacks
+    // and the backend allocates the C spill region itself, so the caller must
+    // NOT allocate a stack.
+    #define LIBCONTEXT_HAS_OWN_STACK
+    #define LIBCONTEXT_COMPILER_gcc
+    #define LIBCONTEXT_PLATFORM_wasm32
+    #define LIBCONTEXT_CALL_CONVENTION
+
+#elif defined(__GNUC__) || defined(__APPLE__) || defined(__FreeBSD__)
 
     #undef LIBCONTEXT_HAS_OWN_STACK
 
@@ -115,6 +125,20 @@ intptr_t LIBCONTEXT_CALL_CONVENTION jump_fcontext( fcontext_t* ofc, fcontext_t n
         intptr_t vp, bool preserve_fpu = true );
 fcontext_t LIBCONTEXT_CALL_CONVENTION make_fcontext( void* sp, size_t size,
         void (* fn)( intptr_t ) );
+
+#if defined(__EMSCRIPTEN__)
+// JSPI backend only: the coroutine entry (COROUTINE::callerStub) calls this
+// right before its FINAL jump back to the caller. It tells the backend that
+// the next yield is a completion: instead of suspending the activation forever
+// (leaking its engine-managed stack), the backend resolves the caller and lets
+// the entry export return, completing the activation.
+void LIBCONTEXT_CALL_CONVENTION finish_fcontext( fcontext_t ctx );
+#endif
+
+// Liveness probe: false when the context is known-dead (released while
+// suspended mid-body, or finished). Backends without liveness tracking
+// (all native ones) return true for any non-null handle.
+bool LIBCONTEXT_CALL_CONVENTION context_alive( fcontext_t ctx );
 
 #ifdef __cplusplus
 }    // namespace

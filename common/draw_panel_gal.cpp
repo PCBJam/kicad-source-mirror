@@ -38,7 +38,11 @@
 #include <base_screen.h>
 #include <gal/cursors.h>
 #include <gal/graphics_abstraction_layer.h>
+#ifdef __EMSCRIPTEN__
+#include <gal/webgl/webgl_gal.h>
+#else
 #include <gal/opengl/opengl_gal.h>
+#endif
 #include <gal/cairo/cairo_gal.h>
 #include <math/vector2wx.h>
 
@@ -222,8 +226,13 @@ bool EDA_DRAW_PANEL_GAL::recoverFromGalError( const std::exception& aError )
             m_glRecoveryAttempted = false;
             SwitchBackend( GAL_FALLBACK );
 
+#ifndef __EMSCRIPTEN__
+            // WASM: Cairo is the expected, unavoidable fallback and this dialog
+            // would pop on every preview render (and wedge the app over a modal
+            // chooser), so fall back silently. Native keeps the notification.
             DisplayInfoMessage( m_parent, _( "Could not use OpenGL, falling back to software rendering" ),
                                 wxString( aError.what() ) );
+#endif
 
             StartDrawing();
             return true;
@@ -536,7 +545,14 @@ bool EDA_DRAW_PANEL_GAL::GetScreenshot( wxImage& aDstImage )
 
     DoRePaint( false );
 
+#ifndef __EMSCRIPTEN__
     return static_cast<KIGFX::OPENGL_GAL*>( m_gal )->GetScreenshot( aDstImage );
+#else
+    // The WASM/WebGL GAL has no GetScreenshot(); canvas readback is done on the JS
+    // side (preserveDrawingBuffer + drawImage→2D→getImageData), so this path is unused.
+    (void) aDstImage;
+    return false;
+#endif
 }
 
 
@@ -607,6 +623,11 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
         {
         case GAL_TYPE_OPENGL:
         {
+#ifdef __EMSCRIPTEN__
+            // Use WebGL GAL for Emscripten builds (pure WebGL 2.0, no LEGACY_GL_EMULATION)
+            new_gal = new KIGFX::WEBGL_GAL( GetVcSettings(), m_options, this, this, this );
+#else
+            // Use OpenGL GAL for native builds
             wxString errormsg = KIGFX::OPENGL_GAL::CheckFeatures( m_options );
 
             if( errormsg.empty() )
@@ -630,6 +651,7 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
                     DisplayInfoMessage( m_parent, _( "Could not use OpenGL" ), errormsg );
                 }
             }
+#endif
 
             break;
         }
@@ -818,7 +840,13 @@ KIGFX::VC_SETTINGS EDA_DRAW_PANEL_GAL::GetVcSettings()
     COMMON_SETTINGS* cfg = Pgm().GetCommonSettings();
 
     KIGFX::VC_SETTINGS vcSettings;
+#ifdef __EMSCRIPTEN__
+    // Browsers can't warp the OS pointer; use zoom-to-cursor instead of
+    // center-on-zoom (see WX_VIEW_CONTROLS::LoadSettings).
+    vcSettings.m_warpCursor = false;
+#else
     vcSettings.m_warpCursor = cfg->m_Input.center_on_zoom;
+#endif
     vcSettings.m_focusFollowSchPcb = cfg->m_Input.focus_follow_sch_pcb;
     vcSettings.m_autoPanSettingEnabled = cfg->m_Input.auto_pan;
     vcSettings.m_autoPanAcceleration = cfg->m_Input.auto_pan_acceleration;

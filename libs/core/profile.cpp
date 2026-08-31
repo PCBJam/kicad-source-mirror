@@ -70,4 +70,13 @@ int64_t GetRunningMicroSecs()
     return (int64_t) tv.tv_sec * 1000000 + tv.tv_usec;
 }
 
+#elif defined( __EMSCRIPTEN__ )
+
+#include <emscripten.h>
+int64_t GetRunningMicroSecs()
+{
+    // emscripten_get_now() returns milliseconds as a double
+    return (int64_t)( emscripten_get_now() * 1000.0 );
+}
+
 #endif

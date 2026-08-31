@@ -39,6 +39,7 @@
 
 #include <math/vector2wx.h>
 
+#include <pcbjam_read_only.h>
 #include <view/view.h>
 #include <view/view_controls.h>
 #include <eda_base_frame.h>
@@ -778,6 +779,21 @@ bool TOOL_MANAGER::dispatchInternal( TOOL_EVENT& aEvent )
         // the tool state handler is waiting for events (i.e. called Wait() method)
         if( st && st->cofunc && st->pendingWait && st->waitEvents.Matches( aEvent ) )
         {
+            if( !st->cofunc->CanResume() )
+            {
+                // The coroutine's context died while parked (destroyed
+                // mid-wait): resuming would be refused, but the branch below
+                // would still consume the event and tear down the wait —
+                // swallowing it for every live tool behind us. Skip the
+                // corpse; the event flows on.
+                wxLogTrace( kicadTraceToolStack,
+                            wxS( "TOOL_MANAGER::dispatchInternal - tool %s wait context is "
+                                 "dead; skipping" ),
+                            st->theTool->GetName() );
+                ++it;
+                continue;
+            }
+
             if( !aEvent.FirstResponder() )
                 aEvent.SetFirstResponder( st->theTool );
 
@@ -1179,6 +1195,21 @@ void TOOL_MANAGER::applyViewControls( const TOOL_STATE* aState )
 bool TOOL_MANAGER::processEvent( const TOOL_EVENT& aEvent )
 {
     wxLogTrace( kicadTraceToolStack, wxS( "TOOL_MANAGER::processEvent - %s" ), aEvent.Format() );
+
+    // pcbjam WASM addition (read-only-viewer): every action execution funnels
+    // through here — hotkeys re-enter as TA_ACTION via DispatchHotKey/RunHotKey,
+    // menus dispatch through ACTION_MENU::OnMenuEvent → ProcessEvent, and direct
+    // RunAction calls (e.g. the selection tools' drag-to-move) land here via
+    // doRunAction. In read-only mode swallow everything but the view-only
+    // allowlist; raw key/mouse events (non-TC_COMMAND) pass through untouched.
+    if( PCBJAM_READ_ONLY::IsReadOnly()
+            && aEvent.Category() == TC_COMMAND
+            && ( aEvent.Action() == TA_ACTION || aEvent.Action() == TA_ACTIVATE
+                 || aEvent.Action() == TA_REACTIVATE )
+            && !PCBJAM_READ_ONLY::IsActionAllowed( aEvent.getCommandStr() ) )
+    {
+        return false;
+    }
 
     // First try to dispatch the action associated with the event if it is a key press event
     bool handled = DispatchHotKey( aEvent );

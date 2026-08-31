@@ -204,6 +204,7 @@ LIB_TREE::LIB_TREE( wxWindow* aParent, const wxString& aRecentSearchesKey,
     SetSizer( sizer );
 
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_ITEM_ACTIVATED, &LIB_TREE::onTreeActivate, this );
+    m_tree_ctrl->Bind( wxEVT_DATAVIEW_ITEM_EXPANDING, &LIB_TREE::onTreeExpanding, this );
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_SELECTION_CHANGED, &LIB_TREE::onTreeSelect, this );
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_ITEM_CONTEXT_MENU, &LIB_TREE::onItemContextMenu, this );
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_COLUMN_HEADER_RIGHT_CLICK, &LIB_TREE::onHeaderContextMenu,
@@ -932,6 +933,19 @@ void LIB_TREE::onTreeSelect( wxDataViewEvent& aEvent )
         updateRecentSearchMenu();
 
     postPreselectEvent();
+}
+
+
+void LIB_TREE::onTreeExpanding( wxDataViewEvent& aEvent )
+{
+    // Give the adapter a chance to populate the node's children lazily (e.g. the
+    // symbol editor enumerates a library's symbols only when it is first
+    // expanded). This runs synchronously before the control builds the child
+    // rows, so anything added here is shown as part of this expand. Don't veto.
+    if( m_adapter )
+        m_adapter->OnExpanding( aEvent.GetItem() );
+
+    aEvent.Skip();
 }
 
 

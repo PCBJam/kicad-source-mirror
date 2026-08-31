@@ -109,12 +109,23 @@ add_executable( gerbview WIN32 MACOSX_BUNDLE
 set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
     COMPILE_DEFINITIONS "TOP_FRAME=FRAME_GERBER;BUILD_KIWAY_DLL"
     )
-target_link_libraries( gerbview
-    core
-    kicommon
-    nlohmann_json
-    ${wxWidgets_LIBRARIES}
-    )
+if( EMSCRIPTEN )
+    # WASM: static kiface linking — single_top.cpp must NOT export the kiway DLL symbols.
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_GERBER"
+        )
+endif()
+
+if( NOT EMSCRIPTEN )
+    # Native: minimal link, kiface loaded dynamically
+    target_link_libraries( gerbview
+        core
+        kicommon
+        nlohmann_json
+        ${wxWidgets_LIBRARIES}
+        )
+endif()
+# WASM linking is done after GERBVIEW_KIFACE_LIBRARIES is defined
 
 target_link_options( gerbview PRIVATE
     $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=gerbview.map>
@@ -152,15 +163,31 @@ set_target_properties( gerbview_kiface PROPERTIES
     SUFFIX          ${KIFACE_SUFFIX}
     )
 
+set( GERBVIEW_KIFACE_LIBRARIES
+    gerbview_kiface_objects
+    gerbview_navlib
+    nlohmann_json
+    gal
+    kicommon
+    common
+    core
+    ${wxWidgets_LIBRARIES}
+    )
+
+# WASM: Link kiface objects directly into gerbview executable (static linking)
+if( EMSCRIPTEN )
+    target_link_libraries( gerbview
+        PRIVATE
+            ${GERBVIEW_KIFACE_LIBRARIES}
+        )
+    target_link_options( gerbview PRIVATE
+        "LINKER:--allow-multiple-definition"
+        )
+endif()
+
 target_link_libraries( gerbview_kiface
     PRIVATE
-        nlohmann_json
-        gal
-        kicommon
-        common
-        core
-        gerbview_kiface_objects
-        ${wxWidgets_LIBRARIES}
+        ${GERBVIEW_KIFACE_LIBRARIES}
     )
 
 if( MINGW )
@@ -171,6 +198,13 @@ set_source_files_properties( gerbview.cpp PROPERTIES
     # The KIFACE is in gerbview.cpp, export it:
     COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
     )
+if( EMSCRIPTEN )
+    # WASM: static kiface linking — gerbview.cpp must NOT export the kiway DLL symbols, so
+    # KIFACE_GETTER keeps its statically-linkable name.
+    set_source_files_properties( gerbview.cpp PROPERTIES
+        COMPILE_DEFINITIONS     "COMPILING_DLL"
+        )
+endif()
 
 target_link_options( gerbview_kiface PRIVATE
     $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=_gerbview.kiface.map>

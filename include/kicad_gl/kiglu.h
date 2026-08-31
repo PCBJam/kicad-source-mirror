@@ -31,7 +31,12 @@
 #include <kicad_gl/kiglad.h>
 
 // System GL headers (assumed to be loaded via wxGLCanvas or other dependencies)
-#ifdef __APPLE__
+#ifdef __EMSCRIPTEN__
+// For WASM, use the OpenGL kiglew.h — its __EMSCRIPTEN__ branch provides the
+// fixed-function + modern GL the 3D viewer's renderer needs (via Emscripten's
+// legacy GL emulation). Matches the other 3d-viewer TUs that include it directly.
+#include <gal/opengl/kiglew.h>
+#elif defined( __APPLE__ )
 #include <OpenGL/gl.h>
 #include <OpenGL/glu.h>
 #else

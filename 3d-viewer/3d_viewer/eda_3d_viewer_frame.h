@@ -280,7 +280,9 @@ private:
 
     bool                           m_disable_ray_tracing;
 
-#if defined(__linux__) || defined(__FreeBSD__)
+#ifdef __EMSCRIPTEN__
+    // SpaceMouse not supported in WASM
+#elif defined( __linux__ ) || defined( __FreeBSD__ )
     std::unique_ptr<SPNAV_VIEWER_PLUGIN> m_spaceMouse;
 #else
     std::unique_ptr<NL_3D_VIEWER_PLUGIN> m_spaceMouse;
