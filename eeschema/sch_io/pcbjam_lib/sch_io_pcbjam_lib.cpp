@@ -100,6 +100,8 @@ EM_JS( void, pcbjam_libs_request_start,
         if( res instanceof Uint8Array )
         {
             const p = _pcbjam_libs_alloc( res.length + 1 );
+            if( !p )
+                return finish( 0 ); // F-3: address 0 is writable — a failed alloc must not become a write
             HEAPU8.set( res, p );
             HEAPU8[p + res.length] = 0;
             return finish( p );
@@ -107,6 +109,8 @@ EM_JS( void, pcbjam_libs_request_start,
 
         const len = lengthBytesUTF8( res ) + 1;
         const ptr = _pcbjam_libs_alloc( len );
+        if( !ptr )
+            return finish( 0 ); // F-3: settle with the callers' ordinary "unavailable" value
         stringToUTF8( res, ptr, len );
         finish( ptr );
     } ).catch( ( e ) => {
@@ -171,6 +175,8 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
                 if( res instanceof Uint8Array )
                 {
                     const p = _pcbjam_libs_alloc( res.length + 1 );
+                    if( !p )
+                        return done( 0 ); // F-3: never write through a failed alloc; still release the worker
                     HEAPU8.set( res, p );
                     HEAPU8[p + res.length] = 0;
                     done( p );
@@ -179,6 +185,8 @@ static void pcbjam_libs_request_on_main( em_proxying_ctx* aCtx, void* aArg )
 
                 const len = lengthBytesUTF8( res ) + 1;
                 const ptr = _pcbjam_libs_alloc( len );
+                if( !ptr )
+                    return done( 0 ); // F-3: settle with the callers' ordinary "unavailable" value
                 stringToUTF8( res, ptr, len );
                 done( ptr );
             } )

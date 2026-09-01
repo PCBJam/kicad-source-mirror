@@ -85,6 +85,8 @@ EM_JS( void, pcbjam_3d_request_start,
         const str = typeof res === 'string' ? res : '1';
         const len = lengthBytesUTF8( str ) + 1;
         const ptr = _pcbjam_3d_alloc( len );
+        if( !ptr )
+            return finish( 0 ); // F-3: address 0 is writable — a failed alloc must not become a write
         stringToUTF8( str, ptr, len );
         finish( ptr );
     } ).catch( ( e ) => {
@@ -143,6 +145,8 @@ static void pcbjam_3d_request_on_main( em_proxying_ctx* aCtx, void* aArg )
                 const str = typeof res === 'string' ? res : '1';
                 const len = lengthBytesUTF8( str ) + 1;
                 const ptr = _pcbjam_3d_alloc( len );
+                if( !ptr )
+                    return done( 0 ); // F-3: never write through a failed alloc; still release the worker
                 stringToUTF8( str, ptr, len );
                 done( ptr );
             } )
