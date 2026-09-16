@@ -26,6 +26,7 @@
 
 #include <tool/tool_action.h>
 #include <tool/actions.h>
+#include <functional>
 
 class DESIGN_BLOCK;
 class SCH_SYMBOL;
@@ -332,6 +333,9 @@ public:
         SCH_SYMBOL* m_Symbol = nullptr;
         ///< If a symbol is provide, reannotate it?
         bool m_Reannotate = true;
+        ///< Optional host import lifecycle hooks. Ordinary placement leaves these empty.
+        std::function<bool()> m_CanPlace;
+        std::function<void( bool )> m_OnPlacementFinished;
     };
 
     struct PLACE_SYMBOL_UNIT_PARAMS
