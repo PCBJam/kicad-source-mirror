@@ -34,7 +34,7 @@ namespace KICAD_FORMAT {
 
 void FormatBool( OUTPUTFORMATTER* aOut, const wxString& aKey, bool aValue )
 {
-    aOut->Print( "(%ls %s)", aKey.wc_str(), aValue ? "yes" : "no" );
+    aOut->Print( "(%s %s)", aKey.ToUTF8().data(), aValue ? "yes" : "no" );
 }
 
 void FormatOptBool( OUTPUTFORMATTER* aOut, const wxString& aKey, std::optional<bool> aValue )
@@ -42,7 +42,7 @@ void FormatOptBool( OUTPUTFORMATTER* aOut, const wxString& aKey, std::optional<b
     if( aValue.has_value() )
         FormatBool( aOut, aKey, aValue.value() );
     else
-        aOut->Print( "(%ls none)", aKey.wc_str() );
+        aOut->Print( "(%s none)", aKey.ToUTF8().data() );
 }
 
 

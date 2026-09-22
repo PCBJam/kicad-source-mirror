@@ -28,9 +28,12 @@
 #include <bitmaps.h>
 #include <file_history.h>
 #include <kiface_base.h>
+#include <kiway.h>
 #include <pcb_edit_frame.h>
 #include <pcbnew_id.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <tool/action_manager.h>
 #include <tool/actions.h>
 #include <tool/tool_manager.h>
@@ -388,7 +391,8 @@ void PCB_EDIT_FRAME::doReCreateMenuBar()
     //
     ACTION_MENU* toolsMenu = new ACTION_MENU( false, selTool );
 
-    toolsMenu->Add( ACTIONS::updatePcbFromSchematic )->Enable( !Kiface().IsSingle() );
+    toolsMenu->Add( ACTIONS::updatePcbFromSchematic )
+            ->Enable( !Kiface().IsSingle() || KIWAY::FaceRegistered( KIWAY::FACE_SCH ) );
     toolsMenu->Add( PCB_ACTIONS::showEeschema );
 
     if( !Kiface().IsSingle() )
@@ -429,11 +433,13 @@ void PCB_EDIT_FRAME::doReCreateMenuBar()
     toolsMenu->Add( PCB_ACTIONS::boardReannotate );
     toolsMenu->Add( ACTIONS::updateSchematicFromPcb )->Enable( !Kiface().IsSingle() );
 
+#ifdef KICAD_SCRIPTING
     if( SCRIPTING::IsWxAvailable() )
     {
         toolsMenu->AppendSeparator();
         toolsMenu->Add( PCB_ACTIONS::showPythonConsole );
     }
+#endif
 
     ACTION_MENU* multichannelSubmenu = new ACTION_MENU( false, selTool );
     multichannelSubmenu->SetTitle( _( "Multi-Channel" ) );

@@ -415,6 +415,12 @@ void DRAWING_SHEET_PARSER::parsePolygon( DS_DATA_ITEM_POLYGONS * aItem )
             readOption( aItem );
             break;
 
+        case T_uuid:
+            NeedSYMBOLorNUMBER();
+            aItem->m_Uuid = KIID( FromUTF8() );
+            NeedRIGHT();
+            break;
+
         case T_pts:
             parsePolyOutline( aItem );
             aItem->CloseContour();
@@ -520,6 +526,12 @@ void DRAWING_SHEET_PARSER::parseBitmap( DS_DATA_ITEM_BITMAP * aItem )
 
         case T_linewidth:
             aItem->m_LineWidth = parseDouble();
+            NeedRIGHT();
+            break;
+
+        case T_uuid:
+            NeedSYMBOLorNUMBER();
+            aItem->m_Uuid = KIID( FromUTF8() );
             NeedRIGHT();
             break;
 
@@ -660,6 +672,12 @@ void DRAWING_SHEET_PARSER::parseGraphic( DS_DATA_ITEM * aItem )
             NeedRIGHT();
             break;
 
+        case T_uuid:
+            NeedSYMBOLorNUMBER();
+            aItem->m_Uuid = KIID( FromUTF8() );
+            NeedRIGHT();
+            break;
+
         case T_start:
             parseCoordinate( aItem->m_Pos );
             break;
@@ -745,6 +763,12 @@ void DRAWING_SHEET_PARSER::parseText( DS_DATA_ITEM_TEXT* aItem )
 
         case T_incrlabel:
             aItem->m_IncrementLabel = parseInt(INT_MIN, INT_MAX);
+            NeedRIGHT();
+            break;
+
+        case T_uuid:
+            NeedSYMBOLorNUMBER();
+            aItem->m_Uuid = KIID( FromUTF8() );
             NeedRIGHT();
             break;
 

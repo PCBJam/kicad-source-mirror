@@ -55,6 +55,8 @@
 #include <sch_table.h>
 #include <tool/tool_event.h>
 #include <tool/tool_manager.h>
+#include <pcbjam_remote_lock.h>
+#include <pcbjam_read_only.h>
 #include <tools/ee_grid_helper.h>
 #include <tools/sch_move_tool.h>
 #include <tools/sch_point_editor.h>
@@ -670,7 +672,12 @@ int SCH_SELECTION_TOOL::Main( const TOOL_EVENT& aEvent )
                 }
             }
 
-            if( !selCancelled )
+            // pcbjam WASM addition (read-only-viewer): no right-click CONTEXT
+            // menu for viewers — it offers edit entries whose actions the
+            // read-only gate silently swallows. The right-click SELECTION
+            // above (incl. the clarify list) stays — viewer-panels. Skipping
+            // the show is safe: nothing waits on this menu's outcome.
+            if( !selCancelled && !PCBJAM_READ_ONLY::IsReadOnly() )
                 m_menu->ShowContextMenu( m_selection );
         }
         else if( evt->IsDblClick( BUT_LEFT ) )
@@ -1473,6 +1480,31 @@ void SCH_SELECTION_TOOL::narrowSelection( SCH_COLLECTOR& collector, const VECTOR
                 aRejected->lockedItems = true;
             collector.Remove( i );
             continue;
+        }
+
+        // pcbjam: remote soft-locks (collab peers' live selections, 0007) —
+        // like locked items, held items stay selectable for inspection but
+        // are filtered from move/drag acquisition (aCheckLocked paths).
+        if( aCheckLocked )
+        {
+            wxString holder;
+
+            if( PCBJAM_REMOTE_LOCK::IsLocked( collector[i]->m_Uuid, &holder ) )
+            {
+                if( m_frame )
+                {
+                    m_frame->ShowInfoBarWarning( wxString::Format( _( "Some items are being "
+                                                                      "edited by %s and were "
+                                                                      "skipped." ),
+                                                                   holder ),
+                                                 true );
+                }
+
+                if( aRejected )
+                    aRejected->lockedItems = true;
+                collector.Remove( i );
+                continue;
+            }
         }
 
         if( !itemPassesFilter( collector[i], aRejected ) )
@@ -3601,6 +3633,14 @@ void SCH_SELECTION_TOOL::RebuildSelection()
 bool SCH_SELECTION_TOOL::Selectable( const EDA_ITEM* aItem, const VECTOR2I* aPos,
                                      bool checkVisibilityOnly ) const
 {
+    // pcbjam WASM addition (read-only-viewer): selection stays LIVE for
+    // viewers — the shell's inspector panel reads it (viewer-panels). Every
+    // mutation downstream of a selection is still blocked: move/properties/
+    // delete dispatch TOOL_ACTIONs the TOOL_MANAGER gate swallows, the point
+    // editor has its own read-only guard (it mutates without actions), and
+    // the right-click CONTEXT menu is skipped in this tool's own RMB arm
+    // (the clarify list stays — pure selection).
+
     // NOTE: in the future this is where Eeschema layer/itemtype visibility will be handled
 
     SYMBOL_EDIT_FRAME* symEditFrame = dynamic_cast<SYMBOL_EDIT_FRAME*>( m_frame );

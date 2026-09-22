@@ -52,6 +52,10 @@
 #include <unordered_set>
 #include <core/kicad_algo.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 void QuoteString( wxString& string )
 {
     if( !string.StartsWith( wxT( "\"" ) ) )
@@ -150,6 +154,39 @@ wxString FindKicadFile( const wxString& shortname )
 int ExecuteFile( const wxString& aEditorName, const wxString& aFileName, wxProcess* aCallback,
                  bool aFileForKicad )
 {
+#ifdef __EMSCRIPTEN__
+    // The browser build has no processes to spawn. Tool-to-tool launches
+    // (eeschema "Switch to PCB Editor" / pcbnew "Switch to Schematic Editor",
+    // which both reach here through the Kiface().IsSingle() path) are delegated
+    // to the host page: window.kicadWebOpenTool(toolName, fileName) -> bool
+    // navigates the browser to the other tool's URL. Runs on the browser main
+    // thread (no PROXY_TO_PTHREAD), so plain EM_ASM_INT is safe.
+    {
+        const wxScopedCharBuffer editorUtf8 = aEditorName.utf8_str();
+        const wxScopedCharBuffer fileUtf8 = aFileName.utf8_str();
+
+        int handled = EM_ASM_INT( {
+            if( typeof window !== 'undefined'
+                    && typeof window.kicadWebOpenTool === 'function' )
+            {
+                return window.kicadWebOpenTool( UTF8ToString( $0 ),
+                                                UTF8ToString( $1 ) ) ? 1 : 0;
+            }
+            return 0;
+        }, editorUtf8.data(), fileUtf8.data() );
+
+        if( !handled )
+        {
+            printf( "ExecuteFile: no web handler for '%s' '%s'\n",
+                    editorUtf8.data(), fileUtf8.data() );
+        }
+
+        // Handled: the page is navigating away; callers ignore the pid anyway.
+        // Unhandled: fail like a missing binary, without an error dialog.
+        return handled ? 0 : -1;
+    }
+#endif
+
     wxString              fullEditorName;
     std::vector<wxString> params;
 

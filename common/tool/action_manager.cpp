@@ -327,6 +327,11 @@ void ACTION_MANAGER::processHotKey( TOOL_ACTION*                                
 {
     aAction->m_hotKey = aAction->m_defaultHotKey;
 
+    // Apply the default *alternate* hotkey too. Without this, DefaultHotkeyAlt(...) is dead
+    // for the default config (m_hotKeyAlt stays 0 until a user/legacy map overrides it). A
+    // user/legacy override below replaces both keys, which is the intended precedence.
+    aAction->m_hotKeyAlt = aAction->m_defaultHotKeyAlt;
+
     if( !aAction->m_legacyName.empty() && aLegacyMap.count( aAction->m_legacyName ) )
         aAction->SetHotKey( aLegacyMap.at( aAction->m_legacyName ) );
 

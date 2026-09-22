@@ -42,8 +42,22 @@ extern const wxChar* const tracePluginLoader;
 
 
 // helper function to link functions in the plugin
+#ifdef __EMSCRIPTEN__
+// WASM has no dlopen: entry points resolve from the static plugin registry
+// (3d-viewer/3d_cache/pcbjam_static_3d_plugins.cpp).  Both expansion sites —
+// KICAD_PLUGIN_LDR::open and KICAD_PLUGIN_LDR_3D::Open — name their parameter
+// aFullFileName, which this macro relies on exactly as the dynamic variant
+// relies on the m_PluginLoader member being in scope.
+namespace PCBJAM_3D
+{
+    void* StaticPluginSymbol( const wxString& aPluginPath, const char* aSymbolName );
+}
+#define LINK_ITEM( funcPtr, funcType, funcName ) \
+    funcPtr = (funcType) PCBJAM_3D::StaticPluginSymbol( aFullFileName, funcName )
+#else
 #define LINK_ITEM( funcPtr, funcType, funcName ) \
     funcPtr = (funcType) m_PluginLoader.GetSymbol( wxT( funcName ) )
+#endif
 
 // typedefs of the functions exported by the 3D Plugin Class
 typedef char const* (*GET_PLUGIN_CLASS) ( void );

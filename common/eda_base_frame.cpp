@@ -1268,8 +1268,34 @@ WINDOW_SETTINGS* EDA_BASE_FRAME::GetWindowSettings( APP_SETTINGS_BASE* aCfg )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// WASM: resolve a frame's OWN kiface through the kiway registry instead of the global
+// Kiface() accessor. In the merged editor image (pcbnew + eeschema statically linked,
+// KICAD_WASM_MERGED_EDITOR) there is no single "the" kiface — the global accessor is
+// only a focus-based fallback — but a frame always knows its type, so this is exact.
+// In single-kiface images it resolves to the same kiface the global accessor returns.
+static KIFACE_BASE* wasmFrameKiface( const EDA_BASE_FRAME* aFrame )
+{
+    KIWAY::FACE_T face = KIWAY::KifaceType( aFrame->GetFrameType() );
+
+    if( face != KIWAY::FACE_T( -1 ) )
+    {
+        if( KIFACE* kiface = aFrame->Kiway().KiFACE( face ) )
+            return static_cast<KIFACE_BASE*>( kiface );
+    }
+
+    return nullptr;
+}
+#endif
+
+
 APP_SETTINGS_BASE* EDA_BASE_FRAME::config() const
 {
+#ifdef __EMSCRIPTEN__
+    if( KIFACE_BASE* kiface = wasmFrameKiface( this ) )
+        return kiface->KifaceSettings();
+#endif
+
     // KICAD_MANAGER_FRAME overrides this
     return Kiface().KifaceSettings();
 }
@@ -1277,12 +1303,22 @@ APP_SETTINGS_BASE* EDA_BASE_FRAME::config() const
 
 const SEARCH_STACK& EDA_BASE_FRAME::sys_search()
 {
+#ifdef __EMSCRIPTEN__
+    if( KIFACE_BASE* kiface = wasmFrameKiface( this ) )
+        return kiface->KifaceSearch();
+#endif
+
     return Kiface().KifaceSearch();
 }
 
 
 wxString EDA_BASE_FRAME::help_name()
 {
+#ifdef __EMSCRIPTEN__
+    if( KIFACE_BASE* kiface = wasmFrameKiface( this ) )
+        return kiface->GetHelpFileName();
+#endif
+
     return Kiface().GetHelpFileName();
 }
 

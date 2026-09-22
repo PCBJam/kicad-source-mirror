@@ -97,7 +97,43 @@ set( EESCHEMA_SCH_IO
     sch_io/pads/pads_sch_parser.cpp
     sch_io/pads/pads_sch_symbol_builder.cpp
     sch_io/pads/pads_sch_schematic_builder.cpp
+
+    # pcbjam remote library plugin (JS bridge; only functional on WASM) — fork addition
+    sch_io/pcbjam_lib/sch_io_pcbjam_lib.cpp
     )
+
+# Third-party importers and the database plugin are not built for WASM (sch_io_mgr.cpp's
+# factory cases are guarded with __EMSCRIPTEN__ to match):
+# - Database needs nanodbc/ODBC (also gated NOT EMSCRIPTEN in common/CMakeLists.txt).
+# - Altium pulls in pcbnew/pcb_io/altium common code that uses
+#   std::basic_string<unsigned short>, which the current Emscripten libc++ rejects.
+# - Eagle/Cadstar/LTspice/EasyEDA are cross-tool importers not needed for the MVP and
+#   they bring transitive incompatible dependencies in.
+if( EMSCRIPTEN )
+    list( REMOVE_ITEM EESCHEMA_SCH_IO
+        sch_io/database/sch_io_database.cpp
+        sch_io/geda/sch_io_geda.cpp
+        sch_io/eagle/sch_io_eagle.cpp
+        sch_io/altium/altium_parser_sch.cpp
+        sch_io/altium/sch_io_altium.cpp
+        sch_io/cadstar/cadstar_sch_archive_loader.cpp
+        sch_io/cadstar/cadstar_sch_archive_parser.cpp
+        sch_io/cadstar/sch_io_cadstar_archive.cpp
+        sch_io/ltspice/ltspice_schematic.cpp
+        sch_io/ltspice/sch_io_ltspice.cpp
+        sch_io/ltspice/sch_io_ltspice_parser.cpp
+        sch_io/easyeda/sch_easyeda_parser.cpp
+        sch_io/easyeda/sch_io_easyeda.cpp
+        sch_io/easyedapro/sch_easyedapro_parser.cpp
+        sch_io/easyedapro/sch_io_easyedapro.cpp
+
+        # PADS Logic IO plugin
+        sch_io/pads/sch_io_pads.cpp
+        sch_io/pads/pads_sch_parser.cpp
+        sch_io/pads/pads_sch_symbol_builder.cpp
+        sch_io/pads/pads_sch_schematic_builder.cpp
+    )
+endif()
 
 set( EESCHEMA_DLGS
     dialogs/dialog_annotate.cpp
@@ -291,6 +327,30 @@ set( EESCHEMA_SIM_SRCS
     widgets/tuner_slider.cpp
     widgets/tuner_slider_base.cpp
     )
+
+# WASM: the simulator runs against the ngspice_service worker
+# (docs/features/ngspice-split/): the sharedspice client stub forwards the
+# ngSpice_* calls NGSPICE::init_dll binds in its __EMSCRIPTEN__ branch (see
+# wasm/stubs/ngspice/sharedspice.h). The four large BSIM/SOI/HSIM model-data
+# initializers historically tripped the JS engines' "too many locals" limit at
+# -O0; -O2 collapses the locals (same per-source workaround as the msys block
+# at the top of this file), keeping the full parameter tables for the
+# simulator model dialogs.
+if( EMSCRIPTEN )
+    set_source_files_properties(
+        sim/sim_model_ngspice_data_bsim4.cpp
+        sim/sim_model_ngspice_data_b3soi.cpp
+        sim/sim_model_ngspice_data_b4soi.cpp
+        sim/sim_model_ngspice_data_hsim.cpp
+        # clang 24 (emcc 6) hard-errors when a TU's -O level differs from the
+        # PCH's ("OptimizationLevel differs in precompiled file"); these are
+        # generated data tables that gain nothing from the PCH, so opt them
+        # out instead of losing the -O2 locals collapse.
+        PROPERTIES COMPILE_OPTIONS "-O2" SKIP_PRECOMPILE_HEADERS ON )
+    list( APPEND EESCHEMA_SIM_SRCS
+        ${KICAD_WASM_LAYER}/stubs/sharedspice_client.cpp
+    )
+endif()
 
 set( EESCHEMA_WIDGETS
     widgets/hierarchy_pane.cpp
@@ -583,12 +643,95 @@ add_executable( eeschema WIN32 MACOSX_BUNDLE
 set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
     COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\";BUILD_KIWAY_DLL"
     )
+if( EMSCRIPTEN )
+    # WASM: static kiface linking — single_top.cpp must NOT export the kiway DLL symbols.
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_SCH;PGM_DATA_FILE_EXT=\"kicad_sch\""
+        )
+endif()
 
-target_link_libraries( eeschema
-    kicommon
-    pcm
-    ${wxWidgets_LIBRARIES}
-    )
+if( NOT EMSCRIPTEN )
+    # Native: minimal link, kiface loaded dynamically
+    target_link_libraries( eeschema
+        kicommon
+        pcm
+        ${wxWidgets_LIBRARIES}
+        )
+endif()
+# WASM linking is done after EESCHEMA_KIFACE_LIBRARIES is defined
+
+# WASM sym_convert diet (ysync 0009, cut e): the converter tree links the kiface
+# as force-linked OBJECTs, so every TU's static initializers (TOOL_ACTIONs, wx
+# event tables, dialog statics) are GC roots — vtable/link-order stubs cannot
+# unroot them. Prune the editor-surface TUs from the kiface for THIS tree only
+# (the flag is pinned OFF for editor trees, see build-kicad-target.sh). The
+# converter path is SCH_IO_MGR::ConvertLibrary → sch_io readers/writers + the
+# symbol/item model; everything UI-, tool-, plot- and sim-shaped is unreachable.
+if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
+    list( FILTER EESCHEMA_SRCS EXCLUDE REGEX
+          "^(dialogs|sim|tools|widgets|netlist_exporters|symbol_editor|sync_sheet_pin|import_gfx|api)/" )
+    list( REMOVE_ITEM EESCHEMA_SRCS
+        annotate.cpp
+        bom_plugins.cpp
+        bus-wire-junction.cpp
+        cross-probing.cpp
+        sch_design_block_utils.cpp
+        eeschema_config.cpp
+        eeschema_helpers.cpp
+        eeschema_jobs_handler.cpp
+        fields_data_model.cpp
+        fields_grid_table.cpp
+        files-io.cpp
+        generate_alias_info.cpp
+        gfx_import_utils.cpp
+        lib_fields_data_model.cpp
+        menubar.cpp
+        net_navigator.cpp
+        picksymbol.cpp
+        project_rescue.cpp
+        sch_base_frame.cpp
+        sch_commit.cpp
+        sch_draw_panel.cpp
+        sch_edit_frame.cpp
+        sch_painter.cpp
+        sch_plotter.cpp
+        sch_preview_panel.cpp
+        sch_validators.cpp
+        sch_view.cpp
+        schematic_undo_redo.cpp
+        sheet.cpp
+        symbol_checker.cpp
+        symbol_chooser_frame.cpp
+        symbol_import_manager.cpp
+        symbol_library_manager.cpp
+        symbol_tree_model_adapter.cpp
+        symbol_tree_synchronizing_adapter.cpp
+        symbol_viewer_frame.cpp
+        toolbars_sch_editor.cpp
+        toolbars_symbol_viewer.cpp
+        )
+    set( EESCHEMA_PRINTING )
+    # Kept back from the symbol_editor/ filter: a pure settings class (no UI).
+    # SCH_PIN's default ctor and EESCHEMA_SETTINGS migration reference its
+    # typeinfo via GetAppSettings<>; linking the real TU keeps those code paths
+    # exactly upstream (typeinfo/data symbols cannot become JS imports, unlike
+    # the function refs covered by -sERROR_ON_UNDEFINED_SYMBOLS=0 below).
+    list( APPEND EESCHEMA_SRCS symbol_editor/symbol_editor_settings.cpp )
+    # Kept back from the sim/ filter for the --lint mode (ysync 0009 §7):
+    # SCHEMATIC_SETTINGS' ctor constructs NGSPICE_SETTINGS (spice_settings.cpp,
+    # another pure settings TU), and lint's SCHEMATIC::SetProject runs it.
+    list( APPEND EESCHEMA_SRCS sim/spice_settings.cpp )
+    # Kept back for the pcbjam-mcp export subcommands (--netlist/--bom/--plot):
+    # the two text netlist emitters (+ their base; SPICE stays out with sim/),
+    # and the plotter pair — SCH_RENDER_SETTINGS is *defined* in sch_painter.cpp,
+    # SCH_PLOTTER drives the plotter backends from common (no GAL context).
+    list( APPEND EESCHEMA_SRCS
+        netlist_exporters/netlist_exporter_base.cpp
+        netlist_exporters/netlist_exporter_kicad.cpp
+        netlist_exporters/netlist_exporter_xml.cpp
+        sch_painter.cpp
+        sch_plotter.cpp )
+endif()
 
 # the main Eeschema program, in DSO form.
 add_library( eeschema_kiface_objects OBJECT
@@ -596,6 +739,28 @@ add_library( eeschema_kiface_objects OBJECT
     ${EESCHEMA_PRINTING}
     ${EESCHEMA_COMMON_SRCS}
     )
+
+# WASM: Bring eeschema.cpp (the KIFACE entry point) and stub sources into the
+# kiface_objects translation unit so static linking finds KIFACE_GETTER.
+# sym_convert (ysync 0009 diet) skips eeschema.cpp: nothing calls KIFACE_GETTER
+# there, and its static IFACE instance is an init-array root into the frames.
+if( EMSCRIPTEN AND NOT KICAD_SYM_CONVERTER_WASM )
+    target_sources( eeschema_kiface_objects PRIVATE
+        eeschema.cpp
+        ${KICAD_WASM_LAYER}/stubs/eeschema_frame_stub.cpp
+    )
+elseif( EMSCRIPTEN )
+    target_sources( eeschema_kiface_objects PRIVATE
+        ${KICAD_WASM_LAYER}/stubs/eeschema_frame_stub.cpp
+    )
+endif()
+
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged editor image: statically bind this kiface's Kiface() calls to its own
+    # accessor. The colliding class/data symbols are renamed on the PCB side only
+    # (KICAD_WASM_PCB_SIDE_RENAMES, top-level CMakeLists.txt) — one side suffices.
+    target_compile_definitions( eeschema_kiface_objects PRIVATE Kiface=SchKiface )
+endif()
 
 if( KICAD_USE_PCH )
     target_precompile_headers( eeschema_kiface_objects
@@ -636,23 +801,88 @@ target_link_libraries( eeschema_kiface_objects PUBLIC eeschema_navlib)
 
 add_dependencies( eeschema_kiface_objects eeschema_navlib )
 
-add_library( eeschema_kiface MODULE
-    eeschema.cpp
+if( EMSCRIPTEN )
+    # WASM: empty MODULE - eeschema.cpp was hoisted into kiface_objects above
+    # so the executable can link KIFACE_GETTER statically. The empty MODULE
+    # target is kept so post-build steps that reference it still resolve.
+    add_library( eeschema_kiface MODULE )
+else()
+    add_library( eeschema_kiface MODULE
+        eeschema.cpp
+        )
+endif()
+
+set( EESCHEMA_KIFACE_LIBRARIES
+    eeschema_kiface_objects
+    common
+    eeschema_navlib
+    # Native-only: pads/database importers + plugin content manager are not built for WASM
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:pads_common>
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:pcm>
+    kicommon
+    kiplatform
+    gal
+    scripting
+    sexpr
+    core
+    markdown_lib
+    ${wxWidgets_LIBRARIES}
+    ${NGSPICE_LIBRARY}
+    Boost::headers
     )
+
+if( EMSCRIPTEN )
+    # Export for the merged kicad_editor target (wasm/editor/), which links both kifaces'
+    # library sets from outside this directory scope (matches pcbnew's export).
+    set( EESCHEMA_KIFACE_LIBRARIES "${EESCHEMA_KIFACE_LIBRARIES}" CACHE INTERNAL "" )
+endif()
+
+# WASM: Link kiface objects directly into eeschema executable (static linking)
+if( EMSCRIPTEN )
+    target_link_libraries( eeschema
+        PRIVATE
+            ${EESCHEMA_KIFACE_LIBRARIES}
+        )
+    # WASM: Allow multiple definitions of symbols that exist in both
+    # KiCad and wxWidgets (matches the pcbnew WASM pattern).
+    target_link_options( eeschema PRIVATE
+        "LINKER:--allow-multiple-definition"
+        )
+endif()
 
 target_link_libraries( eeschema_kiface
     PRIVATE
-        common
-        eeschema_kiface_objects
-        pads_common
-        pcm
-        markdown_lib
-        scripting
-        core
-        Boost::headers
-        ${wxWidgets_LIBRARIES}
-        ${NGSPICE_LIBRARY}
+        ${EESCHEMA_KIFACE_LIBRARIES}
     )
+
+# NOTE: The symbol editor (FRAME_SCH_SYMBOL_EDITOR) is served by this same eeschema
+# kiface — its sources are already compiled into eeschema_kiface_objects. It no
+# longer has its own WASM launcher/target: the eeschema bundle selects the symbol
+# frame at RUNTIME via single_top.cpp's "--frame=symedit" flag (see
+# editor-unification). One build serves both editors.
+
+# WASM: standalone legacy(.lib) -> S-expression(.kicad_sym) symbol-library
+# converter. A headless CLI that drives SCH_IO_MGR::ConvertLibrary from main()
+# (source lives in the wasm compatibility layer, not the KiCad tree). Gated so
+# normal builds are unaffected; a tree configured with KICAD_SYM_CONVERTER_WASM=ON
+# yields a converter-only SCH_IO factory (no pcbjam/http) — build it in its own
+# tree, separate from the editor build.
+option( KICAD_SYM_CONVERTER_WASM
+    "WASM only: also build the standalone .lib -> .kicad_sym converter (sym_convert)" OFF )
+
+if( EMSCRIPTEN AND KICAD_SYM_CONVERTER_WASM )
+    # Scope the factory guard to the one TU that holds it, so toggling the option
+    # only recompiles sch_io_mgr.cpp rather than the whole kiface object library.
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/sch_io/sch_io_mgr.cpp PROPERTIES
+        COMPILE_DEFINITIONS KICAD_SYM_CONVERTER_WASM )
+
+    # The standalone sym_convert executable is RETIRED (pcbjam-mcp 0001): the
+    # merged kicad_tools image (wasm/tools/, gated by KICAD_TOOLS_WASM at the
+    # top level) carries the converter + lint + erc/netlist/bom/plot on this
+    # same dieted kiface. This option now only gates the diet above and the
+    # SCH_IO factory trim.
+endif()
 
 if( MSVC )
     # Allow for MSVC to debug ngspice from the build directory
@@ -677,6 +907,20 @@ set_target_properties( eeschema_kiface PROPERTIES
 set_source_files_properties( eeschema.cpp PROPERTIES
     COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
     )
+if( EMSCRIPTEN )
+    # WASM: static kiface linking — eeschema.cpp must NOT export the kiway DLL symbols, so
+    # KIFACE_GETTER keeps its statically-linkable name (KIFACE_1). In the merged editor
+    # image the getter instead gets a per-engine name so both kifaces' getters coexist.
+    if( KICAD_WASM_MERGED_EDITOR )
+        set_source_files_properties( eeschema.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL;KIFACE_GETTER=eeschema_kiface_getter"
+            )
+    else()
+        set_source_files_properties( eeschema.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL"
+            )
+    endif()
+endif()
 
 # if building eeschema, then also build eeschema_kiface if out of date.
 add_dependencies( eeschema eeschema_kiface )

@@ -401,6 +401,13 @@ TOOL_ACTION ACTIONS::doDelete( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
 #if defined( __WXMAC__ )
         .DefaultHotkey( WXK_BACK )
+#elif defined( __EMSCRIPTEN__ )
+        // In the browser the platform is reported as non-Mac, but a Mac user's "delete" key
+        // sends Backspace (WXK_BACK) while others send Delete (WXK_DELETE). Bind both so the
+        // expected key deletes regardless of host OS. (WXK_BACK also feeds undoLastSegment, but
+        // that only consumes it while actively drawing a wire; idle, doDelete wins the hotkey.)
+        .DefaultHotkey( WXK_DELETE )
+        .DefaultHotkeyAlt( WXK_BACK )
 #else
         .DefaultHotkey( WXK_DELETE )
 #endif

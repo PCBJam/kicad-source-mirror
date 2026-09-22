@@ -1758,9 +1758,21 @@ void SYMBOL_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
             emptyScreen();
         }
 
-        SyncLibraries( true );
+        // An optional payload names one library to force-refresh: its tree node
+        // is rebuilt even when the sync hash is unchanged (needed for external
+        // providers whose modify hash is a constant — e.g. a remote lib edited
+        // by a collaborator). Senders passing an empty payload keep the plain
+        // hash-gated sync.
+        wxString forceRefresh = wxString::FromUTF8( payload );
+
+        SyncLibraries( true, false, forceRefresh );
         ThawLibraryTree();
         RefreshLibraryTree();
+
+        // The force-refreshed node was deleted + recreated, which loses its
+        // expansion — re-expand it so the refreshed contents stay visible.
+        if( !forceRefresh.IsEmpty() && m_treePane )
+            GetLibTree()->ExpandLibId( LIB_ID( forceRefresh, wxEmptyString ) );
 
         break;
     }

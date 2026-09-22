@@ -61,6 +61,15 @@
 
 #endif
 
+#if defined( __EMSCRIPTEN__ )
+// WASM: GLAD's desktop-GL loader is incompatible with Emscripten's built-in GLES —
+// glad/gl.h declares glad_* function pointers and #define's the GL entry points onto
+// them, which collide with the real declarations pulled in by <wx/glcanvas.h> →
+// <GLES2/gl2.h>. Route through our kiglew.h shim instead (Emscripten GL via legacy-GL
+// emulation); gladLoaderLoadGL() is stubbed in the WASM layer.
+#include <gal/opengl/kiglew.h>
+#else
 #include <glad/gl.h>
+#endif
 
 #endif  // KIGLAD_H_

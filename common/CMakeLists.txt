@@ -228,6 +228,7 @@ set( KICOMMON_SRCS
     widgets/std_bitmap_button.cpp
     widgets/ui_common.cpp
     widgets/up_down_tree.cpp
+    widgets/webview_panel.cpp
     widgets/wx_grid.cpp
     widgets/wx_html_report_panel.cpp
     widgets/wx_html_report_panel_base.cpp
@@ -270,6 +271,8 @@ set( KICOMMON_SRCS
     json_schema_validator.cpp
     kidialog.cpp
     kiid.cpp
+    pcbjam_remote_lock.cpp
+    pcbjam_read_only.cpp
     kiway.cpp
     kiway_mail.cpp
     kiway_holder.cpp
@@ -312,14 +315,11 @@ set( KICOMMON_SRCS
     singleton.cpp
     pgm_base.cpp
 
-    ../scripting/python_scripting.cpp
-
     io/kicad/kicad_io_utils.cpp    # needed by richio
     io/io_base.cpp
     io/io_utils.cpp
 
     api/serializable.cpp
-    api/api_utils.cpp
 
     startwizard/startwizard.cpp
     startwizard/startwizard_provider_libraries.cpp
@@ -327,27 +327,60 @@ set( KICOMMON_SRCS
     startwizard/startwizard_provider_settings.cpp
     )
 
-if( UNIX AND NOT APPLE )
+if( UNIX AND NOT APPLE AND NOT EMSCRIPTEN )
     list( APPEND KICOMMON_SRCS
         spacenav/libspnav_driver.cpp
     )
 endif()
 
-if( KICAD_IPC_API )
-    set( KICOMMON_SRCS
-        ${KICOMMON_SRCS}
-        api/api_handler.cpp
-        api/api_plugin.cpp
-        api/api_plugin_manager.cpp
-        api/api_server.cpp
-
-        ../scripting/python_manager.cpp
+if( KICAD_SCRIPTING )
+    list( APPEND KICOMMON_SRCS
+        ../scripting/python_scripting.cpp
     )
 endif()
 
-add_library( kicommon SHARED
-    ${KICOMMON_SRCS}
+if( KICAD_IPC_API )
+    list( APPEND KICOMMON_SRCS
+        api/api_utils.cpp
+        api/api_handler.cpp
+        api/api_plugin.cpp
     )
+    # Plugin manager and server require Python and socket support (not available in WASM)
+    if( NOT EMSCRIPTEN )
+        list( APPEND KICOMMON_SRCS
+            api/api_plugin_manager.cpp
+            api/api_server.cpp
+            ../scripting/python_manager.cpp
+        )
+    else()
+        # WASM: Add stubs for API server and plugin manager
+        list( APPEND KICOMMON_SRCS
+            ${KICAD_WASM_LAYER}/stubs/api_plugin_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/python_manager_stub.cpp
+        )
+    endif()
+endif()
+
+# WASM: Python manager is used by panel_plugin_settings even without IPC API
+if( EMSCRIPTEN AND NOT KICAD_IPC_API )
+    list( APPEND KICOMMON_SRCS
+        ${KICAD_WASM_LAYER}/stubs/python_manager_stub.cpp
+    )
+endif()
+
+# WASM: STATIC, not SHARED. emcc 6 treats a .so input as a REAL dynamic
+# dependency (DT_NEEDED resolved at runtime — the app 404s fetching
+# libkicommon.so.10.0.4 at boot); emcc 4 folded it in statically. A static
+# archive restores that monolithic link.
+if( EMSCRIPTEN )
+    add_library( kicommon STATIC
+        ${KICOMMON_SRCS}
+        )
+else()
+    add_library( kicommon SHARED
+        ${KICOMMON_SRCS}
+        )
+endif()
 
 if( KICAD_USE_PCH )
     target_precompile_headers( kicommon
@@ -370,7 +403,7 @@ set_target_properties(kicommon PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
 target_link_libraries( kicommon
     core
-    kiapi
+    $<$<BOOL:${KICAD_IPC_API}>:kiapi>
     kimath
     kiplatform
     nlohmann_json
@@ -408,7 +441,7 @@ if( KICAD_USE_SENTRY )
     set_property(SOURCE app_monitor.cpp APPEND PROPERTY COMPILE_DEFINITIONS KICAD_SENTRY_DSN="${KICAD_SENTRY_DSN}")
 endif()
 
-if( KICAD_IPC_API )
+if( KICAD_IPC_API AND NOT EMSCRIPTEN )
     target_link_libraries( kicommon
         kinng
         )
@@ -457,9 +490,11 @@ target_include_directories( kicommon
         $<TARGET_PROPERTY:magic_enum,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:pegtl,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:expected,INTERFACE_INCLUDE_DIRECTORIES>
-        $<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>
+        $<$<BOOL:${KICAD_IPC_API}>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
         $<TARGET_PROPERTY:picosha2,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:nlohmann_json_schema_validator,INTERFACE_INCLUDE_DIRECTORIES>
+        # WASM: Add scripting directory for python_manager.h (Python not available)
+        $<$<BOOL:${EMSCRIPTEN}>:${PROJECT_SOURCE_DIR}/scripting>
     )
 
 add_dependencies( kicommon pegtl version_header )
@@ -633,9 +668,14 @@ set( COMMON_WIDGET_SRCS
     widgets/wx_progress_reporters.cpp
     widgets/wx_splitter_window.cpp
     widgets/wx_treebook.cpp
-    widgets/webview_panel.cpp
     widgets/zoom_correction_ctrl.cpp
     )
+
+# webview_panel.cpp is built as part of KICOMMON_SRCS above. It builds everywhere
+# (including WASM/Emscripten, where wxUSE_WEBVIEW=0) thanks to its wxUSE_WEBVIEW
+# guards, so the WEBVIEW_PANEL symbols its callers reference (e.g. the eeschema
+# remote-symbol panel) resolve. The previous COMMON_WIDGETS_SRCS list was never
+# consumed by any target.
 
 set( COMMON_DRAWING_SHEET_SRCS
     drawing_sheet/ds_data_item.cpp
@@ -683,13 +723,6 @@ set( PLOTTERS_CONTROL_SRCS
 
 set( COMMON_IO_SRCS
 
-    # Altium
-    io/altium/altium_binary_parser.cpp
-    io/altium/altium_ascii_parser.cpp
-    io/altium/altium_parser_utils.cpp
-    io/altium/altium_project_variants.cpp
-    io/altium/altium_props_utils.cpp
-
     # Cadstar
     io/cadstar/cadstar_archive_parser.cpp
     io/cadstar/cadstar_parts_lib_parser.cpp
@@ -707,6 +740,17 @@ set( COMMON_IO_SRCS
 
     io/csv.cpp
     )
+
+# Altium import not supported on WASM (compoundfilereader uses non-standard std::basic_string<unsigned short>)
+if( NOT EMSCRIPTEN )
+    list( APPEND COMMON_IO_SRCS
+        io/altium/altium_binary_parser.cpp
+        io/altium/altium_ascii_parser.cpp
+        io/altium/altium_parser_utils.cpp
+        io/altium/altium_project_variants.cpp
+        io/altium/altium_props_utils.cpp
+    )
+endif()
 
 set ( COMMON_TRANSLINE_CALCULATION_SRCS
     transline_calculations/transline_calculation_base.cpp
@@ -839,13 +883,23 @@ set( COMMON_SRCS
     properties/property_mgr.cpp
     properties/std_optional_variants.cpp
 
-    database/database_connection.cpp
-
     http_lib/http_lib_connection.cpp
     http_lib/http_lib_settings.cpp
-
-    api/api_enums.cpp
     )
+
+# Database support not available on WASM (requires nanodbc/ODBC)
+if( NOT EMSCRIPTEN )
+    list( APPEND COMMON_SRCS
+        database/database_connection.cpp
+    )
+endif()
+
+# API enums require protobuf
+if( KICAD_IPC_API )
+    list( APPEND COMMON_SRCS
+        api/api_enums.cpp
+    )
+endif()
 
 # This needs to be in the common library until draw_panel_gal is moved to kicommon
 if( UNIX AND NOT APPLE )
@@ -891,7 +945,9 @@ add_dependencies( common version_header )
 if( TARGET remote_provider_schema_build_copy )
     add_dependencies( common remote_provider_schema_build_copy )
 endif()
-add_dependencies( common compoundfilereader )  # used by altium_parser.cpp
+if( NOT EMSCRIPTEN )
+    add_dependencies( common compoundfilereader )  # used by altium_parser.cpp
+endif()
 
 target_link_libraries( common
     libcontext
@@ -909,8 +965,8 @@ target_link_libraries( common
     pybind11::embed
     compoundfilereader
     Boost::headers
-    # Database support needs these two
-    nanodbc # for now; maybe hoist out of common
+    # Database support needs these two (not available for WASM)
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:nanodbc>
     Boost::locale
     ${wxWidgets_LIBRARIES}
     ${EXTRA_LIBS}
@@ -925,7 +981,7 @@ if( KICAD_USE_SENTRY )
         sentry )
 endif()
 
-if( KICAD_IPC_API )
+if( KICAD_IPC_API AND NOT EMSCRIPTEN )
     target_link_libraries( common
         kinng
         )
@@ -936,7 +992,7 @@ target_include_directories( common
         .
         ${CMAKE_BINARY_DIR}
         $<TARGET_PROPERTY:argparse::argparse,INTERFACE_INCLUDE_DIRECTORIES>
-        $<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>
+        $<$<BOOL:${KICAD_IPC_API}>:$<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>>
     )
 
 # text markup support
@@ -947,9 +1003,12 @@ target_include_directories( common PUBLIC
     $<TARGET_PROPERTY:magic_enum,INTERFACE_INCLUDE_DIRECTORIES>
     )
 
-target_include_directories( common SYSTEM PUBLIC
-    $<TARGET_PROPERTY:nanodbc,INTERFACE_INCLUDE_DIRECTORIES>
-    )
+# WASM: nanodbc (ODBC) not available
+if( NOT EMSCRIPTEN )
+    target_include_directories( common SYSTEM PUBLIC
+        $<TARGET_PROPERTY:nanodbc,INTERFACE_INCLUDE_DIRECTORIES>
+        )
+endif()
 
 set( PCB_COMMON_SRCS
     hash_eda.cpp
@@ -1039,6 +1098,7 @@ set( PCB_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_io/kicad_sexpr/pcb_io_kicad_sexpr_parser.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_io/eagle/pcb_io_eagle.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_io/geda/pcb_io_geda.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/pcb_io/pcbjam_fp/pcb_io_pcbjam_fp.cpp
 
     ${CMAKE_SOURCE_DIR}/pcbnew/tools/pcb_grid_helper.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/tools/pcb_actions.cpp
@@ -1054,11 +1114,13 @@ set( PCB_COMMON_SRCS
     widgets/area_selector.cpp
 )
 
-set( PCB_COMMON_SRCS
-    ${PCB_COMMON_SRCS}
-    ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_enums.cpp
-    ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_utils.cpp
-)
+if( KICAD_IPC_API )
+    set( PCB_COMMON_SRCS
+        ${PCB_COMMON_SRCS}
+        ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_enums.cpp
+        ${CMAKE_SOURCE_DIR}/pcbnew/api/api_pcb_utils.cpp
+    )
+endif()
 
 add_library( pcbcommon STATIC ${PCB_COMMON_SRCS} )
 
@@ -1077,6 +1139,13 @@ if( KICAD_USE_PCH )
 endif()
 
 target_compile_definitions(pcbcommon PRIVATE PCBNEW)
+
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged editor image: pcbcommon is PCB-side code (pad.cpp/pcb_painter.cpp/... call
+    # Kiface() with no frame context and must statically reach the PCB kiface). Same
+    # rename set as pcbnew_kiface_objects — see the top-level CMakeLists.txt.
+    target_compile_definitions( pcbcommon PRIVATE ${KICAD_WASM_PCB_SIDE_RENAMES} )
+endif()
 
 target_include_directories( pcbcommon PRIVATE
     )

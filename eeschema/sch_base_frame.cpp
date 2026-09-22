@@ -795,6 +795,7 @@ wxString SCH_BASE_FRAME::SelectLibrary( const wxString& aDialogTitle, const wxSt
 
 void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
 {
+#if wxUSE_FSWATCHER
     Unbind( wxEVT_FSWATCHER, &SCH_BASE_FRAME::OnSymChange, this );
 
     if( m_watcher )
@@ -861,11 +862,15 @@ void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
         wxLogNull silence;
         m_watcher->Add( fn );
     }
+#else
+    (void) aID;
+#endif
 }
 
 
 void SCH_BASE_FRAME::OnSymChange( wxFileSystemWatcherEvent& aEvent )
 {
+#if wxUSE_FSWATCHER
     wxLogTrace( traceLibWatch, "OnSymChange: %s, watcher file: %s",
                 aEvent.GetPath().GetFullPath(), m_watcherFileName.GetFullPath() );
 
@@ -893,6 +898,9 @@ void SCH_BASE_FRAME::OnSymChange( wxFileSystemWatcherEvent& aEvent )
         wxLogTrace( traceLibWatch, "Failed to start the debounce timer" );
         return;
     }
+#else
+    (void) aEvent;
+#endif
 }
 
 

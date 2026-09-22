@@ -33,7 +33,11 @@
 #include "../common_ogl/ogl_utils.h"
 #include "eda_3d_canvas.h"
 #include <eda_3d_viewer_frame.h>
+#ifdef __EMSCRIPTEN__
+#include <3d_rendering/raytracing/render_3d_raytrace_ram.h>
+#else
 #include <3d_rendering/raytracing/render_3d_raytrace_gl.h>
+#endif
 #include <3d_rendering/opengl/render_3d_opengl.h>
 #include <3d_viewer_id.h>
 #include <advanced_config.h>
@@ -125,7 +129,23 @@ EDA_3D_CANVAS::EDA_3D_CANVAS( wxWindow* aParent, const wxGLAttributes& aGLAttrib
 
     m_is_currently_painting.clear();
 
+#ifdef __EMSCRIPTEN__
+    // Match EDA_DRAW_PANEL_GAL (draw_panel_gal.cpp): a custom background style tells
+    // the wx DOM port this window paints its own surface, so it keeps the canvas
+    // region TRANSPARENT on the shared 2D #canvas instead of filling it with the
+    // frame's background colour. Without this the secondary 3D-viewer frame's grey
+    // background is painted over the region and occludes our WebGL canvas (the board
+    // renders into the GL buffer but is hidden behind #canvas).
+    SetBackgroundStyle( wxBG_STYLE_CUSTOM );
+#endif
+
+#ifndef __EMSCRIPTEN__
     m_3d_render_raytracing = new RENDER_3D_RAYTRACE_GL( this, m_boardAdapter, m_camera );
+#else
+    // WASM: the GL-free CPU raytracer renders into a RAM RGBA buffer that we blit
+    // to the canvas with a WebGL2 quad (no fixed-function GL / LEGACY_GL_EMULATION).
+    m_3d_render_raytracing = new RENDER_3D_RAYTRACE_RAM( m_boardAdapter, m_camera );
+#endif
     m_3d_render_opengl = new RENDER_3D_OPENGL( this, m_boardAdapter, m_camera );
 
     wxASSERT( m_3d_render_raytracing != nullptr );
@@ -137,11 +157,14 @@ EDA_3D_CANVAS::EDA_3D_CANVAS( wxWindow* aParent, const wxGLAttributes& aGLAttrib
                 return std::make_unique<WX_BUSY_INDICATOR>();
             };
 
+#ifndef __EMSCRIPTEN__
     m_3d_render_raytracing->SetBusyIndicatorFactory( busy_indicator_factory );
+#endif
     m_3d_render_opengl->SetBusyIndicatorFactory( busy_indicator_factory );
 
     // We always start with the opengl engine (raytracing is avoided due to very
-    // long calculation time)
+    // long calculation time). On WASM the fixed-function renderer runs on the
+    // wasm/gl1 GL1->WebGL2 emulation layer (regression gate: tests/3d-regression).
     m_3d_render = m_3d_render_opengl;
 
     m_boardAdapter.ReloadColorSettings();
@@ -277,6 +300,10 @@ bool  EDA_3D_CANVAS::initializeOpenGL()
         if( tokenizer.HasMoreTokens() )
             tokenizer.GetNextToken().ToLong( &minor );
 
+#ifndef __EMSCRIPTEN__
+        // On WASM the raytracer is a GL-free CPU renderer, so the desktop "GL too
+        // old for raytracing" downgrade must not run (WebGL reports "OpenGL ES
+        // 3.0", which would otherwise trip this and disable it).
         if( major < 2 || ( ( major == 2 ) && ( minor < 1 ) ) )
         {
             wxLogTrace( m_logTrace, wxT( "EDA_3D_CANVAS::%s OpenGL ray tracing not supported." ),
@@ -290,6 +317,7 @@ bool  EDA_3D_CANVAS::initializeOpenGL()
 
             m_opengl_supports_raytracing = false;
         }
+#endif
 
         if( ( major == 1 ) && ( minor < 5 ) )
         {
@@ -392,7 +420,12 @@ void EDA_3D_CANVAS::DoRePaint()
     // This is dependent of the platform.
     // Especially on OSX, but also on Windows, it frequently happens
     if( !GetParent()->GetParent()->IsShownOnScreen() )
+    {
+        // Clear the latch like every other early return does — leaving it set
+        // blocks all future repaints of this canvas permanently.
+        m_is_currently_painting.clear();
         return; // The parent board editor frame is no more alive
+    }
 
     wxString            err_messages;
     INFOBAR_REPORTER    warningReporter( m_parentInfoBar );
@@ -469,6 +502,8 @@ void EDA_3D_CANVAS::DoRePaint()
     }
 
     // Don't attempt to ray trace if OpenGL doesn't support it.
+    // (On WASM m_opengl_supports_raytracing stays true — the fixed-function engine
+    // runs on the wasm/gl1 emulation layer and the CPU raytracer stays available.)
     if( !m_opengl_supports_raytracing )
     {
         m_3d_render = m_3d_render_opengl;
@@ -544,8 +579,10 @@ void EDA_3D_CANVAS::DoRePaint()
             // cosmetic, so I'm not fixing that for now: I don't know how to do this without
             // reloading twice (maybe it's not too bad of an idea?) or doing a complicated
             // refactor.
+#ifndef __EMSCRIPTEN__
             if( reloadRaytracingForCalculations )
                 m_3d_render_raytracing->Reload( nullptr, nullptr, true );
+#endif
         }
         catch( std::runtime_error& )
         {
@@ -556,6 +593,15 @@ void EDA_3D_CANVAS::DoRePaint()
             m_is_currently_painting.clear();
             return;
         }
+
+#ifdef __EMSCRIPTEN__
+        // Raytracing engine only: present the CPU raytracer's RAM RGBA buffer on
+        // the canvas via a textured fullscreen quad. The OpenGL engine (wasm/gl1
+        // emulation layer) draws straight into the default framebuffer — blitting
+        // over it would clobber the render.
+        if( m_3d_render == m_3d_render_raytracing )
+            blitRaytracerImage();
+#endif
     }
 
     if( m_render_pivot )
@@ -617,6 +663,11 @@ void EDA_3D_CANVAS::DoRePaint()
 
     m_is_currently_painting.clear();
 }
+
+
+// NOTE (WASM): blitRaytracerImage() and its compileBlitShader() helper are defined in
+// eda_3d_canvas_wasm.cpp — completely new code kept in its own TU so this (upstream)
+// file's fork diff stays limited to the small #ifdef __EMSCRIPTEN__ hooks above.
 
 
 void EDA_3D_CANVAS::RenderToFrameBuffer( unsigned char* buffer, int width, int height )
@@ -806,8 +857,10 @@ void EDA_3D_CANVAS::RenderToFrameBuffer( unsigned char* buffer, int width, int h
 
             requested_redraw = m_3d_render->Redraw( false, nullptr, nullptr );
 
+#ifndef __EMSCRIPTEN__
             if( reloadRaytracingForCalculations )
                 m_3d_render_raytracing->Reload( nullptr, nullptr, true );
+#endif
         }
         catch( std::runtime_error& )
         {
@@ -983,6 +1036,7 @@ void EDA_3D_CANVAS::OnMouseMove( wxMouseEvent& event )
         // OnMiddleUp() will do it at the end of mouse drag/move command
     }
 
+#ifndef __EMSCRIPTEN__
     if( !event.Dragging() && m_boardAdapter.m_Cfg->m_Render.engine == RENDER_ENGINE::OPENGL )
     {
         STATUSBAR_REPORTER reporter( m_parentStatusBar, EDA_3D_VIEWER_STATUSBAR::HOVERED_ITEM );
@@ -1077,6 +1131,7 @@ void EDA_3D_CANVAS::OnMouseMove( wxMouseEvent& event )
             m_currentRollOverItem = nullptr;
         }
     }
+#endif // __EMSCRIPTEN__
 }
 
 

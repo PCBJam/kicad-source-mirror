@@ -1149,6 +1149,20 @@ void FOOTPRINT_EDIT_FRAME::initLibraryTree()
 {
     FOOTPRINT_LIBRARY_ADAPTER* footprints = PROJECT_PCB::FootprintLibAdapter( &Prj() );
 
+    // Footprint libraries are preloaded only for the face the app booted into
+    // (single_top.cpp preloads KIFACE( KifaceType( topFrame ) )). Opening this frame
+    // from a schematic session goes through Kiway().Player( FRAME_FOOTPRINT_EDITOR ),
+    // which starts FACE_PCB lazily and never preloads — so nothing has walked the
+    // libraries and the tree comes up EMPTY: GetLibraryNames() only reports rows whose
+    // status is LOADED, and Sync() skips everything else.
+    //
+    // Same reasoning and same remedy as FOOTPRINT_LIST_IMPL::ReadFootprintFiles().
+    // AsyncLoad() self-skips already-loaded rows, so the pcbnew / standalone-fpedit
+    // boots are unaffected, and enumerateLibrary() is a no-op on this port (bodies
+    // still lazy-load through GetFootprints()), so this stays cheap.
+    footprints->AsyncLoad();
+    footprints->BlockUntilLoaded();
+
     m_adapter = FP_TREE_SYNCHRONIZING_ADAPTER::Create( this, footprints );
     auto adapter = static_cast<FP_TREE_SYNCHRONIZING_ADAPTER*>( m_adapter.get() );
 

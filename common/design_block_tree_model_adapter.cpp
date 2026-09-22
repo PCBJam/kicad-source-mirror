@@ -20,6 +20,10 @@
 #include <pgm_base.h>
 #include <kiface_base.h>
 #include <eda_base_frame.h>
+
+#ifdef __EMSCRIPTEN__
+#include <kiway.h>
+#endif
 #include <core/kicad_algo.h>
 #include <settings/common_settings.h>
 #include <project/project_file.h>
@@ -41,12 +45,39 @@ DESIGN_BLOCK_TREE_MODEL_ADAPTER::Create( EDA_BASE_FRAME* aParent, DESIGN_BLOCK_L
 }
 
 
+#ifdef __EMSCRIPTEN__
+// WASM: resolve the owning frame's kiface settings exactly (the ctor has the frame in
+// hand). In the merged editor image (pcbnew + eeschema statically linked,
+// KICAD_WASM_MERGED_EDITOR) the global Kiface() is only a focus-based fallback.
+static APP_SETTINGS_BASE::LIB_TREE& wasmDesignBlockTreeSettings( EDA_BASE_FRAME* aFrame )
+{
+    KIWAY::FACE_T face = KIWAY::KifaceType( aFrame->GetFrameType() );
+
+    if( face != KIWAY::FACE_T( -1 ) )
+    {
+        if( KIFACE* kiface = aFrame->Kiway().KiFACE( face ) )
+        {
+            return static_cast<KIFACE_BASE*>( kiface )
+                    ->KifaceSettings()->m_DesignBlockChooserPanel.tree;
+        }
+    }
+
+    return Kiface().KifaceSettings()->m_DesignBlockChooserPanel.tree;
+}
+#endif
+
+
 DESIGN_BLOCK_TREE_MODEL_ADAPTER::DESIGN_BLOCK_TREE_MODEL_ADAPTER( EDA_BASE_FRAME* aParent,
                                                                   DESIGN_BLOCK_LIBRARY_ADAPTER* aLibs,
                                                                   APP_SETTINGS_BASE::LIB_TREE& aSettings,
                                                                   TOOL_INTERACTIVE* aContextMenuTool ) :
+#ifdef __EMSCRIPTEN__
+        LIB_TREE_MODEL_ADAPTER( aParent, wxT( "pinned_design_block_libs" ),
+                                wasmDesignBlockTreeSettings( aParent ) ),
+#else
         LIB_TREE_MODEL_ADAPTER( aParent, wxT( "pinned_design_block_libs" ),
                                 Kiface().KifaceSettings()->m_DesignBlockChooserPanel.tree ),
+#endif
         m_libs( aLibs ),
         m_frame( aParent ),
         m_contextMenuTool( aContextMenuTool )

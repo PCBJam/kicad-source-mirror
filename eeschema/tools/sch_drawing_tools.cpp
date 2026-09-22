@@ -164,6 +164,13 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
 {
     const SCH_ACTIONS::PLACE_SYMBOL_PARAMS& toolParams = aEvent.Parameter<SCH_ACTIONS::PLACE_SYMBOL_PARAMS>();
 
+    struct IMPORT_RECEIPT
+    {
+        std::function<void( bool )> callback;
+        bool placed = false;
+        ~IMPORT_RECEIPT() { if( callback ) callback( placed ); }
+    } receipt{ toolParams.m_OnPlacementFinished };
+
     SCH_SYMBOL* symbol = toolParams.m_Symbol;
 
     // If we get a parameterised symbol, we probably just want to place that and get out of the placmeent tool,
@@ -180,7 +187,10 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
     bool                        placeAllUnits = false;
 
     if( m_inDrawingTool )
+    {
+        if( receipt.callback ) delete symbol;
         return 0;
+    }
 
     REENTRANCY_GUARD guard( &m_inDrawingTool );
 
@@ -328,6 +338,12 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
             if( symbol )
             {
                 cleanup();
+
+                if( placeOneOnly && receipt.callback )
+                {
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
 
                 if( keepSymbol )
                 {
@@ -492,6 +508,13 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
             }
             else
             {
+                if( toolParams.m_CanPlace && !toolParams.m_CanPlace() )
+                {
+                    cleanup();
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
+
                 m_view->ClearPreview();
                 m_frame->AddToScreen( symbol, screen );
 
@@ -508,6 +531,7 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 lwbTool->AddJunctionsIfNeeded( &commit, &m_selectionTool->GetSelection() );
 
                 commit.Push( _( "Place Symbol" ) );
+                receipt.placed = true;
 
                 if( placeOneOnly )
                 {

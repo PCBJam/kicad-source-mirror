@@ -60,8 +60,14 @@ add_custom_command( COMMAND ${CMAKE_COMMAND} -E make_directory ${KIAPI_CPP_BASEP
     OUTPUT ${KIAPI_CPP_SRCS} ${KIAPI_CPP_HEADERS}
     )
 
-# kiapi must be a shared DLL because the protobuf messages can only be initialized once
-add_library( kiapi SHARED
+# kiapi must be a shared DLL because the protobuf messages can only be initialized once.
+# WASM has no shared-library support, so it links kiapi statically (single binary) instead.
+if( EMSCRIPTEN )
+    set( _KIAPI_TYPE STATIC )
+else()
+    set( _KIAPI_TYPE SHARED )
+endif()
+add_library( kiapi ${_KIAPI_TYPE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/import_export.h
     ${KIAPI_CPP_SRCS}
     ${KIAPI_CPP_HEADERS}

@@ -151,7 +151,19 @@ SCH_ITEM* SCH_ITEM::Duplicate( bool addToParentGroup, SCH_COMMIT* aCommit, bool 
     SCH_ITEM* newItem = (SCH_ITEM*) Clone();
 
     if( !doClone )
+    {
         const_cast<KIID&>( newItem->m_Uuid ) = KIID();
+
+        // Children carry uuids too (symbol pins): a duplicate sharing its
+        // pins' uuids with the original breaks uuid-keyed consumers (collab
+        // item sync). Mirrors FOOTPRINT::Duplicate's child re-roll.
+        newItem->RunOnChildren(
+                []( SCH_ITEM* aChild )
+                {
+                    const_cast<KIID&>( aChild->m_Uuid ) = KIID();
+                },
+                RECURSE_MODE::RECURSE );
+    }
 
     newItem->ClearFlags( SELECTED | BRIGHTENED );
 

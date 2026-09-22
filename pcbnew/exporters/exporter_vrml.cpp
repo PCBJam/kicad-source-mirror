@@ -52,6 +52,8 @@
 
 #include <exporter_vrml.h>
 
+#ifndef __EMSCRIPTEN__
+
 EXPORTER_VRML::EXPORTER_VRML( BOARD* aBoard )
 {
     pcb_exporter = new EXPORTER_PCB_VRML( aBoard );
@@ -1594,3 +1596,65 @@ void EXPORTER_PCB_VRML::create_vrml_shell( IFSG_TRANSFORM& PcbOutput, VRML_COLOR
         ++sidx;
     }
 }
+
+#else  // __EMSCRIPTEN__
+
+// VRML export is not supported in WASM builds - stub implementations
+
+#include "pcb_edit_frame.h"
+
+EXPORTER_VRML::EXPORTER_VRML( BOARD* aBoard )
+{
+    (void)aBoard;
+    pcb_exporter = nullptr;
+}
+
+EXPORTER_VRML::~EXPORTER_VRML()
+{
+}
+
+bool EXPORTER_VRML::ExportVRML_File( PROJECT* aProject, wxString *aMessages,
+                              const wxString& aFullFileName, double aMMtoWRMLunit,
+                              bool aIncludeUnspecified, bool aIncludeDNP,
+                              bool aExport3DFiles, bool aUseRelativePaths,
+                              const wxString& a3D_Subdir,
+                              double aXRef, double aYRef )
+{
+    (void)aProject;
+    (void)aFullFileName;
+    (void)aMMtoWRMLunit;
+    (void)aIncludeUnspecified;
+    (void)aIncludeDNP;
+    (void)aExport3DFiles;
+    (void)aUseRelativePaths;
+    (void)a3D_Subdir;
+    (void)aXRef;
+    (void)aYRef;
+
+    if( aMessages )
+        *aMessages = wxT( "VRML export is not available in this build" );
+
+    return false;
+}
+
+bool PCB_EDIT_FRAME::ExportVRML_File( const wxString& aFullFileName, double aMMtoWRMLunit,
+                                      bool aIncludeUnspecified, bool aIncludeDNP,
+                                      bool aExport3DFiles, bool aUseRelativePaths,
+                                      const wxString& a3D_Subdir,
+                                      double aXRef, double aYRef )
+{
+    (void)aFullFileName;
+    (void)aMMtoWRMLunit;
+    (void)aIncludeUnspecified;
+    (void)aIncludeDNP;
+    (void)aExport3DFiles;
+    (void)aUseRelativePaths;
+    (void)a3D_Subdir;
+    (void)aXRef;
+    (void)aYRef;
+
+    wxMessageBox( wxT( "VRML export is not available in this build" ) );
+    return false;
+}
+
+#endif  // __EMSCRIPTEN__

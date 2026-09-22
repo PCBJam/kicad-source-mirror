@@ -78,6 +78,34 @@ static wxBitmap createLayerPairBitmapAtSize( const COLOR4D& aTopColor, const COL
     wxMemoryDC memDC;
     memDC.SelectObject( bitmap );
 
+#ifdef __EMSCRIPTEN__
+    // The WASM (DOM) wx port has no wxGraphicsContext renderer (wxUSE_CAIRO=0), so
+    // wxGraphicsContext::Create() would dereference a null default renderer and trap.
+    // Draw the same two-tone layer-pair icon with plain wxDC instead (no antialiasing).
+    {
+        const int emSepTopX = aSize - aSize / 3;
+        const int emSepBotX = aSize / 3 - 1;
+
+        wxPoint topPoly[4] = { { 0, 0 }, { emSepTopX, 0 }, { emSepBotX, aSize }, { 0, aSize } };
+        wxPoint bottomPoly[4] = { { emSepTopX, 0 }, { aSize, 0 }, { aSize, aSize }, { emSepBotX, aSize } };
+
+        memDC.SetPen( *wxTRANSPARENT_PEN );
+        memDC.SetBrush( wxBrush( aTopColor.WithAlpha( 1.0 ).ToColour() ) );
+        memDC.DrawPolygon( 4, topPoly );
+        memDC.SetBrush( wxBrush( aBottomColor.WithAlpha( 1.0 ).ToColour() ) );
+        memDC.DrawPolygon( 4, bottomPoly );
+
+        const int emLineScale = std::max( 1, wxRound( aSize / 24.0 ) );
+        memDC.SetPen( wxPen( *wxWHITE, 3 * emLineScale ) );
+        memDC.DrawLine( emSepTopX, -1, emSepBotX, aSize );
+        memDC.SetPen( wxPen( *wxBLACK, 1 * emLineScale ) );
+        memDC.DrawLine( emSepTopX, -1, emSepBotX, aSize );
+
+        memDC.SelectObject( wxNullBitmap );
+        return bitmap;
+    }
+#endif
+
     wxGraphicsContext* gc = wxGraphicsContext::Create( memDC );
     if( !gc )
         return bitmap;

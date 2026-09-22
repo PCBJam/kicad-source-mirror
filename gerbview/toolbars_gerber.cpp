@@ -21,6 +21,7 @@
 
 #include <wx/wupdlock.h>
 #include <wx/stattext.h>
+#include <wx/choice.h>
 
 #include <gerbview.h>
 #include <gerbview_frame.h>

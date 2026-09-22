@@ -220,9 +220,47 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
         return nullptr;
     }
 
+#ifdef __EMSCRIPTEN__
+    // WASM: Dynamic loading not supported. Use statically-linked KIFACE.
+    // For WASM, we need to ensure OnKifaceStart is called even if set_kiface()
+    // was used to pre-register the kiface (as done in single_top.cpp for non-DLL builds).
+    // We use m_kiface_version as an indicator: if kiface is set but version is 0,
+    // OnKifaceStart hasn't been called yet.
+    if( m_kiface[aFaceId] && m_kiface_version[aFaceId] != 0 )
+        return m_kiface[aFaceId];
+
+    if( doLoad || m_kiface[aFaceId] )
+    {
+        KIFACE* kiface = m_kiface[aFaceId];
+
+        if( !kiface )
+        {
+            // WASM statically links exactly ONE kiface - the app's own, which is
+            // registered in its FACE_T slot via set_kiface() (single_top.cpp). An
+            // unregistered slot therefore means that editor is not present in this
+            // single-app binary, so the face is genuinely unavailable.
+            //
+            // Do NOT fall back to the statically-linked KIFACE_GETTER here: it
+            // returns THIS app's kiface regardless of the requested face, which
+            // then cannot CreateKiWindow() the other editor's panels and yields
+            // blank Preferences pages (Footprint/PCB/3D/Gerber in eeschema).
+            return nullptr;
+        }
+
+        // kiface was set via set_kiface(), but OnKifaceStart() wasn't called yet.
+        m_kiface_version[aFaceId] = KIFACE_VERSION;
+
+        if( kiface->OnKifaceStart( &Pgm(), m_ctl, this ) )
+            return m_kiface[aFaceId] = kiface;
+
+        return nullptr;
+    }
+    return nullptr;
+#else
     // return the previously loaded KIFACE, if it was.
     if( m_kiface[aFaceId] )
         return m_kiface[aFaceId];
+#endif
 
     // DSO with KIFACE has not been loaded yet, does caller want to load it?
     if( doLoad )

@@ -209,12 +209,15 @@ PANEL_PREVIEW_3D_MODEL::PANEL_PREVIEW_3D_MODEL( wxWindow* aParent, PCB_BASE_FRAM
 
     try
     {
-#if defined(__linux__) || defined(__FreeBSD__)
+#ifdef __EMSCRIPTEN__
+        // SpaceMouse not supported in WASM
+#elif defined( __linux__ ) || defined( __FreeBSD__ )
         m_spaceMouse = std::make_unique<SPNAV_VIEWER_PLUGIN>( m_previewPane );
+        m_spaceMouse->SetFocus( true );
 #else
         m_spaceMouse = std::make_unique<NL_FOOTPRINT_PROPERTIES_PLUGIN>( m_previewPane );
-#endif
         m_spaceMouse->SetFocus( true );
+#endif
     }
     catch( const std::system_error& e )
     {
@@ -670,10 +673,12 @@ void PANEL_PREVIEW_3D_MODEL::onUnitsChanged( wxCommandEvent& aEvent )
 
 void PANEL_PREVIEW_3D_MODEL::onPanelShownEvent( wxCommandEvent& aEvent )
 {
+#ifndef __EMSCRIPTEN__
     if( m_spaceMouse )
     {
         m_spaceMouse->SetFocus( static_cast<bool>( aEvent.GetInt() ) );
     }
+#endif
 
     aEvent.Skip();
 }

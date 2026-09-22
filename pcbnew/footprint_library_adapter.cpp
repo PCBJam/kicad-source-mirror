@@ -57,10 +57,38 @@ wxString FOOTPRINT_LIBRARY_ADAPTER::GlobalPathEnvVariableName()
 
 void FOOTPRINT_LIBRARY_ADAPTER::enumerateLibrary( LIB_DATA* aLib, const wxString& aUri )
 {
+    // Lazy load: the bulk async preload (LIBRARY_MANAGER_ADAPTER::AsyncLoad) calls this hook
+    // to parse every library's footprints up front. For the WASM port's network-backed
+    // (pcbjam/CDN) footprint libraries that turns startup into hundreds of serialized,
+    // main-thread-blocking enumerations -- each FootprintEnumerate is a suspending CDN fetch.
+    // The full ~222-library set ran inline during the PCB editor's boot (single_top -> IFACE::
+    // PreloadLibraries -> AsyncLoad), so the frame never reached its first paint and the tab
+    // appeared frozen. Skip the eager parse here; preloadLibrary() populates PreloadedFootprints
+    // on first access (GetFootprints / RefreshLibraryIfChanged). Mirrors
+    // SYMBOL_LIBRARY_ADAPTER::enumerateLibrary's lazy enumerate.
+    wxLogTrace( traceLibraries, "FP: %s: plugin ready (lazy enumerate)", aLib->row->Nickname() );
+
+    (void) aUri;
+}
+
+
+void FOOTPRINT_LIBRARY_ADAPTER::preloadLibrary( const LIB_DATA* aLib, const wxString& aUri )
+{
+    wxString nickname = aLib->row->Nickname();
+
+    {
+        // Idempotent: another access may already have parsed this library. Replacing a
+        // populated entry would free FOOTPRINT*s that earlier GetFootprints() callers still
+        // hold, so bail out instead.
+        std::shared_lock lock( PreloadedFootprintsMutex );
+
+        if( PreloadedFootprints.Get().count( nickname ) )
+            return;
+    }
+
     wxArrayString namesAS;
     std::map<std::string, UTF8> options = aLib->row->GetOptionsMap();
     PCB_IO* plugin = pcbplugin( aLib );
-    wxString nickname = aLib->row->Nickname();
 
     // FootprintEnumerate populates the plugin's internal FP_CACHE with parsed footprints
     plugin->FootprintEnumerate( namesAS, aUri, false, &options );
@@ -155,8 +183,39 @@ std::optional<LIB_STATUS> FOOTPRINT_LIBRARY_ADAPTER::LoadOne( const wxString& ni
 
 std::vector<FOOTPRINT*> FOOTPRINT_LIBRARY_ADAPTER::GetFootprints( const wxString& aNickname, bool aBestEfforts )
 {
-    std::vector<FOOTPRINT*> footprints;
+    // Fast path: already parsed.
+    {
+        std::shared_lock lock( PreloadedFootprintsMutex );
+        auto it = PreloadedFootprints.Get().find( aNickname );
 
+        if( it != PreloadedFootprints.Get().end() )
+        {
+            std::vector<FOOTPRINT*> footprints;
+            footprints.reserve( it->second.size() );
+
+            for( const auto& fp : it->second )
+                footprints.push_back( fp.get() );
+
+            return footprints;
+        }
+    }
+
+    // Lazy populate: enumerateLibrary() is a no-op on this port so the bulk startup preload
+    // doesn't parse every footprint library on the main thread. Parse this one on first access
+    // instead (the lock above is released first; preloadLibrary takes the write lock).
+    if( std::optional<const LIB_DATA*> maybeLib = fetchIfLoaded( aNickname ) )
+    {
+        try
+        {
+            preloadLibrary( *maybeLib, getUri( ( *maybeLib )->row ) );
+        }
+        catch( IO_ERROR& e )
+        {
+            wxLogTrace( traceLibraries, "FP: lazy enumerate %s failed: %s", aNickname, e.What() );
+        }
+    }
+
+    std::vector<FOOTPRINT*> footprints;
     std::shared_lock lock( PreloadedFootprintsMutex );
     auto it = PreloadedFootprints.Get().find( aNickname );
 
@@ -253,13 +312,35 @@ void FOOTPRINT_LIBRARY_ADAPTER::RefreshLibraryIfChanged( const wxString& aNickna
         std::shared_lock lock( PreloadedFootprintsMutex );
         auto tsIt = m_preloadedTimestamps.find( aNickname );
 
-        if( tsIt != m_preloadedTimestamps.end() && tsIt->second == currentTimestamp )
+        // No recorded timestamp means the library was never parsed (enumerateLibrary() is a
+        // no-op on this port). Nothing to refresh -- the lazy GetFootprints() path will parse
+        // it on first access.
+        if( tsIt == m_preloadedTimestamps.end() )
+            return;
+
+        if( tsIt->second == currentTimestamp )
             return;
 
         wxLogTrace( traceLibraries, "FP: %s changed on disk, re-enumerating", aNickname );
     }
 
-    enumerateLibrary( lib, uri );
+    // Drop the stale parse and re-run it now. preloadLibrary() is idempotent-by-presence, so
+    // clear the entry first to force a fresh enumeration.
+    {
+        std::unique_lock lock( PreloadedFootprintsMutex );
+        PreloadedFootprints.Get().erase( aNickname );
+        m_preloadedTimestamps.erase( aNickname );
+    }
+
+    preloadLibrary( lib, uri );
+}
+
+
+void FOOTPRINT_LIBRARY_ADAPTER::InvalidatePreloaded( const wxString& aNickname )
+{
+    std::unique_lock lock( PreloadedFootprintsMutex );
+    PreloadedFootprints.Get().erase( aNickname );
+    m_preloadedTimestamps.erase( aNickname );
 }
 
 

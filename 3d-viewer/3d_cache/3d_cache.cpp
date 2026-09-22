@@ -37,6 +37,9 @@
 #include "3d_info.h"
 #include "3d_plugin_manager.h"
 #include "model_substitution_helpers.h"
+#ifdef __EMSCRIPTEN__
+#include "pcbjam_model_fetch.h"
+#endif
 #include "sg/scenegraph.h"
 #include "plugins/3dapi/ifsg_api.h"
 
@@ -149,6 +152,14 @@ SCENEGRAPH* S3D_CACHE::load( const wxString& aModelFile, const wxString& aBasePa
         *aCachePtr = nullptr;
 
     wxString full3Dpath = m_FNResolver->ResolvePath( aModelFile, aBasePath, std::move( aEmbeddedFilesStack ) );
+
+#ifdef __EMSCRIPTEN__
+    // pcbjam: a lib ref the resolver can't find is lazily materialized in MEMFS
+    // by the JS provider, which answers with the absolute path — independent of
+    // env-var expansion working in the wasm runtime (memoized; "" = unserved).
+    if( full3Dpath.empty() )
+        full3Dpath = PCBJAM_3D::EnsureModelFile( aModelFile );
+#endif
 
     if( full3Dpath.empty() )
     {

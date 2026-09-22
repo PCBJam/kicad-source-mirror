@@ -73,7 +73,9 @@
 #include <pcb_painter.h>
 #include <project/project_file.h>
 #include <project/project_local_settings.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <settings/common_settings.h>
 #include <settings/settings_manager.h>
 #include <local_history.h>
@@ -117,7 +119,9 @@
 #include <tools/multichannel_tool.h>
 #include <router/router_tool.h>
 #include <autorouter/autoplace_tool.h>
+#ifdef KICAD_SCRIPTING
 #include <python/scripting/pcb_scripting_tool.h>
+#endif
 #include <netlist_reader/netlist_reader.h>
 #include <dialog_drc.h>     // for DIALOG_DRC_WINDOW_NAME definition
 #include <ratsnest/ratsnest_view_item.h>
@@ -147,10 +151,10 @@
 #endif
 
 #include <action_plugin.h>
+#ifdef KICAD_SCRIPTING
 #include <pcbnew_scripting_helpers.h>
+#endif
 #include <richio.h>
-
-#include "../scripting/python_scripting.h"
 
 using namespace std::placeholders;
 
@@ -525,9 +529,11 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     {
     }
 
+#ifdef KICAD_SCRIPTING
     // Ensure the Python interpreter is up to date with its environment variables
     PythonSyncEnvironmentVariables();
     PythonSyncProjectName();
+#endif
 
     // Sync action plugins in case they changed since the last time the frame opened
     GetToolManager()->RunAction( ACTIONS::pluginsReload );
@@ -770,7 +776,9 @@ void PCB_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 {
+#ifdef KICAD_SCRIPTING
     ScriptingOnDestructPcbEditFrame( this );
+#endif
 
     if( ADVANCED_CFG::GetCfg().m_ShowEventCounters )
     {
@@ -968,7 +976,9 @@ void PCB_EDIT_FRAME::setupTools()
     m_toolManager->RegisterTool( new CONVERT_TOOL );
     m_toolManager->RegisterTool( new PCB_GROUP_TOOL );
     m_toolManager->RegisterTool( new GENERATOR_TOOL );
+#ifdef KICAD_SCRIPTING
     m_toolManager->RegisterTool( new SCRIPTING_TOOL );
+#endif
     m_toolManager->RegisterTool( new PROPERTIES_TOOL );
     m_toolManager->RegisterTool( new MULTICHANNEL_TOOL );
     m_toolManager->RegisterTool( new EMBED_TOOL );
@@ -1062,8 +1072,10 @@ void PCB_EDIT_FRAME::setupUIConditions()
     mgr->SetConditions( PCB_ACTIONS::graphicsOutlines, CHECK( !cond.GraphicsFillDisplay() ) );
     mgr->SetConditions( PCB_ACTIONS::textOutlines,     CHECK( !cond.TextFillDisplay() ) );
 
+#ifdef KICAD_SCRIPTING
     if( SCRIPTING::IsWxAvailable() )
         mgr->SetConditions( PCB_ACTIONS::showPythonConsole, CHECK( cond.ScriptingConsoleVisible() ) );
+#endif
 
     auto enableZoneControlCondition =
             [this] ( const SELECTION& )
@@ -2283,7 +2295,9 @@ void PCB_EDIT_FRAME::FindNext( bool reverse )
 
 int PCB_EDIT_FRAME::TestStandalone()
 {
-    if( Kiface().IsSingle() )
+    // A standalone build can still sync when the SCH kiface is linked in-process
+    // (merged WASM editor) — Player( FRAME_SCH ) works without a project manager.
+    if( Kiface().IsSingle() && !KIWAY::FaceRegistered( KIWAY::FACE_SCH ) )
         return 0;
 
     // Update PCB requires a netlist. Therefore the schematic editor must be running
@@ -2316,12 +2330,23 @@ int PCB_EDIT_FRAME::TestStandalone()
 
         frame->OpenProjectFiles( std::vector<wxString>( 1, fn.GetFullPath() ) );
 
+#ifdef __EMSCRIPTEN__
+        // WASM merged editor (project-sync 0001): there is no project manager whose
+        // bookkeeping needs the schematic frame visible, and every tool owns its own
+        // browser tab — showing the spawned eeschema frame would hijack the PCB tab.
+        // Keep it hidden: the netlist fetch (ExpressMail MAIL_SCH_GET_NETLIST) needs
+        // only the loaded SCHEMATIC, not a visible frame or GAL. Leaving it unshown
+        // also keeps IsShownOnScreen() false, so this block re-runs OpenProjectFiles
+        // on every sync — each update re-reads the (live-restaged) MEMFS schematic
+        // instead of a stale cached parse (repeat-sync freshness).
+#else
         // we show the schematic editor frame, because do not show is seen as
         // a not yet opened schematic by Kicad manager, which is not the case
         frame->Show( true );
 
         // bring ourselves back to the front
         Raise();
+#endif
     }
 
     return 1;            //Success!
@@ -2381,6 +2406,7 @@ bool PCB_EDIT_FRAME::FetchNetlistFromSchematic( NETLIST& aNetlist,
 }
 
 
+#ifdef KICAD_SCRIPTING
 void PCB_EDIT_FRAME::PythonSyncEnvironmentVariables()
 {
     const ENV_VAR_MAP& vars = Pgm().GetLocalEnvVariables();
@@ -2407,6 +2433,7 @@ void PCB_EDIT_FRAME::PythonSyncProjectName()
     // regenerate it (in Unicode) for our normal environment
     wxSetEnv( PROJECT_VAR_NAME, evValue );
 }
+#endif
 
 
 void PCB_EDIT_FRAME::ShowFootprintPropertiesDialog( FOOTPRINT* aFootprint )
@@ -3136,9 +3163,11 @@ void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
     GetCanvas()->GetView()->MarkTargetDirty( KIGFX::TARGET_NONCACHED );
     GetCanvas()->ForceRefresh();
 
+#ifdef KICAD_SCRIPTING
     // Update the environment variables in the Python interpreter
     if( aFlags & ENVVARS_CHANGED )
         PythonSyncEnvironmentVariables();
+#endif
 
     Layout();
     SendSizeEvent();
@@ -3153,7 +3182,9 @@ void PCB_EDIT_FRAME::ThemeChanged()
 
 void PCB_EDIT_FRAME::ProjectChanged()
 {
+#ifdef KICAD_SCRIPTING
     PythonSyncProjectName();
+#endif
 
     // Register autosave history saver for the board.
     // Saver serializes the in-memory BOARD into HISTORY_FILE_DATA. Prettify and

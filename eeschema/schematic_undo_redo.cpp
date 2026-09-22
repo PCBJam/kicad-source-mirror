@@ -256,6 +256,7 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
     SCH_CLEANUP_FLAGS      connectivityCleanUp = NO_CLEANUP;
     SCH_SHEET_LIST         sheets= m_schematic->Hierarchy();
     bool                   clearedRepeatItems = false;
+    bool                   not_found = false;
 
     // Undo in the reverse order of list creation: (this can allow stacked changes like the
     // same item can be changed and deleted in the same complex command).
@@ -264,6 +265,40 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
     {
         UNDO_REDO      status = aList->GetPickedItemStatus( ii );
         EDA_ITEM*      eda_item = aList->GetPickedItem( ii );
+
+        /* Test for existence of the item on the schematic. It could have been deleted
+         * or replaced behind the undo stack's back — a collaborative remote apply is
+         * pushed with SKIP_UNDO and frees the items it removes — so the stored pointer
+         * can be stale or dangling. Mirrors the pcbnew guard in
+         * PCB_BASE_EDIT_FRAME::PutDataInPreviousState.
+         * Not done for items the list itself owns (DELETED items, REPEAT_ITEM clones),
+         * the page-settings proxy item, or the root sheet (a pseudo item that is not
+         * on any screen, so ResolveItem cannot see it).
+         */
+        if( status != UNDO_REDO::DELETED
+                && status != UNDO_REDO::PAGESETTINGS
+                && status != UNDO_REDO::REPEAT_ITEM
+                && eda_item != &Schematic().Root() )
+        {
+            SCH_ITEM* resolved = Schematic().ResolveItem( eda_item->m_Uuid, nullptr, true );
+
+            if( !resolved )
+            {
+                // Remove this non existent item
+                aList->RemovePicker( ii );
+                not_found = true;
+                continue;
+            }
+
+            if( resolved != eda_item )
+            {
+                // The stored pointer is stale: the live item with this UUID was
+                // replaced. Re-anchor the picker on the current live item.
+                aList->SetPickedItem( resolved, ii );
+                eda_item = resolved;
+            }
+        }
+
         SCH_SCREEN*    screen = dynamic_cast<SCH_SCREEN*>( aList->GetScreenForItem( ii ) );
         SCH_SHEET_PATH undoSheet = sheets.FindSheetForScreen( screen );
 
@@ -469,6 +504,9 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
                 AddToScreen( schItem, screen );
         }
     }
+
+    if( not_found )
+        wxLogWarning( wxS( "Incomplete undo/redo operation: some items not found" ) );
 
     // We have now swapped all the group parent and group member pointers.  But it is a
     // risky proposition to bet on the pointers being invariant, so validate them all.

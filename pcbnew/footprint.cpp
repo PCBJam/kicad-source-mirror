@@ -136,6 +136,7 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
 
     m_netTiePadGroups                = aFootprint.m_netTiePadGroups;
     m_jumperPadGroups                = aFootprint.m_jumperPadGroups;
+    m_unitInfo                       = aFootprint.m_unitInfo;
     m_duplicatePadNumbersAreJumpers  = aFootprint.m_duplicatePadNumbersAreJumpers;
     m_allowMissingCourtyard          = aFootprint.m_allowMissingCourtyard;
     m_allowSolderMaskBridges         = aFootprint.m_allowSolderMaskBridges;
@@ -181,6 +182,16 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
             ptrMap[field] = existingField;
             *existingField = *field;
             existingField->SetParent( this );
+
+            // The mandatory fields already exist (the ctor above created them, each with a
+            // fresh KIID), so they are ASSIGNED rather than copy-constructed — and
+            // EDA_ITEM::operator= deliberately does not touch the const m_Uuid. Without this
+            // the four mandatory fields silently get NEW uuids on every FOOTPRINT::Clone(),
+            // while pads, zones, drawings and user fields (which go through the copy ctor,
+            // eda_item.cpp `m_Uuid( base.m_Uuid )`) keep theirs. Anything keyed by uuid — our
+            // collab wire, undo/redo bookkeeping, cross-references — sees those four fields
+            // vanish and reappear under new ids.
+            const_cast<KIID&>( existingField->m_Uuid ) = field->m_Uuid;
         }
         else
         {
@@ -862,6 +873,7 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
     m_netTiePadGroups                = aOther.m_netTiePadGroups;
     m_duplicatePadNumbersAreJumpers  = aOther.m_duplicatePadNumbersAreJumpers;
     m_jumperPadGroups                = aOther.m_jumperPadGroups;
+    m_unitInfo                       = aOther.m_unitInfo;
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
@@ -1007,6 +1019,7 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
     m_netTiePadGroups                = aOther.m_netTiePadGroups;
     m_duplicatePadNumbersAreJumpers  = aOther.m_duplicatePadNumbersAreJumpers;
     m_jumperPadGroups                = aOther.m_jumperPadGroups;
+    m_unitInfo                       = aOther.m_unitInfo;
     m_variants                       = aOther.m_variants;
 
     // If this footprint is on a board, uncache all items before deleting them

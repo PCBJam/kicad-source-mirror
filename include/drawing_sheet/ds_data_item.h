@@ -28,6 +28,7 @@
 #include <math/vector2d.h>
 #include <eda_text.h>
 #include <bitmap_base.h>
+#include <kiid.h>
 #include "drawing_sheet/ds_draw_item.h"
 
 class DS_DRAW_ITEM_TEXT;            // Forward declaration
@@ -195,6 +196,9 @@ public:
 
     const wxString GetClassName() const;
 
+    KIID           m_Uuid;               // Stable per-item identity, shared with eeschema/pcbnew.
+                                         // Default-constructed -> random, so uuid-less legacy
+                                         // items are auto-backfilled in memory (collab bridge).
     wxString       m_Name;               // a name used in drawing sheet editor to identify items
     wxString       m_Info;               // a comment, only useful in drawing sheet editor
     POINT_COORD    m_Pos;

@@ -8,6 +8,8 @@ add_compile_definitions( PCBNEW )
 
 add_subdirectory(connectivity)
 
+add_subdirectory(navlib)
+
 add_subdirectory(router)
 
 #psnrouter depends on make_lexer outputs in common( bug #1285878 )
@@ -253,13 +255,11 @@ set( PCBNEW_IMPORT_GFX
     )
 
 
-set( PCBNEW_EXPORTERS
-    exporters/export_hyperlynx.cpp
-    exporters/export_d356.cpp
-    exporters/export_footprint_associations.cpp
-    exporters/export_gencad.cpp
-    exporters/export_gencad_writer.cpp
-    exporters/export_idf.cpp
+# OCC-backed 3D exporters (STEP/BREP/XAO/GLB/PLY/STL + U3D). For EMSCRIPTEN
+# these are excluded from the editor (no OCC in pcbnew.wasm) and compiled into
+# the standalone occ_service worker module instead (KICAD_OCC_SERVICE_WASM);
+# the editor links a bridge shadow of EXPORTER_STEP (docs/features/occ-split/).
+set( PCBNEW_OCC_EXPORTERS
     exporters/step/exporter_step.cpp
     exporters/step/kicad3d_info.cpp
     exporters/step/step_pcb_model.cpp
@@ -269,6 +269,15 @@ set( PCBNEW_EXPORTERS
     exporters/u3d/context_manager.cpp
     exporters/u3d/data_block.cpp
     exporters/u3d/writer.cpp
+    )
+
+set( PCBNEW_EXPORTERS
+    exporters/export_hyperlynx.cpp
+    exporters/export_d356.cpp
+    exporters/export_footprint_associations.cpp
+    exporters/export_gencad.cpp
+    exporters/export_gencad_writer.cpp
+    exporters/export_idf.cpp
     exporters/exporter_vrml.cpp
     exporters/place_file_exporter.cpp
     exporters/gendrill_excellon_writer.cpp
@@ -277,6 +286,17 @@ set( PCBNEW_EXPORTERS
     exporters/gerber_jobfile_writer.cpp
     exporters/gerber_placefile_writer.cpp
     )
+
+if( NOT EMSCRIPTEN )
+    list( APPEND PCBNEW_EXPORTERS ${PCBNEW_OCC_EXPORTERS} )
+else()
+    # Export (absolutized) for the occ_service worker-module tree — superproject
+    # wasm/occ-service/, hooked from the top-level CMakeLists.txt — which
+    # compiles the real exporters outside this directory scope.
+    set( _pcbnew_occ_exporters_abs ${PCBNEW_OCC_EXPORTERS} )
+    list( TRANSFORM _pcbnew_occ_exporters_abs PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/" )
+    set( PCBNEW_OCC_EXPORTER_SRCS "${_pcbnew_occ_exporters_abs}" CACHE INTERNAL "" )
+endif()
 
 set( PCBNEW_MICROWAVE_SRCS
     microwave/microwave_footprint.cpp
@@ -775,8 +795,11 @@ endif()
 
 
 add_subdirectory( pcb_io/pcad )
-add_subdirectory( pcb_io/allegro )
-add_subdirectory( pcb_io/altium )
+if( NOT EMSCRIPTEN )
+    # Altium/Allegro use std::basic_string<unsigned short> which Emscripten libc++ doesn't support
+    add_subdirectory( pcb_io/allegro )
+    add_subdirectory( pcb_io/altium )
+endif()
 add_subdirectory( pcb_io/cadstar )
 add_subdirectory( pcb_io/easyeda )
 add_subdirectory( pcb_io/easyedapro )
@@ -786,32 +809,158 @@ add_subdirectory( pcb_io/odbpp )
 add_subdirectory( pcb_io/pads )
 
 set( PCBNEW_IO_LIBRARIES pcad2kicadpcb allegro2pcbnew altium2pcbnew cadstar2pcbnew easyeda easyedapro fabmaster ipc2581 odbpp pads2pcbnew CACHE INTERNAL "")
+if( EMSCRIPTEN )
+    # Altium/Allegro use std::basic_string<unsigned short>, which Emscripten's libc++ doesn't
+    # support; drop them from the (cross-directory) cache so cvpcb/qa consumers stay correct.
+    list( REMOVE_ITEM PCBNEW_IO_LIBRARIES altium2pcbnew allegro2pcbnew )
+    set( PCBNEW_IO_LIBRARIES "${PCBNEW_IO_LIBRARIES}" CACHE INTERNAL "" FORCE )
+endif()
 
 #a very small program launcher for pcbnew_kiface
 add_executable( pcbnew WIN32 MACOSX_BUNDLE
     ${CMAKE_SOURCE_DIR}/common/single_top.cpp
     ${PCBNEW_RESOURCES}
     )
-
-set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp pcbnew.cpp PROPERTIES
     COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\";BUILD_KIWAY_DLL"
     )
+if( EMSCRIPTEN )
+    # WASM: static kiface linking — single_top.cpp must NOT export the kiway DLL symbols.
+    # (pcbnew.cpp's WASM defs are likewise re-set without BUILD_KIWAY_DLL after the kiface target.)
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_PCB_EDITOR;PGM_DATA_FILE_EXT=\"kicad_pcb\""
+        )
+endif()
 
-target_link_libraries( pcbnew
-    kicommon
-    ${wxWidgets_LIBRARIES}
-    )
+if( NOT EMSCRIPTEN )
+    # Native: minimal link, kiface loaded dynamically
+    target_link_libraries( pcbnew
+        kicommon
+        ${wxWidgets_LIBRARIES}
+        )
+endif()
+# WASM linking is done after PCBNEW_KIFACE_LIBRARIES is defined
 
 target_link_options( pcbnew PRIVATE
     $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=pcbnew.map>
     )
 
 #the main pcbnew program, in DSO form.
+
+# WASM pcb_convert diet (pcbjam-mcp 0001 tier 3a): mirror of the sym_convert
+# diet in eeschema/CMakeLists.txt. The converter tree links the kiface as
+# force-linked OBJECTs, so every TU's static initializers (TOOL_ACTIONs, wx
+# event tables, dialog statics) are GC roots. Prune the editor-surface TUs
+# from the kiface for THIS tree only (the flag is pinned OFF for editor trees,
+# see build-kicad-target.sh). The DRC path is PCB_IO_MGR::Load → board model +
+# connectivity + drc/ providers (their DRC_REGISTER_TEST_PROVIDER statics must
+# stay); everything UI-, tool-, plot- and export-shaped is unreachable.
+if( EMSCRIPTEN AND KICAD_PCB_CONVERTER_WASM )
+    list( FILTER PCBNEW_SRCS EXCLUDE REGEX
+          "^(dialogs|widgets|autorouter|microwave|generators|import_gfx|api|board_stackup_manager|zone_manager|specctra_import_export|git|navlib|netlist_reader|tools|exporters|footprint_wizard)/" )
+    list( REMOVE_ITEM PCBNEW_SRCS
+        cross-probing.cpp
+        edit.cpp
+        files.cpp
+        footprint_chooser_frame.cpp
+        footprint_edit_frame.cpp
+        footprint_editor_utils.cpp
+        footprint_libraries_utils.cpp
+        footprint_viewer_frame.cpp
+        footprint_wizard.cpp
+        footprint_wizard_frame.cpp
+        footprint_wizard_frame_functions.cpp
+        initpcb.cpp
+        load_select_footprint.cpp
+        menubar_footprint_editor.cpp
+        menubar_pcb_editor.cpp
+        pcb_base_edit_frame.cpp
+        pcb_edit_frame.cpp
+        pcbnew_config.cpp
+        pcbnew_jobs_handler.cpp
+        pcbnew_printout.cpp
+        toolbars_footprint_editor.cpp
+        toolbars_footprint_viewer.cpp
+        toolbars_pcb_editor.cpp
+        )
+    # NOTE pcbnew_settings.cpp / footprint_editor_settings.cpp stay: pure
+    # settings TUs whose typeinfo/data symbols are referenced from retained
+    # model code via GetAppSettings<> (typeinfo cannot become a JS import,
+    # unlike function refs covered by -sERROR_ON_UNDEFINED_SYMBOLS=0).
+    # NOTE the plot TUs (pcb_plotter.cpp, pcbplot.cpp, plot_board_layers.cpp,
+    # plot_brditems_plotter.cpp) stay too: kicad_tools --gerbers drives
+    # StartPlotBoard/PlotBoardLayers — plotter-based, no GAL context.
+    # Kept back from the exporters/ and board_stackup_manager/ filters for
+    # --gerbers' .gbrjob output (the jobfile writer resolves stackup colors
+    # through GetStandardColors — a pure data-table TU, not the UI panel),
+    # --drill's excellon writer, and --ipc356's D-356 writer (plugins 0002):
+    list( APPEND PCBNEW_SRCS
+        exporters/gerber_jobfile_writer.cpp
+        exporters/gendrill_excellon_writer.cpp
+        exporters/gendrill_writer_base.cpp
+        exporters/export_d356.cpp
+        board_stackup_manager/stackup_predefined_prms.cpp )
+endif()
+
 add_library( pcbnew_kiface_objects OBJECT
     ${PCBNEW_SRCS}
     ${PCBNEW_COMMON_SRCS}
-    ${PCBNEW_SCRIPTING_SRCS}
     )
+
+# pcb_convert (mirror of the sym_convert diet) skips pcbnew.cpp: nothing calls
+# KIFACE_GETTER there, and its static IFACE instance is an init-array root into
+# the frames (it also registers the 3D-viewer settings).
+if( EMSCRIPTEN AND NOT KICAD_PCB_CONVERTER_WASM )
+    # WASM static-kiface linking: pcbnew.cpp defines Kiface() / KIFACE_GETTER and the
+    # kiface instance, which pcbcommon (pad.cpp, pcb_painter.cpp, ratsnest_view_item.cpp,
+    # ...) references. Native builds resolve these via the dynamically-loaded
+    # pcbnew_kiface MODULE, but the WASM build links everything statically into the
+    # pcbnew executable, so the definitions must live in the kiface objects.
+    # (pcbnew_kiface MODULE also compiles pcbnew.cpp, but under Emscripten that target
+    # is built as a static archive rather than a real link, so the duplicate symbol is
+    # harmless. pcbnew.cpp's WASM COMPILE_DEFINITIONS are set without BUILD_KIWAY_DLL
+    # further down so it does not export the kiway DLL symbols.)
+    target_sources( pcbnew_kiface_objects PRIVATE pcbnew.cpp )
+endif()
+
+if( KICAD_SCRIPTING )
+    target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_SCRIPTING_SRCS} )
+endif()
+
+# WASM: Add stub implementations for scripting/plugin features not available in browser
+if( EMSCRIPTEN )
+    # Stub sources for pcbnew scripting/plugin features
+    set( PCBNEW_WASM_STUBS
+        ${KICAD_WASM_LAYER}/stubs/scripting_stub.cpp
+        ${KICAD_WASM_LAYER}/stubs/pcb_frame_stub.cpp
+    )
+    # OCC split: the editor shadows the two OCC consumers with occ_service
+    # worker bridges (docs/features/occ-split/); the occ_service tree compiles
+    # the real implementations instead, so it must not see the shadows.
+    if( NOT KICAD_OCC_SERVICE_WASM )
+        list( APPEND PCBNEW_WASM_STUBS
+            ${KICAD_WASM_LAYER}/stubs/exporter_step_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/oce_plugin_stub.cpp
+        )
+    endif()
+    # Add 3D viewer stubs when 3D viewer is disabled
+    if( NOT KICAD_BUILD_3D_VIEWER_WASM )
+        list( APPEND PCBNEW_WASM_STUBS
+            ${KICAD_WASM_LAYER}/stubs/3d_viewer_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/3d_scenegraph_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/3d_canvas_stub.cpp
+            ${KICAD_WASM_LAYER}/stubs/model_substitution_stub.cpp
+        )
+    endif()
+    target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_WASM_STUBS} )
+endif()
+
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Merged editor image: statically bind this kiface's Kiface() calls to its own
+    # accessor and rename the symbols eeschema also defines (see the rename list and
+    # rationale at the top-level CMakeLists.txt).
+    target_compile_definitions( pcbnew_kiface_objects PRIVATE ${KICAD_WASM_PCB_SIDE_RENAMES} )
+endif()
 
 if( KICAD_USE_PCH )
     target_precompile_headers( pcbnew_kiface_objects
@@ -847,8 +996,14 @@ target_link_libraries( pcbnew_kiface_objects
         nanoflann
         Boost::boost
         ZLIB::ZLIB
-        ${OCC_LIBRARIES}
     )
+
+if( NOT EMSCRIPTEN )
+    # OCC is reached only via the STEP/3D exporters (PCBNEW_OCC_EXPORTERS) and
+    # the oce model-import plugin, which the WASM build moves into the
+    # occ_service worker module (docs/features/occ-split/).
+    target_link_libraries( pcbnew_kiface_objects PRIVATE ${OCC_LIBRARIES} )
+endif()
 
 add_library( pcbnew_kiface MODULE
     pcbnew.cpp
@@ -876,8 +1031,8 @@ endif ()
 
 set( PCBNEW_KIFACE_LIBRARIES
     pcbnew_kiface_objects
-    3d-viewer
     connectivity
+    pcbnew_navlib
     pcbcommon
     pnsrouter
     kicommon
@@ -895,15 +1050,75 @@ set( PCBNEW_KIFACE_LIBRARIES
     ${PCBNEW_EXTRA_LIBS}    # -lrt must follow Boost
     )
 
+# Add 3D viewer only for non-WASM builds (unless KICAD_BUILD_3D_VIEWER_WASM is enabled)
+if( NOT EMSCRIPTEN OR KICAD_BUILD_3D_VIEWER_WASM )
+    list( APPEND PCBNEW_KIFACE_LIBRARIES 3d-viewer )
+endif()
+
+if( EMSCRIPTEN )
+    # Export for the merged kicad_editor target (wasm/editor/), which links both kifaces'
+    # library sets from outside this directory scope. Same pattern as PCBNEW_IO_LIBRARIES.
+    set( PCBNEW_KIFACE_LIBRARIES "${PCBNEW_KIFACE_LIBRARIES}" CACHE INTERNAL "" )
+endif()
+
+# Headless board CLI diet (pcbjam-mcp 0001 tier 3a): gates the pcbnew kiface
+# prune above for the merged kicad_tools tree (KICAD_TOOLS_WASM configures with
+# this ON). Pinned OFF for editor trees.
+option( KICAD_PCB_CONVERTER_WASM
+    "WASM only: diet the pcbnew kiface for the headless CLI tree (kicad_tools)" OFF )
+
+# The standalone pcb_convert executable is RETIRED (pcbjam-mcp 0001): the
+# merged kicad_tools image (wasm/tools/, gated by KICAD_TOOLS_WASM at the top
+# level) carries --drc on this same dieted kiface. This option now only gates
+# the diet above.
+
+# WASM: Link kiface objects directly into pcbnew executable (static linking)
+if( EMSCRIPTEN )
+    target_link_libraries( pcbnew
+        PRIVATE
+            ${PCBNEW_KIFACE_LIBRARIES}
+        )
+    # WASM: Allow multiple definitions of symbols that exist in both
+    # KiCad and wxWidgets (e.g., nanosvg, wxGetContentRect)
+    # Also use --whole-archive for pcbcommon to ensure vtables/typeinfo are included
+    # Without this, wasm-ld may not pull in symbols that are only referenced via RTTI
+    target_link_options( pcbnew PRIVATE
+        "LINKER:--allow-multiple-definition"
+        "LINKER:--whole-archive"
+        "$<TARGET_FILE:pcbcommon>"
+        "LINKER:--no-whole-archive"
+        )
+endif()
+
 target_link_libraries( pcbnew_kiface
     PRIVATE
         ${PCBNEW_KIFACE_LIBRARIES}
     )
 
-#The KIFACE is in pcbnew.cpp, export it:
+# NOTE: The footprint editor (FRAME_FOOTPRINT_EDITOR) is served by this same
+# pcbnew kiface — its sources are already compiled into the pcbnew kiface objects.
+# It no longer has its own WASM launcher/target: the pcbnew bundle selects the
+# footprint frame at RUNTIME via single_top.cpp's "--frame=fpedit" flag (see
+# editor-unification). One build serves both editors.
+
 set_source_files_properties( pcbnew.cpp PROPERTIES
+    # The KIFACE is in pcbnew.cpp, export it:
     COMPILE_DEFINITIONS     "BUILD_KIWAY_DLL;COMPILING_DLL"
     )
+if( EMSCRIPTEN )
+    # WASM: static kiface linking — pcbnew.cpp must NOT export the kiway DLL symbols.
+    # In the merged editor image the getter additionally gets a per-engine name so both
+    # kifaces' getters can coexist (kiway.h's KIFACE_GETTER macro is #ifndef-guarded).
+    if( KICAD_WASM_MERGED_EDITOR )
+        set_source_files_properties( pcbnew.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL;KIFACE_GETTER=pcbnew_kiface_getter"
+            )
+    else()
+        set_source_files_properties( pcbnew.cpp PROPERTIES
+            COMPILE_DEFINITIONS     "COMPILING_DLL"
+            )
+    endif()
+endif()
 
 target_link_options( pcbnew_kiface PRIVATE
     $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=_pcbnew.kiface.map>
@@ -985,10 +1200,14 @@ if( KICAD_WIN32_INSTALL_PDBS )
     install(FILES $<TARGET_PDB_FILE:pcbnew_kiface> DESTINATION ${KICAD_KIFACE})
 endif()
 
+if( NOT KICAD_SCRIPTING )
+    return()
+endif()
+
 if( NOT APPLE )
     install( FILES ${CMAKE_BINARY_DIR}/pcbnew/pcbnew.py DESTINATION ${PYTHON_DEST} )
 else()
-#put into bundle at build time, it is relocated at install
+    # put into bundle at build time, it is relocated at install
     add_custom_target( ScriptingPcbnewPyCopy ALL
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/pcbnew/pcbnew.py" "${PYTHON_DEST}/"
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/pcbnew.py
@@ -997,21 +1216,21 @@ else()
     add_dependencies( ScriptingPcbnewPyCopy ScriptingPythonDirectoryCreation )
 endif()
 
-#python plugins
+# python plugins
 install( DIRECTORY ${PROJECT_SOURCE_DIR}/pcbnew/python/plugins/
     DESTINATION ${KICAD_DATA}/scripting/plugins
     FILE_PERMISSIONS OWNER_EXECUTE OWNER_READ OWNER_WRITE GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
 )
 
 
-#Here is built the                    _pcbnew.{ so, pyd } which is the native part of the pcbnew Python library
-#when Python is used from the command line.
+# Here is built the _pcbnew.{so,pyd} which is the native part of the pcbnew Python library
+# when Python is used from the command line.
 
 if( WIN32 )
     install( FILES ${CMAKE_BINARY_DIR}/pcbnew/_pcbnew.pyd DESTINATION ${PYTHON_DEST} )
     set( PYMOD_EXT "pyd" )
 elseif( APPLE )
-#put everything into bundle at build time, it is relocated at install
+     # put everything into bundle at build time, it is relocated at install
     add_custom_target( ScriptingModulesPcbnewSoCopy ALL
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/${KICMAKE_CFG_INTDIR}//pcbnew/_pcbnew.so" "${PYTHON_DEST}/"
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/_pcbnew.so
@@ -1020,7 +1239,7 @@ elseif( APPLE )
     add_dependencies( ScriptingModulesPcbnewSoCopy ScriptingPythonDirectoryCreation )
     set( PYMOD_EXT "so" )
 else()
-#Linux is the remaining platform, and all that has to be installed is the created symlink.
+    # Linux is the remaining platform, and all that has to be installed is the created symlink.
     set( PYMOD_EXT "so" )
 
     install( FILES ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/python/_pcbnew.${PYMOD_EXT} DESTINATION ${PYTHON_DEST} )
@@ -1081,7 +1300,7 @@ add_custom_target(
 
 
 if( APPLE )
-#If we don't have wxPython, then we must create the site-packages directory
+    # If we don't have wxPython, then we must create the site-packages directory
     add_custom_target( ScriptingPythonDirectoryCreation ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${PYTHON_DEST}"
         COMMENT "Creating Python library directory ${PYTHON_DEST}"

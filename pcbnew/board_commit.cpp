@@ -416,6 +416,12 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                     else if( FOOTPRINT* parentFP = boardItem->GetParentFootprint() )
                     {
                         parentFP->Remove( boardItem );
+
+                        // A child-only removal mutates the footprint's content but,
+                        // unlike the board->Remove branch, never reaches a listener
+                        // vector — board listeners would otherwise not hear about
+                        // this commit at all.
+                        itemsChanged.push_back( parentFP );
                     }
                     else
                     {

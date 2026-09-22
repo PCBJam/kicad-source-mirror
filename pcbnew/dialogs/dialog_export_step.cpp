@@ -58,6 +58,17 @@
 
 #include <wx/filefn.h>
 
+#ifdef __EMSCRIPTEN__
+// Browser: the export runs through EXPORTER_STEP (whose WASM definition —
+// wasm/stubs/exporter_step_stub.cpp in the superproject — bridges to the
+// occ_service worker) instead of spawning kicad-cli, which a browser cannot do.
+#include <exporters/step/exporter_step.h>
+
+// One-shot side-channel to the stub: ships the FULL job JSON (params +
+// variant) for the next EXPORTER_STEP::Export() call.
+extern "C" void Pcbjam_SetExportJobJson( const char* aJson );
+#endif
+
 
 // Maps m_choiceFormat selection to extension (and kicad-cli command)
 static const std::vector<wxString> c_formatCommand = { FILEEXT::StepFileExtension,
@@ -546,6 +557,118 @@ void DIALOG_EXPORT_STEP::onExportButton( wxCommandEvent& aEvent )
                 return;
         }
 
+#ifdef __EMSCRIPTEN__
+        // Browser build: no subprocess to spawn. Build the same job the m_job
+        // branch below builds, then run it through EXPORTER_STEP — its WASM
+        // definition bridges to the occ_service worker and the JS provider
+        // delivers the result as a browser download named after fn. UI
+        // identical to desktop; only the kicad-cli spawn is replaced.
+        JOB_EXPORT_PCB_3D wasmJob;
+
+        wasmJob.m_variant = getSelectedVariant();
+        wasmJob.m_3dparams.m_NetFilter = m_txtNetFilter->GetValue();
+        wasmJob.m_3dparams.m_ExportBoardBody = m_cbExportBody->GetValue();
+        wasmJob.m_3dparams.m_ExportComponents = m_cbExportComponents->GetValue();
+        wasmJob.m_3dparams.m_ExportTracksVias = m_cbExportTracks->GetValue();
+        wasmJob.m_3dparams.m_ExportPads = m_cbExportPads->GetValue();
+        wasmJob.m_3dparams.m_ExportZones = m_cbExportZones->GetValue();
+        wasmJob.m_3dparams.m_ExportInnerCopper = m_cbExportInnerCopper->GetValue();
+        wasmJob.m_3dparams.m_ExportSilkscreen = m_cbExportSilkscreen->GetValue();
+        wasmJob.m_3dparams.m_ExportSoldermask = m_cbExportSoldermask->GetValue();
+        wasmJob.m_3dparams.m_FuseShapes = m_cbFuseShapes->GetValue();
+        wasmJob.m_3dparams.m_CutViasInBody = m_cbCutViasInBody->GetValue();
+        wasmJob.m_3dparams.m_FillAllVias = m_cbFillAllVias->GetValue();
+        wasmJob.m_3dparams.m_OptimizeStep = m_cbOptimizeStep->GetValue();
+        wasmJob.m_3dparams.m_Overwrite = true; // browser download — nothing to overwrite
+        wasmJob.m_3dparams.m_IncludeUnspecified = !m_cbRemoveUnspecified->GetValue();
+        wasmJob.m_3dparams.m_IncludeDNP = !m_cbRemoveDNP->GetValue();
+        wasmJob.m_3dparams.m_SubstModels = m_cbSubstModels->GetValue();
+        wasmJob.m_3dparams.m_BoardOutlinesChainingEpsilon = tolerance;
+
+        if( m_rbOnlySelected->GetValue() )
+        {
+            wxArrayString components;
+            SELECTION&    selection = m_editFrame->GetCurrentSelection();
+
+            std::for_each( selection.begin(), selection.end(),
+                           [&components]( EDA_ITEM* item )
+                           {
+                               if( item->Type() == PCB_FOOTPRINT_T )
+                                   components.push_back( static_cast<FOOTPRINT*>( item )->GetReference() );
+                           } );
+
+            wasmJob.m_3dparams.m_ComponentFilter = wxJoin( components, ',' );
+        }
+        else if( m_rbFilteredComponents->GetValue() )
+        {
+            wasmJob.m_3dparams.m_ComponentFilter = m_txtComponentFilter->GetValue();
+        }
+
+        if( auto formatChoice = get_opt( c_formatJobCommand, m_choiceFormat->GetSelection() ) )
+            wasmJob.SetStepFormat( *formatChoice );
+
+        switch( wasmJob.m_3dparams.m_Format )
+        {
+        case EXPORTER_STEP_PARAMS::FORMAT::STEP:  wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::STEP;  break;
+        case EXPORTER_STEP_PARAMS::FORMAT::STEPZ: wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::STEPZ; break;
+        case EXPORTER_STEP_PARAMS::FORMAT::GLB:   wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::GLB;   break;
+        case EXPORTER_STEP_PARAMS::FORMAT::XAO:   wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::XAO;   break;
+        case EXPORTER_STEP_PARAMS::FORMAT::BREP:  wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::BREP;  break;
+        case EXPORTER_STEP_PARAMS::FORMAT::PLY:   wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::PLY;   break;
+        case EXPORTER_STEP_PARAMS::FORMAT::STL:   wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::STL;   break;
+        case EXPORTER_STEP_PARAMS::FORMAT::U3D:   wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::U3D;   break;
+        case EXPORTER_STEP_PARAMS::FORMAT::PDF:   wasmJob.m_format = JOB_EXPORT_PCB_3D::FORMAT::PDF;   break;
+        }
+
+        // Origin: EXPORTER_STEP consumes m_Origin in internal units (it reads
+        // it next to the IU aux/grid origins), so keep IU end-to-end — the
+        // worker feeds these params straight to EXPORTER_STEP.
+        if( m_rbDrillAndPlotOrigin->GetValue() )
+        {
+            wasmJob.m_3dparams.m_UseDrillOrigin = true;
+        }
+        else if( m_rbGridOrigin->GetValue() )
+        {
+            wasmJob.m_3dparams.m_UseGridOrigin = true;
+        }
+        else if( m_rbUserDefinedOrigin->GetValue() )
+        {
+            wasmJob.m_3dparams.m_UseDefinedOrigin = true;
+            wasmJob.m_3dparams.m_Origin =
+                    VECTOR2D( m_originX.GetIntValue(), m_originY.GetIntValue() );
+        }
+        else if( m_rbBoardCenterOrigin->GetValue() )
+        {
+            BOX2I bbox = m_editFrame->GetBoard()->ComputeBoundingBox( true, true );
+            wasmJob.m_3dparams.m_UsePcbCenterOrigin = true;
+            wasmJob.m_3dparams.m_Origin = VECTOR2D( bbox.GetCenter().x, bbox.GetCenter().y );
+        }
+
+        {
+            nlohmann::json wasmJobJson;
+            wasmJob.ToJson( wasmJobJson );
+            Pcbjam_SetExportJobJson( wasmJobJson.dump().c_str() );
+        }
+
+        WX_STRING_REPORTER wasmReporter;
+        EXPORTER_STEP      wasmExporter( m_editFrame->GetBoard(), wasmJob.m_3dparams,
+                                         &wasmReporter );
+        wasmExporter.m_outputFile = fn.GetFullName();
+
+        if( wasmExporter.Export() )
+        {
+            // Desktop shows the kicad-cli log dialog; the browser download has
+            // already been delivered by the JS provider — show the report.
+            DisplayInfoMessage( this, _( "Export complete." ), wasmReporter.GetMessages() );
+        }
+        else
+        {
+            DisplayErrorMessage( this, _( "STEP export failed." ),
+                                 wasmReporter.GetMessages() );
+        }
+
+        return;
+#else
         wxFileName appK2S( wxStandardPaths::Get().GetExecutablePath() );
     #ifdef __WXMAC__
         // On macOS, we have standalone applications inside the main bundle, so we handle that here:
@@ -728,6 +851,7 @@ void DIALOG_EXPORT_STEP::onExportButton( wxCommandEvent& aEvent )
         DIALOG_EXPORT_STEP_LOG* log = new DIALOG_EXPORT_STEP_LOG( this, cmdK2S );
         log->SetTempFilesToCleanup( std::move( tempFiles ) );
         log->ShowModal();
+#endif // !__EMSCRIPTEN__
     }
     else
     {

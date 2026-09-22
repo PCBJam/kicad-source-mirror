@@ -445,20 +445,20 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
         }
     }
 
-    if( !( aCommitFlags & SKIP_UNDO ) )
+    if( frame )
     {
-        if( frame )
-        {
-            if( undoList.GetCount() > 0 )
-                frame->SaveCopyInUndoList( undoList, UNDO_REDO::UNSPECIFIED, false );
+        if( !( aCommitFlags & SKIP_UNDO ) && undoList.GetCount() > 0 )
+            frame->SaveCopyInUndoList( undoList, UNDO_REDO::UNSPECIFIED, false );
 
-            if( dirtyConnectivity )
-            {
-                wxLogTrace( wxS( "CONN_PROFILE" ),
-                            wxS( "SCH_COMMIT::pushSchEdit() %s clean up connectivity rebuild." ),
-                            connectivityCleanUp == LOCAL_CLEANUP ? wxS( "local" ) : wxS( "global" ) );
-                frame->RecalculateConnections( this, connectivityCleanUp );
-            }
+        // Connectivity is recalculated even under SKIP_UNDO: a commit that skips the
+        // undo stack (e.g. a collaborative remote apply) still changes the model, and
+        // stale connectivity would diverge from what the same edit produces locally.
+        if( dirtyConnectivity )
+        {
+            wxLogTrace( wxS( "CONN_PROFILE" ),
+                        wxS( "SCH_COMMIT::pushSchEdit() %s clean up connectivity rebuild." ),
+                        connectivityCleanUp == LOCAL_CLEANUP ? wxS( "local" ) : wxS( "global" ) );
+            frame->RecalculateConnections( this, connectivityCleanUp );
         }
     }
 

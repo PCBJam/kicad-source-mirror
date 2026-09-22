@@ -23,7 +23,9 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#ifdef KICAD_SCRIPTING
 #include <pybind11/pybind11.h>
+#endif
 
 #include <wx/debug.h>
 #include <wx/msgdlg.h>

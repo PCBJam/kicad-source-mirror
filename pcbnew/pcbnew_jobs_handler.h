@@ -40,7 +40,9 @@ public:
     virtual ~PCBNEW_JOBS_HANDLER();
 
     int JobExportStep( JOB* aJob );
+#ifndef __EMSCRIPTEN__
     int JobExportRender( JOB* aJob );
+#endif
     int JobExportSvg( JOB* aJob );
     int JobExportDxf( JOB* aJob );
     int JobExportPdf( JOB* aJob );

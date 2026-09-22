@@ -83,7 +83,21 @@ NGSPICE::NGSPICE() :
 }
 
 
-NGSPICE::~NGSPICE() = default;
+#ifdef __EMSCRIPTEN__
+// wasm/stubs/sharedspice_client.cpp — unregisters this instance's callbacks.
+extern "C" void pcbjam_ngspice_reset_callbacks( void* aUser );
+#endif
+
+
+NGSPICE::~NGSPICE()
+{
+#ifdef __EMSCRIPTEN__
+    // E-9: a late ngspice_service worker event dispatches through the client
+    // stub's registered callbacks; after this destructor they would
+    // dereference a dead NGSPICE (use-after-free on simulator close).
+    pcbjam_ngspice_reset_callbacks( this );
+#endif
+}
 
 
 void NGSPICE::updateNgspiceSettings()
@@ -478,6 +492,33 @@ void NGSPICE::init_dll()
     LOCALE_IO c_locale;               // ngspice works correctly only with C locale
     const wxStandardPaths& stdPaths = wxStandardPaths::Get();
 
+#ifdef __EMSCRIPTEN__
+    // WASM: no dlopen — the ngspice engine runs in the ngspice_service worker
+    // and the statically linked sharedspice client (sharedspice_client.cpp,
+    // declared in the sharedspice.h stub) forwards each call over RPC. Bind
+    // the function pointers directly; everything below the dll section
+    // (ngSpice_Init registration and the initial commands) runs unchanged.
+    // The spinit/codemodel staging is skipped too (second ifdef below): the
+    // service embeds its own spinit and code models, and the staging's
+    // wxSetWorkingDirectory( exe dir ) always fails in MEMFS, popping a
+    // wxLog error dialog over the simulator frame.
+    m_ngSpice_Init = &pcbjam_ngSpice_Init;
+    m_ngSpice_Circ = &pcbjam_ngSpice_Circ;
+    m_ngSpice_Command = &pcbjam_ngSpice_Command;
+    m_ngGet_Vec_Info = &pcbjam_ngGet_Vec_Info;
+    m_ngCM_Input_Path = &pcbjam_ngCM_Input_Path;
+    m_ngSpice_CurPlot = &pcbjam_ngSpice_CurPlot;
+    m_ngSpice_AllPlots = &pcbjam_ngSpice_AllPlots;
+    m_ngSpice_AllVecs = &pcbjam_ngSpice_AllVecs;
+    m_ngSpice_Running = &pcbjam_ngSpice_Running;
+
+    // Vector-realloc locking happens inside the service (its getVecInfo copies
+    // under ngSpice_LockRealloc); the client-side RAII lock stays a no-op.
+    m_ngSpice_LockRealloc = nullptr;
+    m_ngSpice_UnlockRealloc = nullptr;
+
+    m_error = false;
+#else
     if( m_dll.IsLoaded() )      // enable force reload
         m_dll.Unload();
 
@@ -568,10 +609,12 @@ void NGSPICE::init_dll()
         m_ngSpice_LockRealloc = (ngSpice_LockRealloc) m_dll.GetSymbol( "ngSpice_LockRealloc" );
         m_ngSpice_UnlockRealloc = (ngSpice_UnlockRealloc) m_dll.GetSymbol( "ngSpice_UnlockRealloc" );
     }
+#endif // __EMSCRIPTEN__
 
     m_ngSpice_Init( &cbSendChar, &cbSendStat, &cbControlledExit, nullptr, nullptr,
                     &cbBGThreadRunning, this );
 
+#ifndef __EMSCRIPTEN__
     // Load a custom spinit file, to fix the problem with loading .cm files
     // Switch to the executable directory, so the relative paths are correct
     wxString cwd( wxGetCwd() );
@@ -621,6 +664,7 @@ void NGSPICE::init_dll()
 
     // Restore the working directory
     wxSetWorkingDirectory( cwd );
+#endif // !__EMSCRIPTEN__
 
     // Workarounds to avoid hang ups on certain errors
     // These commands have to be called, no matter what is in the spinit file
