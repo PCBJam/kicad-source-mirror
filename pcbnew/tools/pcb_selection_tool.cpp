@@ -4595,7 +4595,10 @@ bool PCB_SELECTION_TOOL::ReportFilteredLockedItems()
                                                           "and were skipped." ),
                                                        m_remoteLockHolder ),
                                      true );
-        return;
+
+        // Remote soft-locked items are skipped, not blocking: only locally locked items make
+        // RequestSelection() withhold the selection (KiCad 10.0.6).
+        return m_lockedItemsFiltered;
     }
 
     if( m_lockedItemsFiltered && m_frame )
