@@ -1478,8 +1478,11 @@ void FOOTPRINT::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectiv
     aBoardItem->ClearEditFlags();
     aBoardItem->SetParent( this );
 
-    // If this footprint is on a board, update the board's item-by-id cache
-    if( BOARD* board = GetBoard() )
+    // If this footprint is on a board, update the board's item-by-id cache. Only when the board
+    // indexes this footprint itself (mirrors Remove()): a clone (an undo image, a parse against the
+    // live board) still parents to the board, and caching its children would evict the live
+    // children that share their UUIDs, so ResolveItem() would hand out the clone's copies.
+    if( BOARD* board = GetBoard(); board && board->IsItemIndexedById( this ) )
         board->CacheItemSubtreeById( aBoardItem );
 
     InvalidateGeometryCaches();
