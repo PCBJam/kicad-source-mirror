@@ -39,6 +39,7 @@
 
 #include <math/vector2wx.h>
 
+#include <pcbjam_editor_events.h>
 #include <pcbjam_read_only.h>
 #include <view/view.h>
 #include <view/view_controls.h>
@@ -1216,6 +1217,24 @@ bool TOOL_MANAGER::processEvent( const TOOL_EVENT& aEvent )
             && !PCBJAM_READ_ONLY::IsActionAllowed( aEvent.getCommandStr() ) )
     {
         return false;
+    }
+
+    // pcbjam WASM addition (overlay-system): report every action to the page
+    // (window 'pcbjam:editor-event'), with the processEvent nesting depth so
+    // the page can tell user input (0) from actions a running tool issued.
+    static int s_pcbjamEventDepth = 0;
+
+    struct PCBJAM_EVENT_DEPTH
+    {
+        PCBJAM_EVENT_DEPTH() { ++s_pcbjamEventDepth; }
+        ~PCBJAM_EVENT_DEPTH() { --s_pcbjamEventDepth; }
+    } pcbjamDepthGuard;
+
+    if( aEvent.Category() == TC_COMMAND
+            && ( aEvent.Action() == TA_ACTION || aEvent.Action() == TA_ACTIVATE )
+            && !aEvent.getCommandStr().empty() )
+    {
+        PCBJAM_EDITOR_EVENTS::NotifyAction( aEvent.getCommandStr(), s_pcbjamEventDepth - 1 );
     }
 
     // First try to dispatch the action associated with the event if it is a key press event

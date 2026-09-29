@@ -273,6 +273,7 @@ set( KICOMMON_SRCS
     kiid.cpp
     pcbjam_remote_lock.cpp
     pcbjam_read_only.cpp
+    pcbjam_editor_events.cpp
     kiway.cpp
     kiway_mail.cpp
     kiway_holder.cpp
