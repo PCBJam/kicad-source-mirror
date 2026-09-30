@@ -517,7 +517,18 @@ FOOTPRINT* PCB_IO_PCBJAM_FP::FootprintLoad( const wxString& aLibraryPath,
                                             const std::map<std::string, UTF8>* aProperties )
 {
     if( FOOTPRINT* master = loadOne( aLibraryPath, aFootprintName ) )
-        return static_cast<FOOTPRINT*>( master->Clone() );
+    {
+        // Mirror PCB_IO_KICAD_SEXPR::FootprintLoad. Only the footprint editor keeps the library
+        // uuids (aKeepUUID); every other load is a NEW footprint and needs new ones. A plain
+        // Clone() of the cached master handed out the master's uuids on every load, so parts
+        // placed from one library footprint shared one identity: Update PCB with three
+        // identical LEDs made three footprints with one uuid, and the collab room (keyed by
+        // uuid) kept only one of them.
+        FOOTPRINT* copy = aKeepUUID ? static_cast<FOOTPRINT*>( master->Clone() )
+                                    : static_cast<FOOTPRINT*>( master->Duplicate( IGNORE_PARENT_GROUP ) );
+        copy->SetParent( nullptr );
+        return copy;
+    }
 
     return nullptr;
 }
