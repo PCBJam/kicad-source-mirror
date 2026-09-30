@@ -39,7 +39,9 @@
 
 #include <math/vector2wx.h>
 
+#ifdef __EMSCRIPTEN__
 #include <pcbjam_editor_events.h>
+#endif
 #include <pcbjam_read_only.h>
 #include <view/view.h>
 #include <view/view_controls.h>
@@ -1219,6 +1221,7 @@ bool TOOL_MANAGER::processEvent( const TOOL_EVENT& aEvent )
         return false;
     }
 
+#ifdef __EMSCRIPTEN__
     // pcbjam WASM addition (overlay-system): report every action to the page
     // (window 'pcbjam:editor-event'), with the processEvent nesting depth so
     // the page can tell user input (0) from actions a running tool issued.
@@ -1236,6 +1239,7 @@ bool TOOL_MANAGER::processEvent( const TOOL_EVENT& aEvent )
     {
         PCBJAM_EDITOR_EVENTS::NotifyAction( aEvent.getCommandStr(), s_pcbjamEventDepth - 1 );
     }
+#endif
 
     // First try to dispatch the action associated with the event if it is a key press event
     bool handled = DispatchHotKey( aEvent );
