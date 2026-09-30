@@ -1332,9 +1332,22 @@ SEVERITY SCH_EDIT_FRAME::GetSeverity( int aErrorCode ) const
 }
 
 
+#ifdef __EMSCRIPTEN__
+// pcbjam: per-sheet page settings / title block have no item events, so the collab
+// bridge re-checks the shown sheet's header on every modification (proposal 21 WP4,
+// S3). Weak: images without the collab bridge resolve it to null.
+extern "C" __attribute__( ( weak ) ) void kicadCollabSchOnModify();
+#endif
+
+
 void SCH_EDIT_FRAME::OnModify()
 {
     EDA_BASE_FRAME::OnModify();
+
+#ifdef __EMSCRIPTEN__
+    if( kicadCollabSchOnModify )
+        kicadCollabSchOnModify();
+#endif
 
     if( GetScreen() )
     {

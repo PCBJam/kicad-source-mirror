@@ -2092,9 +2092,22 @@ void PCB_EDIT_FRAME::SetLastPath( LAST_PATH_TYPE aType, const wxString& aLastPat
 }
 
 
+#ifdef __EMSCRIPTEN__
+// pcbjam: board-level state (layers, stackup, setup, paper, title block) has no item
+// events, so the collab bridge re-checks the board header on every modification
+// (proposal 21 WP4). Weak: images without the collab bridge resolve it to null.
+extern "C" __attribute__( ( weak ) ) void kicadCollabPcbOnModify();
+#endif
+
+
 void PCB_EDIT_FRAME::OnModify()
 {
     PCB_BASE_FRAME::OnModify();
+
+#ifdef __EMSCRIPTEN__
+    if( kicadCollabPcbOnModify )
+        kicadCollabPcbOnModify();
+#endif
     Kiway().LocalHistory().NoteFileChange( GetBoard()->GetFileName() );
     m_ZoneFillsDirty = true;
 
