@@ -71,7 +71,9 @@
 #include <nlohmann/json.hpp>
 #include <utility>
 
+#ifdef __EMSCRIPTEN__
 #include <pcbjam_editor_events.h>
+#endif
 
 BEGIN_EVENT_TABLE( DIALOG_SHIM, wxDialog )
     EVT_CHAR_HOOK( DIALOG_SHIM::OnCharHook )
@@ -447,8 +449,6 @@ int DIALOG_SHIM::vertPixelsFromDU( int y ) const
 // our hashtable is an implementation secret, don't need or want it in a header file
 #include <hashtables.h>
 #include <typeinfo>
-
-#include <pcbjam_editor_events.h>
 #include <grid_tricks.h>
 
 
@@ -504,10 +504,12 @@ bool DIALOG_SHIM::Show( bool show )
 #endif
         ret = wxDialog::Show( show );
 
+#ifdef __EMSCRIPTEN__
         // pcbjam WASM addition (overlay-system): tell the page a dialog opened.
         PCBJAM_EDITOR_EVENTS::NotifyDialog( true, this,
                                             PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
                                             GetTitle() );
+#endif
 
         wxRect      savedDialogRect;
         std::string key = m_hash_key.empty() ? getDialogKeyFromTitle( GetTitle() ) : m_hash_key;
@@ -600,10 +602,12 @@ bool DIALOG_SHIM::Show( bool show )
 
         ret = wxDialog::Show( show );
 
+#ifdef __EMSCRIPTEN__
         // pcbjam WASM addition (overlay-system): tell the page a dialog closed.
         PCBJAM_EDITOR_EVENTS::NotifyDialog( false, this,
                                             PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
                                             GetTitle() );
+#endif
 
         SaveControlState();
         focusParentCanvas();
