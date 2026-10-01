@@ -40,6 +40,13 @@ KICOMMON_API void NotifyAction( const std::string& aName, int aDepth );
 KICOMMON_API void NotifyDialog( bool aShown, const wxWindow* aWindow,
                                 const std::string& aClassName, const wxString& aTitle );
 
+/** An electrical or design rules check finished in its dialog (`aKind` "erc" or "drc"):
+ *  the error and warning counts the dialog shows, and the unconnected items (DRC).
+ *  "Run ERC" / "Run DRC" are dialog buttons, not tool actions, so without this the page
+ *  cannot tell that a check ran, let alone that it came back clean (overlay-system 0005). */
+KICOMMON_API void NotifyCheckFinished( const std::string& aKind, int aErrors, int aWarnings,
+                                       int aUnconnected );
+
 /** The unqualified, demangled class name of a polymorphic object's dynamic
  *  type, e.g. "DIALOG_SYMBOL_CHOOSER". */
 KICOMMON_API std::string DynamicClassName( const std::type_info& aType );

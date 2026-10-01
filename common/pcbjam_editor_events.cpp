@@ -78,6 +78,38 @@ void NotifyDialog( bool aShown, const wxWindow* aWindow, const std::string& aCla
 }
 
 
+void NotifyCheckFinished( const std::string& aKind, int aErrors, int aWarnings, int aUnconnected )
+{
+#if defined( __EMSCRIPTEN__ )
+    EM_ASM(
+            {
+                try
+                {
+                    window.dispatchEvent( new CustomEvent( 'pcbjam:editor-event', {
+                        detail : {
+                            type : 'checkFinished',
+                            kind : UTF8ToString( $0 ),
+                            errors : $1,
+                            warnings : $2,
+                            unconnected : $3
+                        }
+                    } ) );
+                }
+                catch( e )
+                {
+                    console.error( 'pcbjam:editor-event check', e );
+                }
+            },
+            aKind.c_str(), aErrors, aWarnings, aUnconnected );
+#else
+    (void) aKind;
+    (void) aErrors;
+    (void) aWarnings;
+    (void) aUnconnected;
+#endif
+}
+
+
 std::string DynamicClassName( const std::type_info& aType )
 {
     std::string name = aType.name();

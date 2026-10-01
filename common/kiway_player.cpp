@@ -35,6 +35,11 @@
 #include <core/raii.h>
 #include <wx/log.h>
 
+#ifdef __EMSCRIPTEN__
+#include <typeinfo>
+#include <pcbjam_editor_events.h>
+#endif
+
 
 static const wxString HOSTNAME( wxT( "localhost" ) );
 
@@ -117,6 +122,20 @@ bool KIWAY_PLAYER::ShowModal( wxString* aResult, wxWindow* aResultantFocusWindow
     Show( true );
     Raise();    // Needed on some Window managers to always display the frame
 
+#ifdef __EMSCRIPTEN__
+    // pcbjam WASM addition (overlay-system 0005): no window manager places a new frame in the
+    // browser, so a modal frame still at the screen origin (the default position its saved
+    // rect started from — the footprint chooser) opens centred instead of over the menu bar.
+    if( GetPosition().x <= 0 && GetPosition().y <= 0 )
+        Centre();
+
+    // A modal frame (e.g. the footprint chooser) is a dialog to the page — report it like
+    // DIALOG_SHIM::Show does, so a guided tour can point into it and the overlay treats it as
+    // an open dialog.
+    PCBJAM_EDITOR_EVENTS::NotifyDialog( true, this, PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
+                                        GetTitle() );
+#endif
+
     SetFocus();
 
     {
@@ -135,6 +154,11 @@ bool KIWAY_PLAYER::ShowModal( wxString* aResult, wxWindow* aResultantFocusWindow
         m_modal_loop = &event_loop;
         event_loop.Run();
     }
+
+#ifdef __EMSCRIPTEN__
+    PCBJAM_EDITOR_EVENTS::NotifyDialog( false, this, PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
+                                        GetTitle() );
+#endif
 
     if( aResult )
         *aResult = m_modal_string;
