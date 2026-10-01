@@ -36,9 +36,12 @@ namespace PCBJAM_EDITOR_EVENTS
 KICOMMON_API void NotifyAction( const std::string& aName, int aDepth );
 
 /** A KiCad dialog was shown or hidden. `aWindow` is the dialog as a wxWindow
- *  (its pointer is the window's id in wxElementRegistry). */
+ *  (its pointer is the window's id in wxElementRegistry). `aModal`: it runs a nested
+ *  event loop (ShowModal, ShowQuasiModal, a modal frame) — the page must not read the
+ *  engine while it is open; a modeless dialog (ERC, DRC, Find) leaves the editor as is. */
 KICOMMON_API void NotifyDialog( bool aShown, const wxWindow* aWindow,
-                                const std::string& aClassName, const wxString& aTitle );
+                                const std::string& aClassName, const wxString& aTitle,
+                                bool aModal = true );
 
 /** An electrical or design rules check finished in its dialog (`aKind` "erc" or "drc"):
  *  the error and warning counts the dialog shows, and the unconnected items (DRC).
