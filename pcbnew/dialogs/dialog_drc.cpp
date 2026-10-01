@@ -60,6 +60,10 @@
 #include <tools/board_inspection_tool.h>
 #include <kiplatform/ui.h>
 
+#ifdef __EMSCRIPTEN__
+#include <pcbjam_editor_events.h>
+#endif
+
 // wxWidgets spends *far* too long calcuating column widths (most of it, believe it or
 // not, in repeatedly creating/destroying a wxDC to do the measurement in).
 // Use default column widths instead.
@@ -522,6 +526,28 @@ void DIALOG_DRC::OnRunDRCClick( wxCommandEvent& aEvent )
     // set float level again, it can be lost due to window events during test run
     KIPLATFORM::UI::SetFloatLevel( this );
     refreshEditor();
+
+#ifdef __EMSCRIPTEN__
+    // pcbjam WASM addition (overlay-system 0005): tell the page what this run found — the
+    // counts updateDisplayedCounts() shows — so a tutorial can react to a clean board.
+    if( !m_cancelled )
+    {
+        auto count = []( const std::shared_ptr<RC_ITEMS_PROVIDER>& aProvider, int aSeverity )
+        {
+            return aProvider ? aProvider->GetCount( aSeverity ) : 0;
+        };
+        const std::shared_ptr<RC_ITEMS_PROVIDER> none;
+        const std::shared_ptr<RC_ITEMS_PROVIDER>& fp = m_footprintTestsRun ? m_fpWarningsProvider : none;
+
+        PCBJAM_EDITOR_EVENTS::NotifyCheckFinished(
+                "drc",
+                count( m_markersProvider, RPT_SEVERITY_ERROR ) + count( m_ratsnestProvider, RPT_SEVERITY_ERROR )
+                        + count( fp, RPT_SEVERITY_ERROR ),
+                count( m_markersProvider, RPT_SEVERITY_WARNING ) + count( m_ratsnestProvider, RPT_SEVERITY_WARNING )
+                        + count( fp, RPT_SEVERITY_WARNING ),
+                m_ratsnestProvider ? m_ratsnestProvider->GetCount() : 0 );
+    }
+#endif
 }
 
 

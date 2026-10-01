@@ -55,6 +55,10 @@
 #include <wx/msgdlg.h>
 #include <sch_edit_tool.h>
 
+#ifdef __EMSCRIPTEN__
+#include <pcbjam_editor_events.h>
+#endif
+
 
 wxDEFINE_EVENT( EDA_EVT_CLOSE_ERC_DIALOG, wxCommandEvent );
 
@@ -587,6 +591,16 @@ void DIALOG_ERC::OnRunERCClick( wxCommandEvent& event )
     updateDisplayedCounts();
     // set float level again, it can be lost due to window events during test run
     KIPLATFORM::UI::SetFloatLevel( this );
+
+#ifdef __EMSCRIPTEN__
+    // pcbjam WASM addition (overlay-system 0005): tell the page what this run found, the
+    // counts the badges above show, so a tutorial can react to a clean schematic.
+    if( !m_cancelled && m_markerProvider )
+    {
+        PCBJAM_EDITOR_EVENTS::NotifyCheckFinished( "erc", m_markerProvider->GetCount( RPT_SEVERITY_ERROR ),
+                                                   m_markerProvider->GetCount( RPT_SEVERITY_WARNING ), 0 );
+    }
+#endif
 }
 
 
