@@ -490,10 +490,12 @@ bool DIALOG_SHIM::Show( bool show )
         ret = wxDialog::Show( show );
 
 #ifdef __EMSCRIPTEN__
-        // pcbjam WASM addition (overlay-system): tell the page a dialog opened.
+        // pcbjam WASM addition (overlay-system): tell the page a dialog opened, and whether a
+        // nested event loop runs it (ShowModal sets IsModal() before showing; ShowQuasiModal
+        // disables the parent before showing and only then marks itself quasi-modal).
         PCBJAM_EDITOR_EVENTS::NotifyDialog( true, this,
                                             PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
-                                            GetTitle() );
+                                            GetTitle(), IsModal() || m_qmodal_parent_disabler );
 #endif
 
         wxRect      savedDialogRect;

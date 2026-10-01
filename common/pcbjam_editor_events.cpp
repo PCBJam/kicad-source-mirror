@@ -44,7 +44,7 @@ void NotifyAction( const std::string& aName, int aDepth )
 
 
 void NotifyDialog( bool aShown, const wxWindow* aWindow, const std::string& aClassName,
-                   const wxString& aTitle )
+                   const wxString& aTitle, bool aModal )
 {
 #if defined( __EMSCRIPTEN__ )
     // The pointer as a decimal string: the same id wxElementRegistry uses.
@@ -59,7 +59,8 @@ void NotifyDialog( bool aShown, const wxWindow* aWindow, const std::string& aCla
                             type : $0 ? 'dialogShown' : 'dialogClosed',
                             cls : UTF8ToString( $1 ),
                             ptr : $2.toString(),
-                            title : UTF8ToString( $3 )
+                            title : UTF8ToString( $3 ),
+                            modal : !!$4
                         }
                     } ) );
                 }
@@ -68,12 +69,13 @@ void NotifyDialog( bool aShown, const wxWindow* aWindow, const std::string& aCla
                     console.error( 'pcbjam:editor-event dialog', e );
                 }
             },
-            aShown ? 1 : 0, aClassName.c_str(), ptr, aTitle.utf8_str().data() );
+            aShown ? 1 : 0, aClassName.c_str(), ptr, aTitle.utf8_str().data(), aModal ? 1 : 0 );
 #else
     (void) aShown;
     (void) aWindow;
     (void) aClassName;
     (void) aTitle;
+    (void) aModal;
 #endif
 }
 
