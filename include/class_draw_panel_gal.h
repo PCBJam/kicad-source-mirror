@@ -36,6 +36,7 @@
 #include <widgets/msgpanel.h>
 #include <memory>
 #include <mutex>
+#include <chrono>
 
 #include <gal/cursors.h>
 
@@ -159,6 +160,19 @@ public:
      * Make sure a refresh gets done on the next idle event if it hasn't already.
      */
     void RequestRefresh();
+
+    /**
+     * Resize the GAL to the current client size of this panel.
+     *
+     * This must be used in preference to calling GAL::ResizeScreen() directly: it holds the
+     * GL context lock while the compositor buffers are reallocated, clamps degenerate sizes
+     * and invalidates the view.
+     *
+     * @param aForce reallocates even when the client size is unchanged, which is required
+     *               after a display scale factor change because the buffers are sized in
+     *               native pixels rather than client units.
+     */
+    void ResizeGal( bool aForce = false );
 
     /**
      * Set a dispatcher that processes events and forwards them to tools.
@@ -285,9 +299,9 @@ protected:
     wxWindow*                m_parent;           ///< Pointer to the parent window
     EDA_DRAW_FRAME*          m_edaFrame;         ///< Parent EDA_DRAW_FRAME (if available)
 
-    wxLongLong               m_lastRepaintStart; ///< Timestamp of the last repaint start
-    wxLongLong               m_lastRepaintEnd;   ///< Timestamp of the last repaint end
-    wxTimer                  m_refreshTimer;     ///< Timer to prevent too-frequent refreshing
+    std::chrono::steady_clock::time_point m_lastRepaintStart; ///< Timestamp of the last repaint start
+    std::chrono::steady_clock::time_point m_lastRepaintEnd;   ///< Timestamp of the last repaint end
+    wxTimer                               m_refreshTimer;     ///< Timer to prevent too-frequent refreshing
 
     std::mutex               m_refreshMutex;     ///< Blocks multiple calls to the draw
 

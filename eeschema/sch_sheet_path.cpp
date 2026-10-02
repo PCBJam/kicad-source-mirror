@@ -23,6 +23,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <set>
+
 #include <refdes_utils.h>
 #include <hash.h>
 #include <sch_screen.h>
@@ -106,6 +108,14 @@ void SCH_SYMBOL_VARIANT::InitializeAttributes( const SCH_SYMBOL& aSymbol )
 }
 
 
+bool SCH_SYMBOL_VARIANT::HasDifferentials( const SCH_SYMBOL& aSymbol ) const
+{
+    return m_DNP != aSymbol.GetDNP() || m_ExcludedFromBOM != aSymbol.GetExcludedFromBOM()
+           || m_ExcludedFromSim != aSymbol.GetExcludedFromSim() || m_ExcludedFromBoard != aSymbol.GetExcludedFromBoard()
+           || m_ExcludedFromPosFiles != aSymbol.GetExcludedFromPosFiles() || !m_Fields.empty();
+}
+
+
 void SCH_SHEET_VARIANT::InitializeAttributes( const SCH_SHEET& aSheet )
 {
     m_DNP = aSheet.GetDNP();
@@ -113,6 +123,13 @@ void SCH_SHEET_VARIANT::InitializeAttributes( const SCH_SHEET& aSheet )
     m_ExcludedFromSim = aSheet.GetExcludedFromSim();
     m_ExcludedFromBoard = aSheet.GetExcludedFromBoard();
     m_ExcludedFromPosFiles = false;  // Sheets don't have position files exclusion
+}
+
+
+bool SCH_SHEET_VARIANT::HasDifferentials( const SCH_SHEET& aSheet ) const
+{
+    return m_DNP != aSheet.GetDNP() || m_ExcludedFromBOM != aSheet.GetExcludedFromBOM()
+           || m_ExcludedFromSim != aSheet.GetExcludedFromSim() || !m_Fields.empty();
 }
 
 
@@ -153,6 +170,8 @@ SCH_SHEET_PATH& SCH_SHEET_PATH::operator=( SCH_SHEET_PATH&& aOther )
     m_virtualPageNumber  = aOther.m_virtualPageNumber;
     m_current_hash       = aOther.m_current_hash;
     m_cached_page_number = aOther.m_cached_page_number;
+    m_cached_path_valid  = aOther.m_cached_path_valid;
+    m_cached_path        = std::move( aOther.m_cached_path );
 
     m_recursion_test_cache = std::move( aOther.m_recursion_test_cache );
 
@@ -179,6 +198,8 @@ void SCH_SHEET_PATH::initFromOther( const SCH_SHEET_PATH& aOther )
     m_virtualPageNumber  = aOther.m_virtualPageNumber;
     m_current_hash       = aOther.m_current_hash;
     m_cached_page_number = aOther.m_cached_page_number;
+    m_cached_path_valid  = aOther.m_cached_path_valid;
+    m_cached_path        = aOther.m_cached_path;
 
     // Note: don't copy m_recursion_test_cache as it is slow and we want std::vector<SCH_SHEET_PATH>
     // to be very fast to construct for use in the connectivity algorithm.
@@ -188,6 +209,7 @@ void SCH_SHEET_PATH::initFromOther( const SCH_SHEET_PATH& aOther )
 void SCH_SHEET_PATH::Rehash()
 {
     m_current_hash = 0;
+    m_cached_path_valid = false;
 
     for( SCH_SHEET* sheet : m_sheets )
         hash_combine( m_current_hash, sheet->m_Uuid.Hash() );
@@ -437,27 +459,34 @@ wxString SCH_SHEET_PATH::PathAsString() const
 
 KIID_PATH SCH_SHEET_PATH::Path() const
 {
-    KIID_PATH path;
+    if( m_cached_path_valid )
+        return m_cached_path;
+
+    m_cached_path.clear();
     size_t size = m_sheets.size();
 
     if( m_sheets.empty() )
-        return path;
+    {
+        m_cached_path_valid = true;
+        return m_cached_path;
+    }
 
     if( m_sheets[0]->m_Uuid != niluuid )
     {
-        path.reserve( size );
-        path.push_back( m_sheets[0]->m_Uuid );
+        m_cached_path.reserve( size );
+        m_cached_path.push_back( m_sheets[0]->m_Uuid );
     }
     else
     {
         // Skip the virtual root
-        path.reserve( size - 1 );
+        m_cached_path.reserve( size - 1 );
     }
 
     for( size_t i = 1; i < size; i++ )
-        path.push_back( m_sheets[i]->m_Uuid );
+        m_cached_path.push_back( m_sheets[i]->m_Uuid );
 
-    return path;
+    m_cached_path_valid = true;
+    return m_cached_path;
 }
 
 
@@ -534,18 +563,13 @@ void SCH_SHEET_PATH::UpdateAllScreenReferences() const
                         || aItem->Type() == SCH_SHAPE_T );
             } );
 
-    std::optional<wxString> variantName;
-    const SCHEMATIC* schematic = LastScreen()->Schematic();
-
-    if( schematic )
-        variantName = schematic->GetCurrentVariant();
-
     for( SCH_ITEM* item : items )
     {
         if( item->Type() == SCH_SYMBOL_T )
         {
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
 
+            // GetRef() and GetUnitSelection() are O(1) via the symbol's instance path index.
             symbol->GetField( FIELD_T::REFERENCE )->SetText( symbol->GetRef( this ) );
             symbol->SetUnit( symbol->GetUnitSelection( this ) );
             LastScreen()->Update( item, false );
@@ -1102,10 +1126,8 @@ void SCH_SHEET_LIST::SortByHierarchicalPageNumbers( bool aUpdateVirtualPageNums 
 
             // If one path is a prefix of the other, the shorter one comes first
             // This ensures parents come before children
-            if( common_len == a.size() )
-                return true;  // a is a prefix of b - a is the parent
-            if( common_len == b.size() )
-                return false; // b is a prefix of a - b is the parent
+            if( common_len == min_len )
+                return a.size() < b.size();
 
             // Paths diverge at common_len
             // If they share the same parent, sort by page number
@@ -1648,6 +1670,33 @@ bool SCH_SHEET_LIST::AllSheetPageNumbersEmpty() const
 }
 
 
+wxString SCH_SHEET_LIST::GetNextPageNumber() const
+{
+    wxString pageNumber;
+
+    // Find the next available page number by checking all existing page numbers
+    std::set<int> usedPageNumbers;
+
+    for( const SCH_SHEET_PATH& path : *this )
+    {
+        wxString existingPageNum = path.GetPageNumber();
+        long     pageNum = 0;
+
+        if( existingPageNum.ToLong( &pageNum ) && pageNum > 0 )
+            usedPageNumbers.insert( static_cast<int>( pageNum ) );
+    }
+
+    // Find the first available number starting from 1
+    int nextAvailable = 1;
+
+    while( usedPageNumbers.count( nextAvailable ) > 0 )
+        nextAvailable++;
+
+    pageNumber.Printf( wxT( "%d" ), nextAvailable );
+    return pageNumber;
+}
+
+
 void SCH_SHEET_LIST::SetInitialPageNumbers()
 {
     // Don't accidentally renumber existing sheets.
@@ -1665,6 +1714,60 @@ void SCH_SHEET_LIST::SetInitialPageNumbers()
         instance.SetPageNumber( tmp );
         pageNumber += 1;
     }
+}
+
+
+bool SCH_SHEET_LIST::RepairPageNumbers()
+{
+    // A page number is claimed by the first sheet in the list that uses it.  Any sheet with an
+    // empty page number, or one repeating a number an earlier sheet already claimed, is reassigned
+    // to the lowest unused positive integer.  The stored string is compared as-is, so custom
+    // schemes (e.g. "A", "1.1") are preserved when unique.  Every distinct existing page number is
+    // reserved up front so a reassignment never steals a number a later, non-conflicting sheet
+    // already holds.
+    std::set<wxString> reservedPageIds;
+
+    for( const SCH_SHEET_PATH& instance : *this )
+    {
+        if( instance.Last()->IsVirtualRootSheet() )
+            continue;
+
+        const wxString pageNumber = instance.GetPageNumber();
+
+        if( !pageNumber.IsEmpty() )
+            reservedPageIds.insert( pageNumber );
+    }
+
+    std::set<wxString> assignedPageIds;
+    bool               modified = false;
+    long               nextPage = 1;
+
+    for( SCH_SHEET_PATH& instance : *this )
+    {
+        if( instance.Last()->IsVirtualRootSheet() )
+            continue;
+
+        const wxString pageNumber = instance.GetPageNumber();
+
+        // Keep the first sheet to claim a given page number.
+        if( !pageNumber.IsEmpty() && assignedPageIds.insert( pageNumber ).second )
+            continue;
+
+        wxString pageStr = wxString::Format( wxT( "%ld" ), nextPage );
+
+        while( reservedPageIds.count( pageStr ) || assignedPageIds.count( pageStr ) )
+        {
+            nextPage++;
+            pageStr = wxString::Format( wxT( "%ld" ), nextPage );
+        }
+
+        instance.SetPageNumber( pageStr );
+        assignedPageIds.insert( pageStr );
+        nextPage++;
+        modified = true;
+    }
+
+    return modified;
 }
 
 

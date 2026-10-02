@@ -226,7 +226,12 @@ void DIALOG_DRC::OnActivateDlg( wxActivateEvent& aEvent )
 
         DRC_TOOL* drcTool = m_frame->GetToolManager()->GetTool<DRC_TOOL>();
         drcTool->DestroyDRCDialog();
+
+        return;
     }
+
+    // Let DIALOG_SHIM re-establish keyboard focus so ESC keeps closing the dialog.
+    aEvent.Skip();
 }
 
 
@@ -464,30 +469,30 @@ void DIALOG_DRC::OnRunDRCClick( wxCommandEvent& aEvent )
     double elapsedMs =
             std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - m_drcStartTime ).count();
 
-    auto formatElapsed = []( double aMsecs ) -> wxString
-    {
-        int totalSeconds = static_cast<int>( aMsecs / 1000.0 + 0.5 );
+    auto formatElapsed =
+            [&]() -> wxString
+            {
+                int totalSeconds = KiROUND( elapsedMs / 1000.0 );
 
-        if( totalSeconds >= 60 )
-            return wxString::Format( _( "%1$d min %2$d s" ), totalSeconds / 60, totalSeconds % 60 );
+                if( totalSeconds >= 60 )
+                    return wxString::Format( _( "%1$d min %2$d s" ), totalSeconds / 60, totalSeconds % 60 );
 
-        return wxString::Format( _( "%.2f s" ), aMsecs / 1000.0 );
-    };
+                return wxString::Format( _( "%.2f s" ), elapsedMs / 1000.0 );
+            };
 
     if( m_cancelled )
     {
         m_messages->Report( _( "-------- DRC canceled by user.<br><br>" ) );
 
         if( m_drcStatusBar )
-            m_drcStatusBar->SetStatusText( wxString::Format( _( "Canceled after %s" ), formatElapsed( elapsedMs ) ),
-                                           1 );
+            m_drcStatusBar->SetStatusText( wxString::Format( _( "Canceled after %s" ), formatElapsed() ), 1 );
     }
     else
     {
         m_messages->Report( _( "Done.<br><br>" ) );
 
         if( m_drcStatusBar )
-            m_drcStatusBar->SetStatusText( wxString::Format( _( "Completed in %s" ), formatElapsed( elapsedMs ) ), 1 );
+            m_drcStatusBar->SetStatusText( wxString::Format( _( "Completed in %s" ), formatElapsed() ), 1 );
     }
 
     Raise();
@@ -575,10 +580,25 @@ void DIALOG_DRC::OnDRCItemSelected( wxDataViewEvent& aEvent )
 
     std::shared_ptr<RC_ITEM> rc_item = node->m_RcItem;
 
-    if( rc_item->GetErrorCode() == DRCE_UNRESOLVED_VARIABLE
-            && rc_item->GetParent()->GetMarkerType() == MARKER_BASE::MARKER_DRAWING_SHEET )
+    // The tree keeps its RC_ITEMs alive independently of the board, so rc_item->GetParent()
+    // can dangle once the owning marker is deleted (board edited, DRC re-run, undo) while this
+    // modeless dialog stays open.  Recover the still-live marker by matching the shared RC_ITEM
+    // against the board's current markers instead of trusting the raw back-pointer.
+    PCB_MARKER* parentMarker = nullptr;
+
+    for( PCB_MARKER* marker : board->Markers() )
     {
-        m_frame->FocusOnLocation( node->m_RcItem->GetParent()->GetPos(), m_scroll_on_crossprobe );
+        if( marker->GetRCItem() == rc_item )
+        {
+            parentMarker = marker;
+            break;
+        }
+    }
+
+    if( rc_item->GetErrorCode() == DRCE_UNRESOLVED_VARIABLE && parentMarker
+            && parentMarker->GetMarkerType() == MARKER_BASE::MARKER_DRAWING_SHEET )
+    {
+        m_frame->FocusOnLocation( parentMarker->GetPos(), m_scroll_on_crossprobe );
 
         aEvent.Skip();
         return;

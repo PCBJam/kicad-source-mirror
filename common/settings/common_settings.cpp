@@ -255,7 +255,7 @@ COMMON_SETTINGS::COMMON_SETTINGS() :
             &m_Input.warp_mouse_on_move, true ) );
 
     m_params.emplace_back( new PARAM<bool>( "input.horizontal_pan",
-            &m_Input.horizontal_pan, false ) );
+            &m_Input.horizontal_pan, true ) );
 
     m_params.emplace_back( new PARAM<bool>( "input.hotkey_feedback",
             &m_Input.hotkey_feedback, true ) );
@@ -329,8 +329,6 @@ COMMON_SETTINGS::COMMON_SETTINGS() :
     m_params.emplace_back( new PARAM<int>( "graphics.antialiasing_mode",
             &m_Graphics.aa_mode, 2, 0, 2 ) );
 
-    m_params.emplace_back( new PARAM<bool>( "system.local_history_enabled",
-            &m_System.local_history_enabled, true ) );
     m_params.emplace_back( new PARAM<int>( "system.local_history_debounce",
             &m_System.local_history_debounce, 5, 0, 100000 ) );
 
@@ -385,6 +383,15 @@ COMMON_SETTINGS::COMMON_SETTINGS() :
 
     m_params.emplace_back( new PARAM<bool>( "do_not_show_again.migrate_wrl_prompt",
             &m_DoNotShowAgain.migrate_wrl_prompt, false ) );
+
+    m_params.emplace_back( new PARAM<bool>( "embed_file_defaults.datasheet", &m_EmbedFileDefaults.datasheet, true ) );
+
+    m_params.emplace_back(
+            new PARAM<bool>( "embed_file_defaults.drawing_sheet", &m_EmbedFileDefaults.drawing_sheet, true ) );
+
+    m_params.emplace_back( new PARAM<bool>( "embed_file_defaults.model_3d", &m_EmbedFileDefaults.model_3d, false ) );
+
+    m_params.emplace_back( new PARAM<bool>( "embed_file_defaults.sim_model", &m_EmbedFileDefaults.sim_model, false ) );
 
     m_params.emplace_back( new PARAM_LIST<wxString>( "system.extra_3d_search_dirs",
             &m_Extra3DSearchDirs, {} ) );

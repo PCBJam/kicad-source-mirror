@@ -70,9 +70,18 @@ SCH_IO* SYMBOL_LIBRARY_ADAPTER::schplugin( const LIB_DATA* aRow )
 
 void SYMBOL_LIBRARY_ADAPTER::enumerateLibrary( LIB_DATA* aLib, const wxString& aUri )
 {
-    wxArrayString dummyList;
-    std::map<std::string, UTF8> options = aLib->row->GetOptionsMap();
-    schplugin( aLib )->EnumerateSymbolLib( dummyList, aUri, &options );
+    // Lazy load: the bulk async preload (LIBRARY_MANAGER_ADAPTER::AsyncLoad) calls this
+    // hook to warm each library's plugin cache up front. For the WASM port's
+    // network-backed (pcbjam/CDN) libraries that turns startup into hundreds of
+    // serialized, main-thread-blocking fetches — the full ~222-library KiCad set left
+    // the symbol tree empty for minutes and a library's '+' expander did nothing because
+    // the UI thread was saturated. Skip eager enumeration here and let a library's
+    // symbols be fetched on demand: on first chooser/editor access (LoadOne(), which
+    // still enumerates) or on symbol-tree expansion
+    // (SYMBOL_TREE_SYNCHRONIZING_ADAPTER::OnExpanding -> SYMBOL_LIBRARY_MANAGER::EnumerateSymbols).
+    wxLogTrace( traceLibraries, "Sym: %s: plugin ready (lazy enumerate)", aLib->row->Nickname() );
+
+    (void) aUri;
 }
 
 
@@ -195,7 +204,15 @@ std::vector<wxString> SYMBOL_LIBRARY_ADAPTER::GetSymbolNames( const wxString& aN
         if( aType == SYMBOL_TYPE::POWER_ONLY )
             options[PropPowerSymsOnly] = "";
 
-        schplugin( lib )->EnumerateSymbolLib( namesAS, getUri( lib->row ), &options );
+        try
+        {
+            schplugin( lib )->EnumerateSymbolLib( namesAS, getUri( lib->row ), &options );
+        }
+        catch( const IO_ERROR& e )
+        {
+            wxLogTrace( traceLibraries, "Sym: Exception enumerating library %s: %s",
+                        lib->row->Nickname(), e.What() );
+        }
     }
 
     for( const wxString& name : namesAS )
@@ -345,13 +362,22 @@ std::vector<SUB_LIBRARY> SYMBOL_LIBRARY_ADAPTER::GetSubLibraries( const wxString
     {
         const LIB_DATA* rowData = *result;
 
-        std::vector<wxString> names;
-        schplugin( rowData )->GetSubLibraryNames( names );
-
-        for( const wxString& name : names )
+        try
         {
-            ret.emplace_back( SUB_LIBRARY { .nickname = name,
-                                            .description = schplugin( rowData )->GetSubLibraryDescription( name ) } );
+            std::vector<wxString> names;
+            schplugin( rowData )->GetSubLibraryNames( names );
+
+            for( const wxString& name : names )
+            {
+                ret.emplace_back( SUB_LIBRARY {
+                        .nickname = name,
+                        .description = schplugin( rowData )->GetSubLibraryDescription( name ) } );
+            }
+        }
+        catch( const IO_ERROR& e )
+        {
+            wxLogTrace( traceLibraries, "Sym: Exception getting sub-libraries for %s: %s",
+                        aNickname, e.What() );
         }
     }
 
@@ -398,4 +424,17 @@ int SYMBOL_LIBRARY_ADAPTER::GetModifyHash() const
     }
 
     return hash;
+}
+
+
+std::optional<int> SYMBOL_LIBRARY_ADAPTER::GetLibraryModifyHash( const wxString& aNickname ) const
+{
+    if( std::optional<const LIB_DATA*> result = fetchIfLoaded( aNickname ) )
+    {
+        const LIB_DATA* rowData = *result;
+        wxCHECK( rowData->row, std::nullopt );
+        return schplugin( rowData )->GetModifyHash();
+    }
+
+    return std::nullopt;
 }

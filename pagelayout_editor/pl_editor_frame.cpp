@@ -252,9 +252,14 @@ PL_EDITOR_FRAME::PL_EDITOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
         m_spaceMouse->SetCanvas( GetCanvas() );
     }
-    catch( const std::system_error& e )
+    catch( const std::exception& e )
     {
-        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), e.what() );
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), wxS( "%s" ), e.what() );
+    }
+    catch( ... )
+    {
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ),
+                    wxT( "Unknown exception during SpaceMouse initialization" ) );
     }
 }
 
@@ -378,6 +383,17 @@ bool PL_EDITOR_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, i
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/pl_editor_embind.cpp): the Yjs
+// collaborative bridge's snapshot-differ ChangeSource. OnModify() is pl_editor's
+// single change chokepoint, so this is where the differ derives per-item
+// add/remove/change events to emit to peers. No-op (and unreferenced) in native
+// builds; the symbol is provided by the always-linked embind translation unit on
+// emscripten. See features/yjs-bridge/0002.
+extern "C" void kicadCollabOnModify();
+#endif
+
+
 void PL_EDITOR_FRAME::OnModify()
 {
     // Must be called after a change in order to set the "modify" flag and update
@@ -390,6 +406,10 @@ void PL_EDITOR_FRAME::OnModify()
         return;
 
     UpdateTitleAndInfo();
+
+#ifdef __EMSCRIPTEN__
+    kicadCollabOnModify();
+#endif
 }
 
 

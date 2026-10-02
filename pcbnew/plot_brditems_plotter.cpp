@@ -745,7 +745,9 @@ void BRDITEMS_PLOTTER::PlotText( const EDA_TEXT* aText, PCB_LAYER_ID aLayer, boo
     KIFONT::FONT* font = aText->GetDrawFont( m_plotter->RenderSettings() );
     wxString      shownText( aText->GetShownText( true ) );
 
-    if( shownText.IsEmpty() )
+    const PCB_TEXTBOX* knockoutBox = aIsKnockout ? dynamic_cast<const PCB_TEXTBOX*>( aText ) : nullptr;
+
+    if( shownText.IsEmpty() && !knockoutBox )
         return;
 
     if( !m_layerMask[aLayer] )
@@ -792,10 +794,10 @@ void BRDITEMS_PLOTTER::PlotText( const EDA_TEXT* aText, PCB_LAYER_ID aLayer, boo
     {
         SHAPE_POLY_SET  finalPoly;
 
-        if( const PCB_TEXT* text = dynamic_cast<const PCB_TEXT*>( aText) )
+        if( knockoutBox )
+            knockoutBox->TransformTextToPolySet( finalPoly, 0, maxError, ERROR_INSIDE );
+        else if( const PCB_TEXT* text = dynamic_cast<const PCB_TEXT*>( aText ) )
             text->TransformTextToPolySet( finalPoly, 0, maxError, ERROR_INSIDE );
-        else if( const PCB_TEXTBOX* textbox = dynamic_cast<const PCB_TEXTBOX*>( aText ) )
-            textbox->TransformTextToPolySet( finalPoly, 0, maxError, ERROR_INSIDE );
 
         finalPoly.Fracture();
 
@@ -1149,7 +1151,7 @@ void BRDITEMS_PLOTTER::PlotShape( const PCB_SHAPE* aShape )
     }
     else
     {
-        std::vector<SHAPE*> shapes = aShape->MakeEffectiveShapes( true );
+        std::vector<SHAPE*> shapes = aShape->MakeEffectiveShapesForStroking();
 
         for( SHAPE* shape : shapes )
         {
@@ -1312,7 +1314,9 @@ void BRDITEMS_PLOTTER::PlotDrillMarks()
             if( pad->GetDrillSize().x == 0 )
                 continue;
 
-            if( ( pad->GetLayerSet() & m_layerMask ).none() )
+            // Skip marks on layers the pad isn't on for Gerber only (24416). Other
+            // formats keep them as a drill map, e.g. Edge.Cuts (24867).
+            if( m_plotter->GetPlotterType() == PLOT_FORMAT::GERBER && ( pad->GetLayerSet() & m_layerMask ).none() )
                 continue;
 
             if( m_plotter->GetPlotterType() != PLOT_FORMAT::DXF || GetDXFPlotMode() == FILLED )

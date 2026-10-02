@@ -687,9 +687,7 @@ void PROJECT_TREE_PANE::ReCreateTreePrj()
 
     if( m_TreeProject->GetGitRepo() )
     {
-        git_repository* repo = m_TreeProject->GetGitRepo();
-        KIGIT::PROJECT_GIT_UTILS::RemoveVCS( repo );
-        m_TreeProject->SetGitRepo( nullptr );
+        releaseGitRepo();
         m_gitIconsInitialized = false;
     }
 
@@ -1517,8 +1515,6 @@ void PROJECT_TREE_PANE::FileWatcherReset()
     wxString prj_dir = wxPathOnly( m_Parent->GetProjectFileName() );
 
 #if defined( _WIN32 )
-    KISTATUSBAR* statusBar = static_cast<KISTATUSBAR*>( m_Parent->GetStatusBar() );
-
     if( KIPLATFORM::ENV::IsNetworkPath( prj_dir ) )
     {
         // Due to a combination of a bug in SAMBA sending bad change event IDs and wxWidgets
@@ -1526,13 +1522,13 @@ void PROJECT_TREE_PANE::FileWatcherReset()
         // avoid spawning a filewatcher. Unfortunately this punishes corporate environments with
         // Windows Server shares :/
         m_Parent->m_FileWatcherInfo = _( "Network path: not monitoring folder changes" );
-        statusBar->SetEllipsedTextField( m_Parent->m_FileWatcherInfo, 1 );
+        m_Parent->SetStatusText( m_Parent->m_FileWatcherInfo, 1 );
         return;
     }
     else
     {
         m_Parent->m_FileWatcherInfo = _( "Local path: monitoring folder changes" );
-        statusBar->SetEllipsedTextField( m_Parent->m_FileWatcherInfo, 1 );
+        m_Parent->SetStatusText( m_Parent->m_FileWatcherInfo, 1 );
     }
 #endif
 
@@ -1760,7 +1756,7 @@ void PROJECT_TREE_PANE::EmptyTreePrj()
         if( userAbandoned )
         {
             git_repository*               orphan    = m_TreeProject->GetGitRepo();
-            std::unique_ptr<KIGIT_COMMON> oldCommon = m_TreeProject->TakeGitCommon();
+            std::shared_ptr<KIGIT_COMMON> oldCommon = m_TreeProject->TakeGitCommon();
             m_TreeProject->SetGitRepo( nullptr );
 
             // Register the cleanup thread with the orphan registry so the
@@ -1803,6 +1799,57 @@ void PROJECT_TREE_PANE::EmptyTreePrj()
             KIGIT::PROJECT_GIT_UTILS::RemoveVCS( repo );
             m_TreeProject->SetGitRepo( nullptr );
         }
+    }
+}
+
+
+void PROJECT_TREE_PANE::releaseGitRepo()
+{
+    git_repository* repo = m_TreeProject ? m_TreeProject->GetGitRepo() : nullptr;
+
+    if( !repo )
+        return;
+
+    KIGIT_COMMON* common = m_TreeProject->GitCommon();
+    common->SetCancelled( true );
+
+    std::unique_lock<std::mutex> gitLock( common->m_gitActionMutex, std::try_to_lock );
+
+    if( gitLock.owns_lock() )
+    {
+        m_TreeProject->SetGitRepo( nullptr );
+        git_repository_free( repo );
+        return;
+    }
+
+    // A background fetch or status update still holds the git action mutex, so freeing the
+    // repository here would pull it out from under a running libgit2 call.  Hand the handle
+    // and its KIGIT_COMMON to the orphan registry, which frees it once the mutex is released.
+    // Any worker pinning the common keeps it alive until it drops its own shared handle.
+    std::shared_ptr<KIGIT_COMMON> oldCommon = m_TreeProject->TakeGitCommon();
+
+    GIT_BACKEND* backend = GetGitBackend();
+    wxString     projectDir = oldCommon ? oldCommon->GetProjectDir() : wxString();
+
+    auto cleanup = [repo, old = std::move( oldCommon )]() mutable
+                   {
+                       std::lock_guard<std::mutex> g( old->m_gitActionMutex );
+                       git_repository_free( repo );
+                   };
+
+    bool registered = false;
+
+    if( backend )
+    {
+        std::string label = "release repo " + projectDir.ToStdString();
+        registered = backend->OrphanRegistry().Register( label, std::move( cleanup ) );
+    }
+
+    if( !registered )
+    {
+        // The registry is unavailable or shutting down, so block on the mutex here rather
+        // than leak the handle.
+        cleanup();
     }
 }
 
@@ -2246,8 +2293,8 @@ void PROJECT_TREE_PANE::onGitRemoveVCS( wxCommandEvent& aEvent )
 
     if( localSettings.m_GitIntegrationDisabled )
     {
-        // Disabling Git integration - clear the repo reference and item states
-        m_TreeProject->SetGitRepo( nullptr );
+        // Disabling Git integration - release the repo and clear item states
+        releaseGitRepo();
         m_gitIconsInitialized = false;
 
         // Clear all item states to remove git status icons
@@ -2450,7 +2497,13 @@ void PROJECT_TREE_PANE::updateGitStatusIconMap()
         return;
     }
 
-    if( !m_TreeProject->GetGitRepo() )
+    // Pin a shared handle so a concurrent releaseGitRepo()/TakeGitCommon() on the UI thread
+    // cannot free the common while we dereference the repo or hold its action mutex.  The
+    // embedded action mutex can only guard the repo, not the object that owns the mutex, so
+    // ownership has to be pinned before anything else is touched.
+    std::shared_ptr<KIGIT_COMMON> gitCommon = m_TreeProject->GitCommonPtr();
+
+    if( !gitCommon || !gitCommon->GetRepo() )
     {
         wxLogTrace( traceGit, wxS( "updateGitStatusIconMap: No git repository found" ) );
         return;
@@ -2458,7 +2511,7 @@ void PROJECT_TREE_PANE::updateGitStatusIconMap()
 
     // Acquire the git action mutex to synchronize with EmptyTreePrj() shutdown.
     // This ensures the repository isn't freed while we're using it.
-    std::unique_lock<std::mutex> gitLock( m_TreeProject->GitCommon()->m_gitActionMutex, std::try_to_lock );
+    std::unique_lock<std::mutex> gitLock( gitCommon->m_gitActionMutex, std::try_to_lock );
 
     if( !gitLock.owns_lock() )
     {
@@ -2467,13 +2520,13 @@ void PROJECT_TREE_PANE::updateGitStatusIconMap()
     }
 
     // Check if cancellation was requested (e.g., during shutdown)
-    if( m_TreeProject->GitCommon()->IsCancelled() )
+    if( gitCommon->IsCancelled() )
     {
         wxLogTrace( traceGit, wxS( "updateGitStatusIconMap: Cancelled" ) );
         return;
     }
 
-    GIT_STATUS_HANDLER statusHandler( m_TreeProject->GitCommon() );
+    GIT_STATUS_HANDLER statusHandler( gitCommon.get() );
 
     // Set up pathspec for project files
     wxFileName         rootFilename( Prj().GetProjectFullName() );
@@ -2489,7 +2542,7 @@ void PROJECT_TREE_PANE::updateGitStatusIconMap()
 
     // Get file status
     auto fileStatusMap = statusHandler.GetFileStatus( pathspecStr );
-    auto [localChanges, remoteChanges] = m_TreeProject->GitCommon()->GetDifferentFiles();
+    auto [localChanges, remoteChanges] = gitCommon->GetDifferentFiles();
     statusHandler.UpdateRemoteStatus( localChanges, remoteChanges, fileStatusMap );
 
     bool updated = false;
@@ -2517,7 +2570,7 @@ void PROJECT_TREE_PANE::updateGitStatusIconMap()
         updated = true;
 
     m_gitCurrentBranchName = branchName;
-    m_gitCurrentUpstream = m_TreeProject->GitCommon()->GetUpstreamShorthand();
+    m_gitCurrentUpstream = gitCommon->GetUpstreamShorthand();
 
     wxLogTrace( traceGit, wxS( "updateGitStatusIconMap: Updated git status icons" ) );
 
@@ -2664,7 +2717,7 @@ void PROJECT_TREE_PANE::onGitCommit( wxCommandEvent& aEvent )
         }
 
         // Do not commit files outside the project directory
-        if( !absPath.StartsWith( projectPath ) )
+        if( !KIGIT::PROJECT_GIT_UTILS::IsWithinProjectPath( absPath, projectPath ) )
             continue;
 
         // Skip lock files
@@ -2758,9 +2811,20 @@ void PROJECT_TREE_PANE::onGitAmendCommit( wxCommandEvent& aEvent )
 
     if( git_repository* fresh = KIGIT::PROJECT_GIT_UTILS::GetRepositoryForFile( reopenPath.c_str() ) )
     {
-        m_TreeProject->SetGitRepo( fresh );
-        git_repository_free( repo );
-        repo = fresh;
+        // Swapping the handle is only safe when no background fetch or status update holds
+        // the old one, so keep the existing handle if the mutex is busy.
+        std::unique_lock<std::mutex> gitLock( m_TreeProject->GitCommon()->m_gitActionMutex, std::try_to_lock );
+
+        if( gitLock.owns_lock() )
+        {
+            m_TreeProject->SetGitRepo( fresh );
+            git_repository_free( repo );
+            repo = fresh;
+        }
+        else
+        {
+            git_repository_free( fresh );
+        }
     }
 
     if( git_repository_head_unborn( repo ) != 0 )
@@ -2921,7 +2985,7 @@ void PROJECT_TREE_PANE::onGitAmendCommit( wxCommandEvent& aEvent )
 #endif
         }
 
-        if( !absPath.StartsWith( projectPath ) )
+        if( !KIGIT::PROJECT_GIT_UTILS::IsWithinProjectPath( absPath, projectPath ) )
             continue;
 
         if( fn.GetExt().CmpNoCase( FILEEXT::LockFileExtension ) == 0 )
@@ -2976,6 +3040,13 @@ void PROJECT_TREE_PANE::onGitAmendCommit( wxCommandEvent& aEvent )
                         if( !path )
                             continue;
 
+                        // Skip files from the previous commit that live outside the
+                        // current project directory (issue #15910).
+                        wxString absPath = repoWorkDir + wxString::FromUTF8( path );
+
+                        if( !KIGIT::PROJECT_GIT_UTILS::IsWithinProjectPath( absPath, projectPath ) )
+                            continue;
+
                         int flag = GIT_STATUS_INDEX_MODIFIED;
 
                         if( delta->status == GIT_DELTA_ADDED )
@@ -2994,6 +3065,7 @@ void PROJECT_TREE_PANE::onGitAmendCommit( wxCommandEvent& aEvent )
                            modifiedFiles );
     dlg.SetTitle( _( "Amend Last Commit" ) );
     dlg.SetCommitMessage( headMessage );
+    dlg.SetFileSelectionRequired( false );
 
     if( dlg.ShowModal() != wxID_OK )
         return;
@@ -3151,9 +3223,11 @@ void PROJECT_TREE_PANE::onGitSyncTimer( wxTimerEvent& aEvent )
 
     m_gitSyncTask = tp.submit_task( [this]()
     {
-        KIGIT_COMMON* gitCommon = m_TreeProject->GitCommon();
+        // Pin a shared handle so a concurrent releaseGitRepo() cannot free the common while
+        // PerformFetch() is inside it holding the action mutex.
+        std::shared_ptr<KIGIT_COMMON> gitCommon = m_TreeProject->GitCommonPtr();
 
-        if( !gitCommon )
+        if( !gitCommon || !gitCommon->GetRepo() )
         {
             wxLogTrace( traceGit, "onGitSyncTimer: No git repository found" );
             return;
@@ -3166,7 +3240,7 @@ void PROJECT_TREE_PANE::onGitSyncTimer( wxTimerEvent& aEvent )
             return;
         }
 
-        GIT_PULL_HANDLER handler( gitCommon );
+        GIT_PULL_HANDLER handler( gitCommon.get() );
         handler.PerformFetch();
 
         // Only schedule the follow-up work if not cancelled
@@ -3210,9 +3284,9 @@ void PROJECT_TREE_PANE::onGitStatusTimer( wxTimerEvent& aEvent )
 
 void PROJECT_TREE_PANE::showGitFeedback( const wxString& aText )
 {
-    if( KISTATUSBAR* sb = dynamic_cast<KISTATUSBAR*>( m_Parent->GetStatusBar() ) )
+    if( m_Parent )
     {
-        sb->SetEllipsedTextField( aText, 0 );
+        m_Parent->SetStatusText( aText, 0 );
         m_gitFeedbackTimer.Start( 8000, wxTIMER_ONE_SHOT );
     }
 }

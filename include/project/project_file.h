@@ -80,6 +80,7 @@ enum LAST_PATH_TYPE : unsigned int
     LAST_PATH_VRML,
     LAST_PATH_SPECCTRADSN,
     LAST_PATH_PLOT,
+    LAST_PATH_STEP,
 
     LAST_PATH_SIZE
 };
@@ -112,6 +113,11 @@ public:
     void SetProject( PROJECT* aProject )
     {
         m_project = aProject;
+    }
+
+    const PROJECT* GetOwningProject() const override
+    {
+        return m_project;
     }
 
     std::vector<FILE_INFO_PAIR>& GetSheets()

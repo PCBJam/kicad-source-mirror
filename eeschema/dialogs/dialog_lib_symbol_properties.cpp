@@ -38,6 +38,7 @@
 #include <widgets/wx_grid.h>
 #include <widgets/std_bitmap_button.h>
 #include <string_utils.h>
+#include <template_fieldnames.h>
 #include <project_sch.h>
 #include <refdes_utils.h>
 #include <dialog_sim_model.h>
@@ -529,12 +530,15 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::Validate()
     {
         bodyStyleCount = 1;
     }
-    if( m_radioDeMorgan->GetValue() )
+    else if( m_radioDeMorgan->GetValue() )
     {
         bodyStyleCount = 2;
     }
     else if( m_radioCustom->GetValue() )
     {
+        if( !m_bodyStyleNamesGrid->CommitPendingChanges() )
+            return false;
+
         for( int ii = 0; ii < m_bodyStyleNamesGrid->GetNumberRows(); ++ii )
         {
             if( !m_bodyStyleNamesGrid->GetCellValue( ii, 0 ).IsEmpty() )
@@ -542,9 +546,9 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::Validate()
         }
     }
 
-    if( bodyStyleCount == 0 )
+    if( m_radioCustom->GetValue() && bodyStyleCount < 2 )
     {
-        m_delayedErrorMessage = _( "Symbol must have at least 1 body style" );
+        m_delayedErrorMessage = _( "Custom body styles must have at least 2 entries" );
         return false;
     }
 
@@ -621,8 +625,15 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataFromWindow()
 
         wxString fieldName = field.GetCanonicalName();
 
-        if( m_fields->IsInherited( ii ) && field == m_fields->ParentField( ii ) )
-            continue; // Skip inherited fields
+        // Writing an unmodified inherited row into the derived symbol would stop it from
+        // tracking the parent field.  Fields the symbol already owns (transferred user
+        // fields) are kept even when they match the parent.  operator== is owner-sensitive,
+        // so compare content.
+        if( m_fields->IsInherited( ii ) && !m_libEntry->GetField( fieldName )
+                && field.HasSameContent( m_fields->ParentField( ii ) ) )
+        {
+            continue;
+        }
 
         if( field.GetText().IsEmpty() )
         {
@@ -669,16 +680,18 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataFromWindow()
             m_libEntry->GetUnitDisplayNames()[row+1] = m_unitNamesGrid->GetCellValue( row, 1 );
     }
 
+    // SetBodyStyleCount() adds and deletes draw items relative to the current body style count,
+    // so it has to run before the flag and the names it is derived from are overwritten
     if( m_radioSingle->GetValue() )
     {
-        m_libEntry->SetHasDeMorganBodyStyles( false );
         m_libEntry->SetBodyStyleCount( 1, false, false );
+        m_libEntry->SetHasDeMorganBodyStyles( false );
         m_libEntry->SetBodyStyleNames( {} );
     }
     else if( m_radioDeMorgan->GetValue() )
     {
-        m_libEntry->SetHasDeMorganBodyStyles( true );
         m_libEntry->SetBodyStyleCount( 2, false, true );
+        m_libEntry->SetHasDeMorganBodyStyles( true );
         m_libEntry->SetBodyStyleNames( {} );
     }
     else
@@ -691,8 +704,8 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataFromWindow()
                 bodyStyleNames.push_back( m_bodyStyleNamesGrid->GetCellValue( row, 0 ) );
         }
 
-        m_libEntry->SetHasDeMorganBodyStyles( false );
         m_libEntry->SetBodyStyleCount( bodyStyleNames.size(), true, true );
+        m_libEntry->SetHasDeMorganBodyStyles( false );
         m_libEntry->SetBodyStyleNames( bodyStyleNames );
     }
 
@@ -735,11 +748,6 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataFromWindow()
 
     m_libEntry->SetDuplicatePinNumbersAreJumpers( m_cbDuplicatePinsAreJumpers->GetValue() );
 
-    std::set<wxString> availablePins;
-
-    for( const SCH_PIN* pin : m_libEntry->GetGraphicalPins( 0, 0 ) )
-        availablePins.insert( pin->GetNumber() );
-
     std::vector<std::set<wxString>>& jumpers = m_libEntry->JumperPinGroups();
     jumpers.clear();
 
@@ -755,7 +763,7 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataFromWindow()
             if( token.IsEmpty() )
                 continue;
 
-            if( !availablePins.count( token ) )
+            if( !m_libEntry->HasPinNumber( token ) )
             {
                 wxString msg;
                 msg.Printf( _( "Pin '%s' in jumper pin group %d does not exist in this symbol." ),
@@ -829,7 +837,7 @@ void DIALOG_LIB_SYMBOL_PROPERTIES::OnGridCellChanging( wxGridEvent& event )
             if( i == event.GetRow() )
                 continue;
 
-            if( newName.CmpNoCase( m_grid->GetCellValue( i, FDC_NAME ) ) == 0 )
+            if( FieldNamesAreDuplicates( newName, m_grid->GetCellValue( i, FDC_NAME ) ) )
             {
                 DisplayError( this, wxString::Format( _( "The name '%s' is already in use." ), newName ) );
                 event.Veto();

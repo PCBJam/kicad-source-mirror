@@ -249,6 +249,9 @@ NET_SETTINGS::NET_SETTINGS( JSON_SETTINGS* aParent, const std::string& aPath ) :
             },
             {} ) );
 
+    // Let the save drop removed colors instead of merging them back in
+    m_params.back()->SetClearUnknownKeys();
+
     m_params.emplace_back( new PARAM_LAMBDA<nlohmann::json>( "netclass_assignments",
             [&]() -> nlohmann::json
             {
@@ -666,6 +669,52 @@ const std::map<wxString, KIGFX::COLOR4D>& NET_SETTINGS::GetNetColorAssignments()
 void NET_SETTINGS::ClearNetColorAssignments()
 {
     m_netColorAssignments.clear();
+}
+
+
+bool NET_SETTINGS::RenameNetPathPrefix( const wxString& aOldPrefix, const wxString& aNewPrefix )
+{
+    if( aOldPrefix.IsEmpty() || aOldPrefix == aNewPrefix )
+        return false;
+
+    bool changed = false;
+
+    // Patterns hold the path as plain text, so swap the leading prefix and rebuild the matcher.
+    for( auto& [matcher, netclass] : m_netClassPatternAssignments )
+    {
+        const wxString pattern = matcher->GetPattern();
+
+        if( pattern.StartsWith( aOldPrefix ) )
+        {
+            wxString updated = aNewPrefix + pattern.Mid( aOldPrefix.length() );
+            matcher = std::make_unique<EDA_COMBINED_MATCHER>( updated, CTX_NETCLASS );
+            changed = true;
+        }
+    }
+
+    // Net color keys are full net names, which carry the path too.
+    std::map<wxString, KIGFX::COLOR4D> updatedColors;
+
+    for( const auto& [netName, color] : m_netColorAssignments )
+    {
+        if( netName.StartsWith( aOldPrefix ) )
+        {
+            updatedColors[aNewPrefix + netName.Mid( aOldPrefix.length() )] = color;
+            changed = true;
+        }
+        else
+        {
+            updatedColors[netName] = color;
+        }
+    }
+
+    if( changed )
+    {
+        m_netColorAssignments = std::move( updatedColors );
+        ClearAllCaches();
+    }
+
+    return changed;
 }
 
 

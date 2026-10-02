@@ -49,6 +49,21 @@ class wxDataViewEvent;
 
 
 /**
+ * Constrain a window rectangle so it fits entirely within a display's client area.
+ *
+ * The size is capped to the client area, then the top-left corner is pulled back so the
+ * whole rectangle is visible (the corner is preferred over the bottom-right edge so the
+ * title bar stays reachable).  Used to tame geometry restored from a different, possibly
+ * higher-DPI, monitor that would otherwise land off-screen or oversized.
+ *
+ * @param aRect       The window rectangle to constrain, in screen coordinates.
+ * @param aClientArea The target display's client (work) area, in screen coordinates.
+ * @return The constrained rectangle.
+ */
+KICOMMON_API wxRect ClampRectToDisplay( const wxRect& aRect, const wxRect& aClientArea );
+
+
+/**
  * Dialog helper object to sit in the inheritance tree between wxDialog and any class written
  * by wxFormBuilder.
  *
@@ -197,6 +212,17 @@ protected:
     void finishDialogSettings();
 
     /**
+     * Constrain the dialog's minimum size, size and position to the work area of the display
+     * it occupies, so a dialog whose content or restored geometry is larger than the monitor
+     * still fits, its bottom controls stay reachable, and it never lands off-screen.
+     *
+     * Geometry restored from a different monitor, or inflated by the per-monitor DPI rescale
+     * that fires when the dialog moves to the saved monitor, can otherwise leave the dialog
+     * off-screen or larger than the display with no way to shrink it. Only shrinks; never grows.
+     */
+    void clampToWorkArea();
+
+    /**
      * Set the dialog to the given dimensions in "dialog units". These are units equivalent
      * to 4* the average character width and 8* the average character height, allowing a dialog
      * to be sized in a way that scales it with the system font.
@@ -260,6 +286,13 @@ private:
      * EndQuasiModal which is possible with any dialog derived from #DIALOG_SHIM.
      */
     void OnCloseWindow( wxCloseEvent& aEvent );
+    void OnActivate( wxActivateEvent& aEvent );
+
+    /**
+     * Focus the requested initial target if it is visible, otherwise focus the dialog
+     * itself so keyboard events (especially ESC) are always delivered.
+     */
+    void forceInitialFocus();
 
     void OnSize( wxSizeEvent& aEvent );
     void OnMove( wxMoveEvent& aEvent );
@@ -278,8 +311,12 @@ private:
      * Set focus back to the parent frame's tool canvas if available, otherwise to the
      * parent window. Prevents focus from landing on auxiliary panels like the properties
      * panel when the mouse happens to hover over them at dialog close time.
+     *
+     * @param aDeferUntilFrameActive also re-asserts the focus from an idle callback, needed only
+     *                               for the GTK quasi-modal teardown race where the dialog is
+     *                               still the active top-level window when this is called.
      */
-    void focusParentCanvas();
+    void focusParentCanvas( bool aDeferUntilFrameActive = false );
 
     std::string generateKey( const wxWindow* aWin ) const;
 

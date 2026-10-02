@@ -728,4 +728,20 @@ namespace std
     };
 }
 
+// PCBJam (WASM port): libc++ 22's tree lookups (`map::operator[]`, `set::insert`, …) swap
+// `std::less<T>` for the generic `std::less<>` via `__make_transparent`, which calls `a < b` —
+// VECTOR2::operator< compares squared lengths — bypassing the lexicographic specialization
+// above. Points at equal distance from the origin, e.g. (a, b) and (b, a), then became one map
+// key: schematic pins nothing joins were connected. Keep the specialization.
+#if defined( _LIBCPP_VERSION ) && __has_include( <__type_traits/make_transparent.h> )
+#include <__type_traits/make_transparent.h>
+_LIBCPP_BEGIN_NAMESPACE_STD
+template <>
+struct __make_transparent<VECTOR2I, less<VECTOR2I>>
+{
+    using type = less<VECTOR2I>;
+};
+_LIBCPP_END_NAMESPACE_STD
+#endif
+
 #endif    // VECTOR2D_H_

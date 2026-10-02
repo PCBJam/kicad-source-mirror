@@ -23,6 +23,7 @@
 
 #include <future>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 
 #include <kicommon.h>
@@ -230,6 +231,13 @@ protected:
 
     virtual IO_BASE* plugin( const LIB_DATA* aRow ) = 0;
 
+    /// Serializes access to a library's shared plugin instance so its single mutable cache is not
+    /// raced by concurrent enumerate/load/save/delete calls from the loader pool, preview panels
+    /// and tree refreshes. Keyed by nickname, a safe over-approximation of the real resource (the
+    /// plugin instance): sharing one mutex across two distinct resources can only over-serialize,
+    /// never under-protect. Static because global-library plugins are shared process-wide.
+    static std::mutex& pluginMutex( const wxString& aNickname );
+
     LIBRARY_MANAGER& m_manager;
 
     // The actual library content is held in an associated IO plugin
@@ -381,11 +389,13 @@ public:
     /**
      * Return true if a library table row was added by the Plugin and Content Manager.
      *
-     * PCM-managed rows are identified by the unexpanded URI template referencing the
-     * versioned 3RD_PARTY env var (as produced by PCM_LIB_TRAVERSER). Matching on the
-     * URI template, rather than on the expanded absolute path, prevents false positives
-     * when a user library uses a different env var whose expanded path is a descendant
-     * of the 3RD_PARTY directory (e.g. KICAD_USER_LIB pointing inside KICAD10_3RD_PARTY).
+     * PCM-managed rows are identified by the full unexpanded URI template emitted by
+     * PCM_LIB_TRAVERSER, namely ${KICADn_3RD_PARTY}/<category>/<pkgid>/<library> where
+     * <category> is one of the PCM content folders and <library> carries the matching
+     * library extension. Matching the full template, rather than the expanded absolute
+     * path or the env-var prefix alone, prevents false positives both when a user library
+     * uses a different env var whose expanded path is a descendant of the 3RD_PARTY
+     * directory and when a user repurposes KICADn_3RD_PARTY for their own libraries.
      */
     static bool IsPcmManagedRow( const LIBRARY_TABLE_ROW& aRow );
 

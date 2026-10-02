@@ -32,6 +32,7 @@
 class SCHEMATIC;
 class SCH_REFERENCE;
 class SCH_REFERENCE_LIST;
+class SCH_SCREEN;
 class SCH_SYMBOL;
 class SCH_PIN;
 class SCHEMATIC;
@@ -113,3 +114,15 @@ bool SymbolHasSheetInstances( const SCH_SYMBOL& aSymbol, const wxString& aCurren
  * @return a set of human-readable sheet names, or the original sheet path if no name can be resolved in this schmatic (this happens when sheets are shared across projects)
  */
 std::set<wxString> GetSheetNamesFromPaths( const std::set<wxString>& aSheetPaths, const SCHEMATIC& aSchematic );
+
+/**
+ * Return aBaseName, or aBaseName + smallest free integer if a sheet with that name already
+ * exists on aScreen. Case insensitive, like the ERC duplicate sheet name check.
+ */
+wxString UniqueSheetName( SCH_SCREEN* aScreen, const wxString& aBaseName );
+
+/**
+ * Return aBaseName, or aBaseName + smallest free integer if a group with that name already
+ * exists on aScreen.
+ */
+wxString UniqueGroupName( SCH_SCREEN* aScreen, const wxString& aBaseName );

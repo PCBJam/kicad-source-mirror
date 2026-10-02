@@ -84,7 +84,7 @@ void GENDRILL_WRITER_BASE::buildHolesList( const DRILL_SPAN& aSpan, bool aGenera
     m_holeListBuffer.clear();
     m_toolListBuffer.clear();
 
-    wxASSERT( aSpan.TopLayer() < aSpan.BottomLayer() );  // fix the caller
+    wxASSERT( IsCopperLayerLowerThan( aSpan.BottomLayer(), aSpan.TopLayer() ) );  // fix the caller
 
     auto computeStubLength = [&]( PCB_LAYER_ID aStartLayer, PCB_LAYER_ID aEndLayer )
     {
@@ -111,10 +111,9 @@ void GENDRILL_WRITER_BASE::buildHolesList( const DRILL_SPAN& aSpan, bool aGenera
                     if( aDrill.start == UNDEFINED_LAYER || aDrill.end == UNDEFINED_LAYER )
                         return false;
 
-                    DRILL_LAYER_PAIR drillPair( std::min( aDrill.start, aDrill.end ),
-                                                std::max( aDrill.start, aDrill.end ) );
+                    DRILL_SPAN drillSpan( aDrill.start, aDrill.end, true, false );
 
-                    if( drillPair != aSpan.Pair() )
+                    if( drillSpan.Pair() != aSpan.Pair() )
                         return false;
 
                     if( aDrill.start != aSpan.DrillStartLayer()
@@ -1086,7 +1085,8 @@ bool GENDRILL_WRITER_BASE::genDrillMapFile( const wxString& aFullFileName, PLOT_
 
         msg += counts;
 
-        if( tool.m_Hole_NotPlated )
+        // Backdrills carry the non-plated flag but are already called out as backdrills above
+        if( tool.m_Hole_NotPlated && !tool.m_IsBackdrill )
             msg += wxT( " (not plated)" );
 
         plotter->PlotText( VECTOR2I( plotX, y ), COLOR4D::UNSPECIFIED, msg, attrs, nullptr /* stroke font */,
@@ -1182,7 +1182,7 @@ bool GENDRILL_WRITER_BASE::GenDrillReportFile( const wxString& aFullFileName, RE
 
                 fmt::print( outFp, "    plated through holes:\n" );
                 fmt::print( outFp, "{}", separator );
-                totalHoleCount = printToolSummary( outFp, false );
+                totalHoleCount = printToolSummary( outFp, TOOL_SUMMARY::PLATED );
                 fmt::print( outFp, "    Total plated holes count {}\n", totalHoleCount );
             }
             else if( span.m_IsBackdrill )
@@ -1195,7 +1195,7 @@ bool GENDRILL_WRITER_BASE::GenDrillReportFile( const wxString& aFullFileName, RE
                             TO_UTF8( m_pcb->GetLayerName( ToLAYER_ID( span.DrillEndLayer() ) ) ) );
 
                 fmt::print( outFp, "{}", separator );
-                totalHoleCount = printToolSummary( outFp, false );
+                totalHoleCount = printToolSummary( outFp, TOOL_SUMMARY::BACKDRILL );
                 fmt::print( outFp, "    Total backdrilled holes count {}\n", totalHoleCount );
             }
             else
@@ -1209,7 +1209,7 @@ bool GENDRILL_WRITER_BASE::GenDrillReportFile( const wxString& aFullFileName, RE
                             span.Pair().first == F_Cu || span.Pair().second == B_Cu ? "blind" : "buried" );
 
                 fmt::print( outFp, "{}", separator );
-                totalHoleCount = printToolSummary( outFp, false );
+                totalHoleCount = printToolSummary( outFp, TOOL_SUMMARY::PLATED );
                 fmt::print( outFp, "    Total plated holes count {}\n", totalHoleCount );
             }
 
@@ -1234,7 +1234,7 @@ bool GENDRILL_WRITER_BASE::GenDrillReportFile( const wxString& aFullFileName, RE
 
         fmt::print( outFp, "    unplated through holes:\n" );
         fmt::print( outFp, "{}", separator );
-        totalHoleCount = printToolSummary( outFp, true );
+        totalHoleCount = printToolSummary( outFp, TOOL_SUMMARY::UNPLATED );
         fmt::print( outFp, "    Total unplated holes count {}\n", totalHoleCount );
     }
     catch( const std::system_error& )
@@ -1282,7 +1282,7 @@ bool GENDRILL_WRITER_BASE::plotDrillMarks( PLOTTER* aPlotter )
 }
 
 
-unsigned GENDRILL_WRITER_BASE::printToolSummary( FILE* out, bool aSummaryNPTH ) const
+unsigned GENDRILL_WRITER_BASE::printToolSummary( FILE* out, TOOL_SUMMARY aSummary ) const
 {
     unsigned totalHoleCount = 0;
 
@@ -1290,10 +1290,12 @@ unsigned GENDRILL_WRITER_BASE::printToolSummary( FILE* out, bool aSummaryNPTH ) 
     {
         const DRILL_TOOL& tool = m_toolListBuffer[ii];
 
-        if( aSummaryNPTH && !tool.m_Hole_NotPlated )
-            continue;
+        // Backdrills set the non-plated flag, so they must be classified before it is read
+        TOOL_SUMMARY bucket = tool.m_IsBackdrill      ? TOOL_SUMMARY::BACKDRILL
+                              : tool.m_Hole_NotPlated ? TOOL_SUMMARY::UNPLATED
+                                                      : TOOL_SUMMARY::PLATED;
 
-        if( !aSummaryNPTH && tool.m_Hole_NotPlated )
+        if( bucket != aSummary )
             continue;
 
         // List the tool number assigned to each drill in mm then in inches.

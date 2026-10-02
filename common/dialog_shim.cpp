@@ -58,15 +58,25 @@
 #include <wx/splitter.h>
 #include <wx/radiobox.h>
 #include <wx/radiobut.h>
+#include <wx/datectrl.h>
+#if wxUSE_TIMEPICKCTRL
+#include <wx/timectrl.h>
+#endif
 #include <wx/variant.h>
+#include <wx/weakref.h>
 
 #include <algorithm>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <typeinfo>
 
+#ifdef __EMSCRIPTEN__
+#include <pcbjam_editor_events.h>
+#endif
+
 BEGIN_EVENT_TABLE( DIALOG_SHIM, wxDialog )
     EVT_CHAR_HOOK( DIALOG_SHIM::OnCharHook )
+    EVT_ACTIVATE( DIALOG_SHIM::OnActivate )
 END_EVENT_TABLE()
 
 
@@ -92,6 +102,31 @@ static std::string getDialogKeyFromTitle( const wxString& aTitle )
     }
 
     return title;
+}
+
+
+/**
+ * Return true when the given window is a compound date/time picker whose internal
+ * children should be opaque to the dialog-wide state save/load and undo/redo helpers.
+ *
+ * On wxGTK these controls are implemented as a wxComboCtrl + wxTextCtrl + popup
+ * wxCalendarCtrl. The inner text control reports as a wxTextEntry, so enumerating
+ * children causes the persisted state to clobber the picker's value on the next
+ * open and turns user edits into spurious undo entries.
+ */
+static bool isCompoundDateTimePicker( const wxWindow* aWin )
+{
+#if wxUSE_DATEPICKCTRL
+    if( dynamic_cast<const wxDatePickerCtrl*>( aWin ) != nullptr )
+        return true;
+#endif
+
+#if wxUSE_TIMEPICKCTRL
+    if( dynamic_cast<const wxTimePickerCtrl*>( aWin ) != nullptr )
+        return true;
+#endif
+
+    return false;
 }
 
 
@@ -187,6 +222,9 @@ DIALOG_SHIM::~DIALOG_SHIM()
             {
                 for( wxWindow* child : children )
                 {
+                    if( isCompoundDateTimePicker( child ) )
+                        continue;
+
                     if( wxTextCtrl* textCtrl = dynamic_cast<wxTextCtrl*>( child ) )
                     {
                         textCtrl->Disconnect( wxEVT_SET_FOCUS, wxFocusEventHandler( DIALOG_SHIM::onChildSetFocus ),
@@ -211,6 +249,9 @@ DIALOG_SHIM::~DIALOG_SHIM()
             {
                 for( wxWindow* child : children )
                 {
+                    if( isCompoundDateTimePicker( child ) )
+                        continue;
+
                     if( wxTextCtrl* textCtrl = dynamic_cast<wxTextCtrl*>( child ) )
                     {
                         textCtrl->Unbind( wxEVT_TEXT, &DIALOG_SHIM::onCommandEvent, this );
@@ -318,6 +359,57 @@ void DIALOG_SHIM::finishDialogSettings()
 }
 
 
+wxRect ClampRectToDisplay( const wxRect& aRect, const wxRect& aClientArea )
+{
+    wxRect rect = aRect;
+
+    // A window can never be larger than the display that holds it.
+    rect.width = std::min( rect.width, aClientArea.width );
+    rect.height = std::min( rect.height, aClientArea.height );
+
+    rect.x = std::clamp( rect.x, aClientArea.x, aClientArea.GetRight() - rect.width + 1 );
+    rect.y = std::clamp( rect.y, aClientArea.y, aClientArea.GetBottom() - rect.height + 1 );
+
+    return rect;
+}
+
+
+void DIALOG_SHIM::clampToWorkArea()
+{
+    // A dialog not yet mapped onto a monitor reports no display, so fall back to the parent's
+    // monitor rather than blindly clamping against display zero on a multi-head setup.
+    int displayIdx = wxDisplay::GetFromWindow( this );
+
+    if( displayIdx == wxNOT_FOUND && m_parent )
+        displayIdx = wxDisplay::GetFromWindow( m_parent );
+
+    if( displayIdx == wxNOT_FOUND )
+        displayIdx = 0;
+
+    wxRect clientArea = wxDisplay( (unsigned int) displayIdx ).GetClientArea();
+
+    if( clientArea.width <= 0 || clientArea.height <= 0 )
+        return;
+
+    // The minimum size must shrink first, otherwise SetSize() below cannot honour a cap that
+    // is smaller than a stale minimum restored from a larger monitor.
+    wxSize minSize = GetMinSize();
+    wxSize clampedMin( std::min( minSize.x, clientArea.width ),
+                       std::min( minSize.y, clientArea.height ) );
+
+    if( clampedMin != minSize )
+        SetMinSize( clampedMin );
+
+    // Cap the size to the work area and pull the whole dialog back on-screen. Geometry restored
+    // from a different (possibly higher-DPI) monitor can otherwise land off-screen or oversized.
+    wxRect current( GetPosition(), GetSize() );
+    wxRect clamped = ClampRectToDisplay( current, clientArea );
+
+    if( clamped != current )
+        SetSize( clamped.x, clamped.y, clamped.width, clamped.height, 0 );
+}
+
+
 void DIALOG_SHIM::setSizeInDU( int x, int y )
 {
     wxSize sz( x, y );
@@ -351,21 +443,38 @@ void DIALOG_SHIM::SetPosition( const wxPoint& aNewPosition )
 }
 
 
-void DIALOG_SHIM::focusParentCanvas()
+void DIALOG_SHIM::focusParentCanvas( bool aDeferUntilFrameActive )
 {
-    if( m_parentFrame )
-    {
-        wxWindow* canvas = m_parentFrame->GetToolCanvas();
+    wxWindow* toolCanvas = m_parentFrame ? m_parentFrame->GetToolCanvas() : nullptr;
+    wxWindow* target = toolCanvas ? toolCanvas : m_parent;
 
-        if( canvas )
-        {
-            canvas->SetFocus();
-            return;
-        }
-    }
+    if( !target )
+        return;
 
-    if( m_parent )
-        m_parent->SetFocus();
+    target->SetFocus();
+
+    if( !aDeferUntilFrameActive || !toolCanvas )
+        return;
+
+#ifdef __WXGTK__
+    // A quasi-modal dialog is still the active top-level window when its nested event loop exits,
+    // so the SetFocus() above is undone when the dialog is destroyed and GTK restores the frame's
+    // previously-focused widget. Re-assert focus once the event loop has settled, otherwise
+    // keyboard events keep routing to the stale owner until the mouse re-enters the canvas.
+    EDA_BASE_FRAME* frame = m_parentFrame;
+
+    frame->CallAfter(
+            [frame]()
+            {
+                // Skip if another dialog grabbed the activation in the meantime, otherwise we
+                // would raise the frame from behind a chained modal dialog.
+                if( !KIPLATFORM::UI::IsWindowActive( frame ) )
+                    return;
+
+                if( wxWindow* canvas = frame->GetToolCanvas() )
+                    canvas->SetFocus();
+            } );
+#endif
 }
 
 
@@ -379,6 +488,13 @@ bool DIALOG_SHIM::Show( bool show )
         wxDialog::Raise();  // Needed on OS X and some other window managers (i.e. Unity)
 #endif
         ret = wxDialog::Show( show );
+
+#ifdef __EMSCRIPTEN__
+        // pcbjam WASM addition (overlay-system): tell the page a dialog opened.
+        PCBJAM_EDITOR_EVENTS::NotifyDialog( true, this,
+                                            PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
+                                            GetTitle() );
+#endif
 
         wxRect      savedDialogRect;
         std::string key = m_hash_key.empty() ? getDialogKeyFromTitle( GetTitle() ) : m_hash_key;
@@ -443,11 +559,21 @@ bool DIALOG_SHIM::Show( bool show )
             Centre();
         }
 
-        if( wxDisplay::GetFromWindow( this ) == wxNOT_FOUND )
+        // Re-center if the title bar would land on no display. Testing a point inside the title
+        // bar (not the window corner) ignores the negative border offset of maximized windows.
+        wxPoint grabPoint = GetPosition();
+        grabPoint.x += GetSize().x / 2;
+        grabPoint.y += FromDIP( 15 );
+
+        if( wxDisplay::GetFromPoint( grabPoint ) == wxNOT_FOUND )
             Centre();
 
         m_userPositioned = false;
         m_userResized = false;
+
+        // Cap size and pull the dialog back on-screen here, after the minimum has been
+        // (re)established above, so the clamp is not overwritten.
+        clampToWorkArea();
 
         KIPLATFORM::UI::EnsureVisible( this );
     }
@@ -460,6 +586,13 @@ bool DIALOG_SHIM::Show( bool show )
 #endif
 
         ret = wxDialog::Show( show );
+
+#ifdef __EMSCRIPTEN__
+        // pcbjam WASM addition (overlay-system): tell the page a dialog closed.
+        PCBJAM_EDITOR_EVENTS::NotifyDialog( false, this,
+                                            PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
+                                            GetTitle() );
+#endif
 
         SaveControlState();
         focusParentCanvas();
@@ -601,6 +734,9 @@ void DIALOG_SHIM::SaveControlState()
                         return;
                 }
 
+                if( isCompoundDateTimePicker( win ) )
+                    return;
+
                 std::string key = generateKey( win );
 
                 if( !key.empty() )
@@ -707,6 +843,9 @@ void DIALOG_SHIM::LoadControlState()
                     if( !props->GetPropertyOr( "persist", false ) )
                         return;
                 }
+
+                if( isCompoundDateTimePicker( win ) )
+                    return;
 
                 std::string key = generateKey( win );
 
@@ -889,6 +1028,9 @@ void DIALOG_SHIM::SelectAllInTextCtrls( wxWindowList& children )
 {
     for( wxWindow* child : children )
     {
+        if( isCompoundDateTimePicker( child ) )
+            continue;
+
         if( wxTextCtrl* textCtrl = dynamic_cast<wxTextCtrl*>( child ) )
         {
             m_beforeEditValues[ textCtrl ] = textCtrl->GetValue();
@@ -961,6 +1103,9 @@ void DIALOG_SHIM::registerUndoRedoHandlers( wxWindowList& children )
     for( wxWindow* child : children )
     {
         if( m_noControlUndoRedo.count( child ) )
+            continue;
+
+        if( isCompoundDateTimePicker( child ) )
             continue;
 
         if( wxTextCtrl* textCtrl = dynamic_cast<wxTextCtrl*>( child ) )
@@ -1349,15 +1494,52 @@ void DIALOG_SHIM::OnPaint( wxPaintEvent &event )
         SelectAllInTextCtrls( GetChildren() );
         registerUndoRedoHandlers( GetChildren() );
 
-        if( m_initialFocusTarget )
-            KIPLATFORM::UI::ForceFocus( m_initialFocusTarget );
-        else
-            KIPLATFORM::UI::ForceFocus( this );     // Focus the dialog itself
+        forceInitialFocus();
 
         m_firstPaintEvent = false;
     }
 
     event.Skip();
+}
+
+
+void DIALOG_SHIM::forceInitialFocus()
+{
+    // Skip targets that can't take focus (e.g. hidden on a notebook page) so ESC still works
+    if( m_initialFocusTarget && m_initialFocusTarget->IsShownOnScreen()
+            && m_initialFocusTarget->CanAcceptFocus() )
+    {
+        KIPLATFORM::UI::ForceFocus( m_initialFocusTarget );
+    }
+    else
+    {
+        KIPLATFORM::UI::ForceFocus( this );
+    }
+}
+
+
+void DIALOG_SHIM::OnActivate( wxActivateEvent& aEvent )
+{
+    // Null FindFocus() means focus landed on a non-wx element (WM title bar, GTK tab strip)
+    // where ESC never reaches OnCharHook; defer via CallAfter since GTK reports null transiently
+    if( aEvent.GetActive() && !m_firstPaintEvent )
+    {
+        wxWeakRef<DIALOG_SHIM> self( this );
+
+        CallAfter(
+                [self]()
+                {
+                    DIALOG_SHIM* dlg = self;
+
+                    if( dlg && KIPLATFORM::UI::IsWindowActive( dlg )
+                            && wxWindow::FindFocus() == nullptr )
+                    {
+                        dlg->forceInitialFocus();
+                    }
+                } );
+    }
+
+    aEvent.Skip();
 }
 
 
@@ -1447,7 +1629,7 @@ int DIALOG_SHIM::ShowQuasiModal()
     event_loop.Run();
 
     m_qmodal_showing = false;
-    focusParentCanvas();
+    focusParentCanvas( true );
 
     return GetReturnCode();
 }

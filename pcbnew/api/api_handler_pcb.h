@@ -129,6 +129,11 @@ private:
 
     HANDLER_RESULT<Empty> handleInteractiveMoveItems( const HANDLER_CONTEXT<InteractiveMoveItems>& aCtx );
 
+    HANDLER_RESULT<FlipItemsResponse> handleFlipItems( const HANDLER_CONTEXT<FlipItems>& aCtx );
+
+    HANDLER_RESULT<BoardLayerResponse> handleGetBoardLayerByName(
+            const HANDLER_CONTEXT<GetBoardLayerByName>& aCtx );
+
     HANDLER_RESULT<NetsResponse> handleGetNets( const HANDLER_CONTEXT<GetNets>& aCtx );
 
     HANDLER_RESULT<commands::GetItemsResponse> handleGetConnectedItems(

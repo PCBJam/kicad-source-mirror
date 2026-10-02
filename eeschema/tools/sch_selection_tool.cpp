@@ -55,6 +55,8 @@
 #include <sch_table.h>
 #include <tool/tool_event.h>
 #include <tool/tool_manager.h>
+#include <pcbjam_remote_lock.h>
+#include <pcbjam_read_only.h>
 #include <tools/ee_grid_helper.h>
 #include <tools/sch_move_tool.h>
 #include <tools/sch_point_editor.h>
@@ -670,7 +672,12 @@ int SCH_SELECTION_TOOL::Main( const TOOL_EVENT& aEvent )
                 }
             }
 
-            if( !selCancelled )
+            // pcbjam WASM addition (read-only-viewer): no right-click CONTEXT
+            // menu for viewers — it offers edit entries whose actions the
+            // read-only gate silently swallows. The right-click SELECTION
+            // above (incl. the clarify list) stays — viewer-panels. Skipping
+            // the show is safe: nothing waits on this menu's outcome.
+            if( !selCancelled && !PCBJAM_READ_ONLY::IsReadOnly() )
                 m_menu->ShowContextMenu( m_selection );
         }
         else if( evt->IsDblClick( BUT_LEFT ) )
@@ -726,8 +733,10 @@ int SCH_SELECTION_TOOL::Main( const TOOL_EVENT& aEvent )
             {
                 m_toolMgr->RunAction( SCH_ACTIONS::move );
             }
-            // Allow drag selecting table cells, except when they're inside a group that we haven't entered
+            // Allow drag selecting table cells, except when the table is already selected
+            // or inside a group that we haven't entered
             else if( CollectHits( collector, evt->DragOrigin(), { SCH_TABLECELL_T } )
+                     && !collector[0]->GetParent()->IsSelected()
                      && ( collector[0]->GetParent()->GetParentGroup() == nullptr
                           || collector[0]->GetParent()->GetParentGroup() == m_enteredGroup ) )
             {
@@ -1243,6 +1252,12 @@ void SCH_SELECTION_TOOL::EnterGroup()
 
     m_toolMgr->ProcessEvent( EVENTS::SelectedEvent );
 
+    // Processing the selection event can re-enter the tool and ExitGroup(), which clears
+    // m_enteredGroup. If that happened, don't operate on the now-stale (possibly null) group
+    // or we would hide/overlay a null item and crash (issue #24778).
+    if( m_enteredGroup != aGroup )
+        return;
+
     getView()->Hide( m_enteredGroup, true );
     m_enteredGroupOverlay.Add( m_enteredGroup );
     getView()->Update( &m_enteredGroupOverlay );
@@ -1475,6 +1490,31 @@ void SCH_SELECTION_TOOL::narrowSelection( SCH_COLLECTOR& collector, const VECTOR
             continue;
         }
 
+        // pcbjam: remote soft-locks (collab peers' live selections, 0007) —
+        // like locked items, held items stay selectable for inspection but
+        // are filtered from move/drag acquisition (aCheckLocked paths).
+        if( aCheckLocked )
+        {
+            wxString holder;
+
+            if( PCBJAM_REMOTE_LOCK::IsLocked( collector[i]->m_Uuid, &holder ) )
+            {
+                if( m_frame )
+                {
+                    m_frame->ShowInfoBarWarning( wxString::Format( _( "Some items are being "
+                                                                      "edited by %s and were "
+                                                                      "skipped." ),
+                                                                   holder ),
+                                                 true );
+                }
+
+                if( aRejected )
+                    aRejected->lockedItems = true;
+                collector.Remove( i );
+                continue;
+            }
+        }
+
         if( !itemPassesFilter( collector[i], aRejected ) )
         {
             collector.Remove( i );
@@ -1488,7 +1528,7 @@ void SCH_SELECTION_TOOL::narrowSelection( SCH_COLLECTOR& collector, const VECTOR
         }
     }
 
-    filterCollectorForHierarchy( collector, false );
+    FilterCollectorForHierarchy( collector, false );
 
     // Apply some ugly heuristics to avoid disambiguation menus whenever possible
     if( collector.GetCount() > 1 && !m_skip_heuristics )
@@ -1545,7 +1585,7 @@ bool SCH_SELECTION_TOOL::selectPoint( SCH_COLLECTOR& aCollector, const VECTOR2I&
             ExitGroup();
     }
 
-    filterCollectorForHierarchy( aCollector, true );
+    FilterCollectorForHierarchy( aCollector, true );
 
     int  addedCount = 0;
     bool anySubtracted = false;
@@ -1680,7 +1720,7 @@ int SCH_SELECTION_TOOL::SelectAll( const TOOL_EVENT& aEvent )
                 return true;
             } );
 
-    filterCollectorForHierarchy( collection, true );
+    FilterCollectorForHierarchy( collection, true );
 
     // Sheet pins aren't in the view; add them by hand
     for( EDA_ITEM* item : collection )
@@ -2535,13 +2575,13 @@ void SCH_SELECTION_TOOL::SelectMultiple( KIGFX::PREVIEW::SELECTION_AREA& aArea, 
     }
 
     filterCollectedItems( collector, true );
-    filterCollectorForHierarchy( collector, true );
+    FilterCollectorForHierarchy( collector, true );
 
     if( collector.GetCount() == 0 )
     {
         collector = pinsCollector;
         filterCollectedItems( collector, true );
-        filterCollectorForHierarchy( collector, true );
+        FilterCollectorForHierarchy( collector, true );
     }
 
     std::sort( collector.begin(), collector.end(),
@@ -2675,8 +2715,7 @@ void SCH_SELECTION_TOOL::SelectMultiple( KIGFX::PREVIEW::SELECTION_AREA& aArea, 
 }
 
 
-void SCH_SELECTION_TOOL::filterCollectorForHierarchy( SCH_COLLECTOR& aCollector,
-                                                      bool aMultiselect ) const
+void SCH_SELECTION_TOOL::FilterCollectorForHierarchy( SCH_COLLECTOR& aCollector, bool aMultiselect ) const
 {
     std::unordered_set<EDA_ITEM*> toAdd;
 
@@ -2697,6 +2736,11 @@ void SCH_SELECTION_TOOL::filterCollectorForHierarchy( SCH_COLLECTOR& aCollector,
             aCollector[j]->SetFlags( SELECTION_CANDIDATE );
     }
 
+    // Skip group promotion when the caller asked for specific types that exclude groups
+    const std::vector<KICAD_T>& scanTypes = aCollector.GetScanTypes();
+    bool                        promoteToGroups = scanTypes.empty() || alg::contains( scanTypes, SCH_LOCATE_ANY_T )
+                           || alg::contains( scanTypes, SCH_GROUP_T );
+
     for( int j = 0; j < aCollector.GetCount(); )
     {
         SCH_ITEM* item = aCollector[j];
@@ -2715,7 +2759,8 @@ void SCH_SELECTION_TOOL::filterCollectorForHierarchy( SCH_COLLECTOR& aCollector,
 
         // If any element is a member of a group, replace those elements with the top containing
         // group.
-        if( EDA_GROUP* top = SCH_GROUP::TopLevelGroup( start, m_enteredGroup, m_isSymbolEditor ) )
+        if( EDA_GROUP* top =
+                    promoteToGroups ? SCH_GROUP::TopLevelGroup( start, m_enteredGroup, m_isSymbolEditor ) : nullptr )
         {
             if( top->AsEdaItem() != item )
             {
@@ -3601,6 +3646,14 @@ void SCH_SELECTION_TOOL::RebuildSelection()
 bool SCH_SELECTION_TOOL::Selectable( const EDA_ITEM* aItem, const VECTOR2I* aPos,
                                      bool checkVisibilityOnly ) const
 {
+    // pcbjam WASM addition (read-only-viewer): selection stays LIVE for
+    // viewers — the shell's inspector panel reads it (viewer-panels). Every
+    // mutation downstream of a selection is still blocked: move/properties/
+    // delete dispatch TOOL_ACTIONs the TOOL_MANAGER gate swallows, the point
+    // editor has its own read-only guard (it mutates without actions), and
+    // the right-click CONTEXT menu is skipped in this tool's own RMB arm
+    // (the clarify list stays — pure selection).
+
     // NOTE: in the future this is where Eeschema layer/itemtype visibility will be handled
 
     SYMBOL_EDIT_FRAME* symEditFrame = dynamic_cast<SYMBOL_EDIT_FRAME*>( m_frame );

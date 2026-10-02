@@ -3283,6 +3283,8 @@ void SIMULATOR_FRAME_UI::OnSimUpdate()
     if( SIM_PLOT_TAB* plotTab = dynamic_cast<SIM_PLOT_TAB*>( GetCurrentSimTab() ) )
         plotTab->ResetScales( true );
 
+    // Drop any buffered output from the previous run and clear the console widget.
+    m_simulatorFrame->TakeSimReportMessages();
     m_simConsole->Clear();
 
     prepareMultiRunState();
@@ -3294,9 +3296,15 @@ void SIMULATOR_FRAME_UI::OnSimUpdate()
 }
 
 
-void SIMULATOR_FRAME_UI::OnSimReport( const wxString& aMsg )
+void SIMULATOR_FRAME_UI::FlushSimConsole()
 {
-    m_simConsole->AppendText( aMsg + "\n" );
+    // AppendText is slow on MSW, so we use the buffered report lines
+    wxString messages = m_simulatorFrame->TakeSimReportMessages();
+
+    if( messages.IsEmpty() )
+        return;
+
+    m_simConsole->AppendText( messages );
     m_simConsole->SetInsertionPointEnd();
 }
 
@@ -3330,6 +3338,8 @@ std::vector<wxString> SIMULATOR_FRAME_UI::Signals() const
 
 void SIMULATOR_FRAME_UI::OnSimRefresh( bool aFinal )
 {
+    FlushSimConsole();
+
     if( aFinal )
         m_refreshTimer.Stop();
 
@@ -3543,6 +3553,13 @@ void SIMULATOR_FRAME_UI::OnSimRefresh( bool aFinal )
         m_simConsole->SetInsertionPointEnd();
         simulator()->Command( "print all" );
     }
+
+    // Non-plottable analyses (op, pz, tf, sens, disto) still create an ngspice plot; record its
+    // name so a rerun can destroy it instead of leaking the vectors.  Plottable tabs already
+    // stored their (possibly noise-adjusted) plot name above.  A shared/stale plot name is caught
+    // when destroying, not here.
+    if( aFinal && !SIM_TAB::IsPlottable( simType ) )
+        simTab->SetSpicePlotName( simulator()->CurrentPlotName() );
 
     if( storeMultiRun )
     {

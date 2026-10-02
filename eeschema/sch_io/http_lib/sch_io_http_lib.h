@@ -27,6 +27,8 @@
 #include <sch_io/sch_io_mgr.h>
 #include <wildcards_and_files_ext.h>
 
+#include <set>
+
 class LIBRARY_MANAGER_ADAPTER;
 
 /**
@@ -92,6 +94,9 @@ private:
     void syncCache();
 
     void syncCache( const HTTP_LIB_CATEGORY& category );
+
+    /// Refresh the cached parts for a category if it has never been cached or has expired.
+    void syncCacheIfStale( const HTTP_LIB_CATEGORY& category );
 
     LIB_SYMBOL* loadSymbolFromPart( const wxString& aLibraryPath, const wxString& aSymbolName,
                                     const HTTP_LIB_CATEGORY& aCategory, const HTTP_LIB_PART& aPart );

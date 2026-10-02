@@ -26,6 +26,8 @@
 #include <string>
 #include <stack>
 
+#include <core/inplace_function.h>
+
 #include <kicommon.h>
 #include <base_units.h>
 #include <wx/intl.h>
@@ -55,6 +57,14 @@
 #define TR_OP_METHOD_CALL 25
 #define TR_UOP_PUSH_VAR 1
 #define TR_UOP_PUSH_VALUE 2
+
+// Short-circuit jumps for && / ||.  They peek (do not pop) the left-hand result already on the
+// stack and, when it already decides the boolean, jump past the right-hand operand's microcode so
+// it is never executed.  This is the compile-time pruning the SSA-style evaluator performs.
+// The opcodes deliberately sit outside both TR_OP_UNARY_MASK and TR_OP_BINARY_MASK so they are
+// never misclassified as arithmetic operators by a mask test.
+#define TR_OP_JZ  0x401   // jump if top == 0 (left side of &&)
+#define TR_OP_JNZ 0x402   // jump if top != 0 (left side of ||)
 
 // This namespace is used for the lemon parser
 namespace LIBEVAL
@@ -266,14 +276,14 @@ public:
         m_valueDbl = aValue;
     }
 
-    void SetDeferredEval( std::function<double()> aLambda )
+    void SetDeferredEval( INPLACE_FUNCTION<double()> aLambda )
     {
         m_type = VT_NUMERIC;
         m_lambdaDbl = std::move( aLambda );
         m_isDeferredDbl = true;
     }
 
-    void SetDeferredEval( std::function<wxString()> aLambda )
+    void SetDeferredEval( INPLACE_FUNCTION<wxString()> aLambda )
     {
         m_type = VT_STRING;
         m_lambdaStr = std::move( aLambda );
@@ -290,6 +300,8 @@ public:
     {
         m_type = val.m_type;
         m_valueDbl = val.m_valueDbl;
+        m_stringIsWildcard = val.m_stringIsWildcard;
+        m_units = val.m_units;
 
         if( m_type == VT_STRING )
             m_valueStr = val.m_valueStr;
@@ -307,11 +319,11 @@ private:
     mutable wxString          m_valueStr;               // mutable to support deferred evaluation
     bool                      m_stringIsWildcard;
 
-    mutable bool              m_isDeferredDbl;
-    std::function<double()>   m_lambdaDbl;
+    mutable bool                 m_isDeferredDbl;
+    INPLACE_FUNCTION<double()>   m_lambdaDbl;
 
-    mutable bool              m_isDeferredStr;
-    std::function<wxString()> m_lambdaStr;
+    mutable bool                 m_isDeferredStr;
+    INPLACE_FUNCTION<wxString()> m_lambdaStr;
 
     EDA_UNITS                 m_units;
 };
@@ -334,15 +346,15 @@ class KICOMMON_API CONTEXT
 public:
     CONTEXT() :
             m_stack(),
-            m_stackPtr( 0 )
+            m_stackPtr( 0 ),
+            m_inlineUsed( 0 )
     {
-        m_ownedValues.reserve( 20 );
+        m_ownedValues.reserve( 8 );
     }
 
     virtual ~CONTEXT()
     {
-        for( VALUE* v : m_ownedValues )
-            delete v;
+        CONTEXT::Reset();
     }
 
     // We own at least one list of raw pointers.  Don't let the compiler fill in copy c'tors that
@@ -350,8 +362,40 @@ public:
     CONTEXT( const CONTEXT& ) = delete;
     CONTEXT& operator=( const CONTEXT& ) = delete;
 
+    /**
+     * Release every value allocated by the previous evaluation and rewind the stack so the same
+     * CONTEXT can be reused for another Run() without being reconstructed.  This keeps the owned-
+     * value vector's buffer allocated, so a reused context performs zero heap allocation for the
+     * common evaluation.  Overrides must chain to this base after rewinding their own per-run state.
+     */
+    virtual void Reset()
+    {
+        for( std::size_t i = 0; i < m_inlineUsed; ++i )
+            inlineValue( i )->~VALUE();
+
+        m_inlineUsed = 0;
+
+        for( VALUE* v : m_ownedValues )
+            delete v;
+
+        m_ownedValues.clear();
+        m_stackPtr = 0;
+        m_errorCallback = nullptr;
+    }
+
     VALUE* AllocValue()
     {
+        // Serve the first values from an inline buffer so the hot DRC evaluation path stays off
+        // the heap; only deeper expressions spill to individual allocations.
+        if( m_inlineUsed < INLINE_VALUE_COUNT )
+        {
+            // Advance the count only after construction so a throwing VALUE() never leaves the
+            // destructor to tear down an uninitialized slot.
+            VALUE* value = new( inlineValue( m_inlineUsed ) ) VALUE();
+            ++m_inlineUsed;
+            return value;
+        }
+
         m_ownedValues.emplace_back( new VALUE );
         return m_ownedValues.back();
     }
@@ -378,6 +422,18 @@ public:
         return m_stack[ --m_stackPtr ];
     }
 
+    /// Peek the top of the stack without popping (used by the short-circuit jumps).
+    VALUE* Top()
+    {
+        if( m_stackPtr == 0 )
+        {
+            ReportError( _( "Malformed expression" ) );
+            return AllocValue();
+        }
+
+        return m_stack[ m_stackPtr - 1 ];
+    }
+
     int SP() const
     {
         return m_stackPtr;
@@ -393,9 +449,19 @@ public:
     void ReportError( const wxString& aErrorMsg );
 
 private:
+    static constexpr std::size_t INLINE_VALUE_COUNT = 32;
+
+    VALUE* inlineValue( std::size_t aIndex )
+    {
+        return reinterpret_cast<VALUE*>( m_inlineStorage ) + aIndex;
+    }
+
     std::vector<VALUE*> m_ownedValues;
     VALUE*              m_stack[100];       // std::stack not performant enough
     int                 m_stackPtr;
+
+    alignas( VALUE ) unsigned char m_inlineStorage[INLINE_VALUE_COUNT * sizeof( VALUE )];
+    std::size_t                    m_inlineUsed;
 
     std::function<void( const wxString& aMessage, int aOffset )> m_errorCallback;
 };
@@ -419,6 +485,12 @@ public:
         m_ucode.push_back(uop);
     }
 
+    /// Flag that this ucode contains short-circuit jumps, so Run() uses the jump-aware loop.
+    void MarkHasJumps() { m_hasJumps = true; }
+
+    /// Index of the next op to be added (used to backpatch short-circuit jump targets).
+    int GetSize() const { return static_cast<int>( m_ucode.size() ); }
+
     VALUE* Run( CONTEXT* ctx );
     wxString Dump() const;
 
@@ -434,6 +506,7 @@ public:
 
 protected:
     std::vector<UOP*> m_ucode;
+    bool              m_hasJumps = false;   // any short-circuit jumps? lets Run() skip the jump loop
 };
 
 
@@ -459,14 +532,26 @@ public:
         m_value(nullptr)
     {}
 
+    /// Bare op (used for the short-circuit jumps, whose only payload is a jump target).
+    explicit UOP( int op ) :
+        m_op( op ),
+        m_ref( nullptr ),
+        m_value( nullptr )
+    {}
+
     virtual ~UOP() = default;
 
-    void Exec( CONTEXT* ctx );
+    /// Execute the op.  Returns the next instruction index to run, or -1 to fall through to the
+    /// following instruction (the common case).
+    int Exec( CONTEXT* ctx );
+
+    void SetJumpTarget( int aTarget ) { m_jumpTarget = aTarget; }
 
     wxString Format() const;
 
 private:
     int                      m_op;
+    int                      m_jumpTarget = -1;
 
     FUNC_CALL_REF            m_func;
     std::unique_ptr<VAR_REF> m_ref;
@@ -608,4 +693,3 @@ protected:
 
 
 } // namespace LIBEVAL
-

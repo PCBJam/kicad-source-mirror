@@ -20,6 +20,10 @@
 #include <pgm_base.h>
 #include <kiface_base.h>
 #include <eda_base_frame.h>
+
+#ifdef __EMSCRIPTEN__
+#include <kiway.h>
+#endif
 #include <core/kicad_algo.h>
 #include <settings/common_settings.h>
 #include <project/project_file.h>
@@ -31,6 +35,7 @@
 #include <design_block.h>
 #include <design_block_library_adapter.h>
 #include <design_block_tree_model_adapter.h>
+#include <kiplatform/ui.h>
 
 wxObjectDataPtr<LIB_TREE_MODEL_ADAPTER>
 DESIGN_BLOCK_TREE_MODEL_ADAPTER::Create( EDA_BASE_FRAME* aParent, DESIGN_BLOCK_LIBRARY_ADAPTER* aLibs,
@@ -41,12 +46,39 @@ DESIGN_BLOCK_TREE_MODEL_ADAPTER::Create( EDA_BASE_FRAME* aParent, DESIGN_BLOCK_L
 }
 
 
+#ifdef __EMSCRIPTEN__
+// WASM: resolve the owning frame's kiface settings exactly (the ctor has the frame in
+// hand). In the merged editor image (pcbnew + eeschema statically linked,
+// KICAD_WASM_MERGED_EDITOR) the global Kiface() is only a focus-based fallback.
+static APP_SETTINGS_BASE::LIB_TREE& wasmDesignBlockTreeSettings( EDA_BASE_FRAME* aFrame )
+{
+    KIWAY::FACE_T face = KIWAY::KifaceType( aFrame->GetFrameType() );
+
+    if( face != KIWAY::FACE_T( -1 ) )
+    {
+        if( KIFACE* kiface = aFrame->Kiway().KiFACE( face ) )
+        {
+            return static_cast<KIFACE_BASE*>( kiface )
+                    ->KifaceSettings()->m_DesignBlockChooserPanel.tree;
+        }
+    }
+
+    return Kiface().KifaceSettings()->m_DesignBlockChooserPanel.tree;
+}
+#endif
+
+
 DESIGN_BLOCK_TREE_MODEL_ADAPTER::DESIGN_BLOCK_TREE_MODEL_ADAPTER( EDA_BASE_FRAME* aParent,
                                                                   DESIGN_BLOCK_LIBRARY_ADAPTER* aLibs,
                                                                   APP_SETTINGS_BASE::LIB_TREE& aSettings,
                                                                   TOOL_INTERACTIVE* aContextMenuTool ) :
+#ifdef __EMSCRIPTEN__
+        LIB_TREE_MODEL_ADAPTER( aParent, wxT( "pinned_design_block_libs" ),
+                                wasmDesignBlockTreeSettings( aParent ) ),
+#else
         LIB_TREE_MODEL_ADAPTER( aParent, wxT( "pinned_design_block_libs" ),
                                 Kiface().KifaceSettings()->m_DesignBlockChooserPanel.tree ),
+#endif
         m_libs( aLibs ),
         m_frame( aParent ),
         m_contextMenuTool( aContextMenuTool )
@@ -70,7 +102,9 @@ void DESIGN_BLOCK_TREE_MODEL_ADAPTER::AddLibraries( EDA_BASE_FRAME* aParent )
         bool pinned = alg::contains( cfg->m_Session.pinned_design_block_libs, libName )
                       || alg::contains( project.m_PinnedDesignBlockLibs, libName );
 
-        DoAddLibrary( libName, row->Description(), getDesignBlocks( aParent, libName ), pinned, true );
+        // Design blocks come back in filesystem enumeration order, so they are not presorted;
+        // let AssignIntrinsicRanks() sort them by name.
+        DoAddLibrary( libName, row->Description(), getDesignBlocks( aParent, libName ), pinned, false );
     }
 
     m_tree.AssignIntrinsicRanks( m_shownColumns );
@@ -79,6 +113,12 @@ void DESIGN_BLOCK_TREE_MODEL_ADAPTER::AddLibraries( EDA_BASE_FRAME* aParent )
 
 void DESIGN_BLOCK_TREE_MODEL_ADAPTER::ClearLibraries()
 {
+    // A queued GtkTreeView scroll target holds a row reference into the nodes we are about to
+    // free.  Unlike UpdateSearchString's reset, this teardown happens out-of-band, so the later
+    // CancelPendingScroll would flush the reference against freed memory.  Drop it here while the
+    // rows it points at are still valid (#24757).
+    KIPLATFORM::UI::CancelPendingScroll( m_widget );
+
     m_tree.Clear();
 }
 

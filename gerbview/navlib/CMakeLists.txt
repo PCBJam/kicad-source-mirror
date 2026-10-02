@@ -1,4 +1,16 @@
 
+# WASM: 3D mouse support not available, use stubs
+if( EMSCRIPTEN )
+    add_library(gerbview_navlib STATIC
+        "${KICAD_WASM_LAYER}/stubs/nl_gerbview_plugin_stub.cpp"
+    )
+    target_include_directories(gerbview_navlib PRIVATE
+        ${CMAKE_SOURCE_DIR}/gerbview
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    return()
+endif()
+
 add_library(gerbview_navlib STATIC
     "nl_gerbview_plugin.cpp"
     "nl_gerbview_plugin_impl.cpp"

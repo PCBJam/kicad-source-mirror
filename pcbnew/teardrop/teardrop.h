@@ -86,9 +86,10 @@ private:
  * The 2 sides joining a point on the track to the corresponding point on the pad/via
  * outline can be a straight line or a curved shape (defined from a Bezier curve)
  * This curved shape is built by segments (3 to 10) from this Bezier curve
- * Because one cannot build a suitable shape for a custom pad, custom pads are ignored.
  * Size of area (height and length) are defined from the pad/via size or for pads having
  * a size X and a size Y, the smallest of X,Y size.
+ * For a custom pad that size and position describe only the anchor; the copper may lie far away
+ * and need not be convex or connected, so anchor-derived geometry must be clamped to that copper
  */
 class TEARDROP_MANAGER
 {
@@ -136,15 +137,10 @@ private:
      */
     bool areItemsInSameZone( BOARD_ITEM* aPadOrVia, PCB_TRACK* aTrack) const;
 
-    /**
-     * Return the length of the portion of aTrack that lies outside aOther's copper shape
-     * on aLayer. A track that only grazes a pad or via edge tangentially emerges by much
-     * less than its width and is not a credible teardrop anchor: using it misorients the
-     * teardrop axis along the grazing sliver instead of the track's real entry direction.
-     * Returns 0 if the track is fully covered or does not intersect the outline.
-     */
-    int computeEmergingTrackLength( PCB_TRACK* aTrack, BOARD_ITEM* aOther,
-                                    PCB_LAYER_ID aLayer ) const;
+    /// Return the centerline chord length through aOther's copper span at aInsidePoint.
+    /// Degenerate, arc, or non-crossing cases return INT_MAX to avoid rejection.
+    int computeChordThroughShape( PCB_TRACK* aTrack, BOARD_ITEM* aOther, PCB_LAYER_ID aLayer,
+                                  const VECTOR2I& aInsidePoint ) const;
 
     /**
      * Compute the curve part points for teardrops connected to a round shape

@@ -78,35 +78,6 @@
 #include <wx/msgdlg.h>
 
 
-namespace
-{
-// Returns aBaseName, or aBaseName + smallest free integer if already used on aScreen.
-wxString uniqueGroupName( SCH_SCREEN* aScreen, const wxString& aBaseName )
-{
-    if( !aScreen )
-        return aBaseName;
-
-    std::unordered_set<wxString> existing;
-
-    for( SCH_ITEM* item : aScreen->Items().OfType( SCH_GROUP_T ) )
-        existing.insert( static_cast<SCH_GROUP*>( item )->GetName() );
-
-    if( !existing.count( aBaseName ) )
-        return aBaseName;
-
-    for( int n = 1; n < std::numeric_limits<int>::max(); ++n )
-    {
-        wxString candidate = aBaseName + wxString::Format( wxT( "%d" ), n );
-
-        if( !existing.count( candidate ) )
-            return candidate;
-    }
-
-    return aBaseName;
-}
-} // namespace
-
-
 SCH_DRAWING_TOOLS::SCH_DRAWING_TOOLS() :
         SCH_TOOL_BASE<SCH_EDIT_FRAME>( "eeschema.InteractiveDrawing" ),
         m_lastSheetPinType( LABEL_FLAG_SHAPE::L_INPUT ),
@@ -164,6 +135,13 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
 {
     const SCH_ACTIONS::PLACE_SYMBOL_PARAMS& toolParams = aEvent.Parameter<SCH_ACTIONS::PLACE_SYMBOL_PARAMS>();
 
+    struct IMPORT_RECEIPT
+    {
+        std::function<void( bool )> callback;
+        bool placed = false;
+        ~IMPORT_RECEIPT() { if( callback ) callback( placed ); }
+    } receipt{ toolParams.m_OnPlacementFinished };
+
     SCH_SYMBOL* symbol = toolParams.m_Symbol;
 
     // If we get a parameterised symbol, we probably just want to place that and get out of the placmeent tool,
@@ -180,7 +158,10 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
     bool                        placeAllUnits = false;
 
     if( m_inDrawingTool )
+    {
+        if( receipt.callback ) delete symbol;
         return 0;
+    }
 
     REENTRANCY_GUARD guard( &m_inDrawingTool );
 
@@ -328,6 +309,12 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
             if( symbol )
             {
                 cleanup();
+
+                if( placeOneOnly && receipt.callback )
+                {
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
 
                 if( keepSymbol )
                 {
@@ -492,6 +479,13 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
             }
             else
             {
+                if( toolParams.m_CanPlace && !toolParams.m_CanPlace() )
+                {
+                    cleanup();
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
+
                 m_view->ClearPreview();
                 m_frame->AddToScreen( symbol, screen );
 
@@ -508,6 +502,7 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 lwbTool->AddJunctionsIfNeeded( &commit, &m_selectionTool->GetSelection() );
 
                 commit.Push( _( "Place Symbol" ) );
+                receipt.placed = true;
 
                 if( placeOneOnly )
                 {
@@ -648,20 +643,16 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
         {
             wxBell();
         }
-        else if( symbol && (   evt->IsAction( &SCH_ACTIONS::properties )
-                            || evt->IsAction( &SCH_ACTIONS::editReference )
-                            || evt->IsAction( &SCH_ACTIONS::editValue )
-                            || evt->IsAction( &SCH_ACTIONS::editFootprint )
-                            || evt->IsAction( &SCH_ACTIONS::autoplaceFields )
-                            || evt->IsAction( &SCH_ACTIONS::cycleBodyStyle )
-                            || evt->IsAction( &SCH_ACTIONS::setExcludeFromBOM )
-                            || evt->IsAction( &SCH_ACTIONS::setExcludeFromBoard )
-                            || evt->IsAction( &SCH_ACTIONS::setExcludeFromSim )
-                            || evt->IsAction( &SCH_ACTIONS::setDNP )
-                            || evt->IsAction( &SCH_ACTIONS::rotateCW )
-                            || evt->IsAction( &SCH_ACTIONS::rotateCCW )
-                            || evt->IsAction( &SCH_ACTIONS::mirrorV )
-                            || evt->IsAction( &SCH_ACTIONS::mirrorH ) ) )
+        else if( symbol
+                 && ( evt->IsAction( &SCH_ACTIONS::properties ) || evt->IsAction( &SCH_ACTIONS::editReference )
+                      || evt->IsAction( &SCH_ACTIONS::editValue ) || evt->IsAction( &SCH_ACTIONS::editFootprint )
+                      || evt->IsAction( &SCH_ACTIONS::autoplaceFields ) || evt->IsAction( &SCH_ACTIONS::cycleBodyStyle )
+                      || evt->IsAction( &SCH_ACTIONS::setExcludeFromBOM )
+                      || evt->IsAction( &SCH_ACTIONS::setExcludeFromBoard )
+                      || evt->IsAction( &SCH_ACTIONS::setExcludeFromSim )
+                      || evt->IsAction( &SCH_ACTIONS::setExcludeFromPosFiles ) || evt->IsAction( &SCH_ACTIONS::setDNP )
+                      || evt->IsAction( &SCH_ACTIONS::rotateCW ) || evt->IsAction( &SCH_ACTIONS::rotateCCW )
+                      || evt->IsAction( &SCH_ACTIONS::mirrorV ) || evt->IsAction( &SCH_ACTIONS::mirrorH ) ) )
         {
             m_toolMgr->PostAction( ACTIONS::refreshPreview );
             evt->SetPassEvent();
@@ -880,7 +871,7 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                         baseName = wxFileName( sheetFileName ).GetName();
                     }
 
-                    group->SetName( uniqueGroupName( screen, baseName ) );
+                    group->SetName( UniqueGroupName( screen, baseName ) );
                 }
 
                 bool autoAnnotate = !keepAnnotations && cfg->m_AnnotatePanel.automatic;
@@ -2134,10 +2125,7 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                 item = nullptr;
 
                 while( !itemsToPlace.empty() )
-                {
-                    itemsToPlace.front().release();
-                    itemsToPlace.pop_front();
-                }
+                    itemsToPlace.erase( itemsToPlace.begin() );
             };
 
     auto prepItemForPlacement =
@@ -3428,7 +3416,8 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
             {
                 wxFileName fn( filename );
 
-                sheet->GetField( FIELD_T::SHEET_NAME )->SetText( designBlock->GetLibId().GetLibItemName() );
+                sheet->GetField( FIELD_T::SHEET_NAME )
+                        ->SetText( UniqueSheetName( m_frame->GetScreen(), designBlock->GetLibId().GetLibItemName() ) );
                 sheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fn.GetName() + ext );
 
                 std::vector<SCH_FIELD>& sheetFields = sheet->GetFields();
@@ -3553,7 +3542,7 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                     SCH_SCREEN* screen = m_frame->GetScreen();
 
                     sheetGroup = new SCH_GROUP( screen );
-                    sheetGroup->SetName( uniqueGroupName( screen, designBlock->GetLibId().GetLibItemName() ) );
+                    sheetGroup->SetName( UniqueGroupName( screen, designBlock->GetLibId().GetLibItemName() ) );
                     sheetGroup->SetDesignBlockLibId( designBlock->GetLibId() );
                     c.Add( sheetGroup, screen );
                     c.Modify( sheet, screen, RECURSE_MODE::NO_RECURSE );
@@ -3777,78 +3766,78 @@ int SCH_DRAWING_TOOLS::AutoPlaceAllSheetPins( const TOOL_EVENT& aEvent )
     m_toolMgr->RunAction( ACTIONS::selectionClear );
 
     SCH_COMMIT commit( m_toolMgr );
-    BOX2I      bbox = sheet->GetBoundingBox();
-    VECTOR2I   cursorPos = bbox.GetPosition();
-    SCH_ITEM*  lastPlacedLabel = nullptr;
+    commit.Modify( sheet, m_frame->GetScreen() );
 
-    auto calculatePositionForLabel =
-            [&]( const SCH_ITEM* lastLabel, const SCH_HIERLABEL* currentLabel ) -> VECTOR2I
-            {
-                if( !lastLabel )
-                    return cursorPos;
+    // Vertical pitch big enough to keep pin text from touching, snapped to grid.
+    const int grid = schIUScale.MilsToIU( 50 );
+    int       textSize = sheet->Schematic()->Settings().m_DefaultTextSize;
+    int       pitch = std::max( KiROUND( textSize * 2.0 ), schIUScale.MilsToIU( 100 ) );
+    pitch = KiROUND( (double) pitch / grid ) * grid;
 
-                int lastX = lastLabel->GetPosition().x;
-                int lastY = lastLabel->GetPosition().y;
-                int lastWidth = lastLabel->GetBoundingBox().GetWidth();
-                int lastHeight = lastLabel->GetBoundingBox().GetHeight();
+    const int margin = pitch;
+    int       leftX = sheet->GetPosition().x;
+    int       rightX = sheet->GetPosition().x + sheet->GetSize().x;
+    int       topY = sheet->GetPosition().y;
 
-                int currentWidth = currentLabel->GetBoundingBox().GetWidth();
-                int currentHeight = currentLabel->GetBoundingBox().GetHeight();
+    // Stack new pins below whatever is already on each edge, without moving it.
+    int leftY = topY + margin - pitch;
+    int rightY = topY + margin - pitch;
 
-                // If there is enough space, place the label to the right of the last placed label
-                if( ( lastX + lastWidth + currentWidth ) <= ( bbox.GetPosition().x + bbox.GetSize().x ) )
-                    return { lastX + lastWidth, lastY };
+    for( SCH_SHEET_PIN* pin : sheet->GetPins() )
+    {
+        if( pin->GetSide() == SHEET_SIDE::RIGHT )
+            rightY = std::max( rightY, pin->GetPosition().y );
+        else if( pin->GetSide() == SHEET_SIDE::LEFT )
+            leftY = std::max( leftY, pin->GetPosition().y );
+    }
 
-                // If not enough space to the right, move to the next row if vertical space allows
-                if( ( lastY + lastHeight + currentHeight ) <= ( bbox.GetPosition().y + bbox.GetSize().y ) )
-                    return { bbox.GetPosition().x, lastY + lastHeight };
-
-                return cursorPos;
-            };
+    // New pins: outputs on the right edge, everything else on the left.
+    std::vector<SCH_HIERLABEL*> leftLabels;
+    std::vector<SCH_HIERLABEL*> rightLabels;
 
     for( SCH_HIERLABEL* label : labels )
     {
-        if( !lastPlacedLabel )
-        {
-            std::vector<SCH_SHEET_PIN*> existingPins = sheet->GetPins();
-
-            if( !existingPins.empty() )
-            {
-                std::sort( existingPins.begin(), existingPins.end(),
-                           []( const SCH_ITEM* a, const SCH_ITEM* b )
-                           {
-                               return ( a->GetPosition().x < b->GetPosition().x )
-                                      || ( a->GetPosition().x == b->GetPosition().x
-                                           && a->GetPosition().y < b->GetPosition().y );
-                           } );
-
-                lastPlacedLabel = existingPins.back();
-            }
-        }
-
-        cursorPos = calculatePositionForLabel( lastPlacedLabel, label );
-        SCH_ITEM* item = createNewSheetPinFromLabel( sheet, cursorPos, label );
-
-        if( item )
-        {
-            item->SetFlags( IS_NEW | IS_MOVING );
-            item->AutoplaceFields( nullptr, AUTOPLACE_AUTO );
-            item->ClearFlags( IS_MOVING );
-
-            if( item->IsConnectable() )
-                m_frame->AutoRotateItem( m_frame->GetScreen(), item );
-
-            commit.Modify( sheet, m_frame->GetScreen() );
-
-            sheet->AddPin( static_cast<SCH_SHEET_PIN*>( item ) );
-            item->AutoplaceFields( m_frame->GetScreen(), AUTOPLACE_AUTO );
-
-            commit.Push( _( "Add Sheet Pin" ) );
-
-            lastPlacedLabel = item;
-        }
+        if( label->GetShape() == LABEL_FLAG_SHAPE::L_OUTPUT )
+            rightLabels.push_back( label );
+        else
+            leftLabels.push_back( label );
     }
 
+    auto byText = []( const SCH_HIERLABEL* a, const SCH_HIERLABEL* b )
+    {
+        return a->GetText() < b->GetText();
+    };
+
+    std::sort( leftLabels.begin(), leftLabels.end(), byText );
+    std::sort( rightLabels.begin(), rightLabels.end(), byText );
+
+    // Grow the sheet if the new pins would run past the bottom edge.
+    int botLeft = leftY + (int) leftLabels.size() * pitch;
+    int botRight = rightY + (int) rightLabels.size() * pitch;
+    int needBot = std::max( botLeft, botRight ) + margin;
+
+    if( needBot > topY + sheet->GetSize().y )
+        sheet->SetSize( VECTOR2I( sheet->GetSize().x, needBot - topY ) );
+
+    auto placeColumn = [&]( std::vector<SCH_HIERLABEL*>& aLabels, int aX, int aStartY )
+    {
+        int y = KiROUND( (double) aStartY / grid ) * grid;
+
+        for( SCH_HIERLABEL* label : aLabels )
+        {
+            y += pitch;
+
+            SCH_SHEET_PIN* pin = createNewSheetPinFromLabel( sheet, VECTOR2I( aX, y ), label );
+            pin->ClearFlags( IS_NEW | IS_MOVING );
+            sheet->AddPin( pin );
+            pin->AutoplaceFields( m_frame->GetScreen(), AUTOPLACE_AUTO );
+        }
+    };
+
+    placeColumn( leftLabels, leftX, leftY );
+    placeColumn( rightLabels, rightX, rightY );
+
+    commit.Push( _( "Auto-place Sheet Pins" ) );
     return 0;
 }
 

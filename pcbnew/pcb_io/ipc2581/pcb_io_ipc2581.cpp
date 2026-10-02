@@ -338,6 +338,29 @@ wxString PCB_IO_IPC2581::genLayerString( PCB_LAYER_ID aLayer, const char* aPrefi
 }
 
 
+wxString PCB_IO_IPC2581::stackupLayerName( const BOARD_STACKUP_ITEM* aItem, int aSublayerId, const char* aPrefix ) const
+{
+    wxString name;
+
+    if( aItem->GetType() == BS_ITEM_TYPE_DIELECTRIC )
+    {
+        name = wxString::Format( "DIELECTRIC_%d", aItem->GetDielectricLayerId() );
+    }
+    else
+    {
+        name = aItem->GetLayerName();
+
+        if( name.IsEmpty() && IsValidLayer( aItem->GetBrdLayerId() ) )
+            name = m_board->GetLayerName( aItem->GetBrdLayerId() );
+    }
+
+    if( aSublayerId > 0 )
+        name += wxString::Format( "_%d", aSublayerId );
+
+    return genString( name, aPrefix );
+}
+
+
 wxString PCB_IO_IPC2581::genLayersString( PCB_LAYER_ID aTop, PCB_LAYER_ID aBottom,
                                           const char* aPrefix ) const
 {
@@ -599,7 +622,14 @@ size_t PCB_IO_IPC2581::lineHash( int aWidth, LINE_STYLE aDashType )
 
 size_t PCB_IO_IPC2581::shapeHash( const PCB_SHAPE& aShape )
 {
-    return hash_fp_item( &aShape, HASH_POS | REL_COORD );
+    size_t hash = hash_fp_item( &aShape, HASH_POS | REL_COORD );
+
+    // hash_fp_item does not distinguish rectangles by their corner radius, so two rects that
+    // differ only in radius would otherwise share one primitive.
+    if( aShape.GetShape() == SHAPE_T::RECTANGLE )
+        hash_combine( hash, aShape.GetCornerRadius() );
+
+    return hash;
 }
 
 
@@ -614,31 +644,12 @@ wxXmlNode* PCB_IO_IPC2581::generateContentStackup( wxXmlNode* aContentNode )
 
     for( BOARD_STACKUP_ITEM* item: stackup.GetList() )
     {
-        wxString layer_name = item->GetLayerName();
-        int sub_layer_count = 1;
-
-        if( layer_name.empty() )
-            layer_name = m_board->GetLayerName( item->GetBrdLayerId() );
-
-        layer_name = genString( layer_name, "LAYER" );
-
-        if( item->GetType() == BS_ITEM_TYPE_DIELECTRIC )
+        for( int sub_idx = 0; sub_idx < item->GetSublayersCount(); sub_idx++ )
         {
-            layer_name = genString( wxString::Format( "DIELECTRIC_%d", item->GetDielectricLayerId() ),
-                                    "LAYER" );
-            sub_layer_count = item->GetSublayersCount();
-        }
-        else
-        {
-            m_layer_name_map.emplace( item->GetBrdLayerId(), layer_name );
-        }
+            wxString sub_layer_name = stackupLayerName( item, sub_idx, "LAYER" );
 
-        for( int sub_idx = 0; sub_idx < sub_layer_count; sub_idx++ )
-        {
-            wxString sub_layer_name = layer_name;
-
-            if( sub_idx > 0 )
-                sub_layer_name += wxString::Format( "_%d", sub_idx );
+            if( sub_idx == 0 && item->GetType() != BS_ITEM_TYPE_DIELECTRIC )
+                m_layer_name_map.emplace( item->GetBrdLayerId(), sub_layer_name );
 
             wxXmlNode* node = appendNode( aContentNode, "LayerRef" );
             addAttribute( node,  "name", sub_layer_name );
@@ -908,7 +919,23 @@ void PCB_IO_IPC2581::addText( wxXmlNode* aContentNode, EDA_TEXT* aText,
 
 void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAYER_ID aLayer )
 {
+    int      maxError = m_board->GetDesignSettings().m_MaxError;
+    wxString name;
+    VECTOR2I expansion{ 0, 0 };
+
+    // Mask and paste margins are stored per side, so query the actual layer rather than the
+    // front default or a back aperture would be grown by the front margin.
+    if( LSET( { F_Mask, B_Mask } ).Contains( aLayer ) )
+        expansion.x = expansion.y = 2 * aPad.GetSolderMaskExpansion( aLayer );
+
+    if( LSET( { F_Paste, B_Paste } ).Contains( aLayer ) )
+        expansion = 2 * aPad.GetSolderPasteMargin( aLayer );
+
+    // The mask and paste apertures are the copper shape grown by a per-layer margin, so a pad
+    // needs a distinct primitive per expansion. Fold the expansion into the dict key or the
+    // copper shape would be shared with the (differently sized) mask/paste apertures.
     size_t hash = hash_fp_item( &aPad, 0 );
+    hash_combine( hash, expansion.x, expansion.y );
     auto   iter = m_std_shape_dict.find( hash );
 
     if( iter != m_std_shape_dict.end() )
@@ -917,16 +944,6 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         addAttribute( shape_node,  "id", iter->second );
         return;
     }
-
-    int      maxError = m_board->GetDesignSettings().m_MaxError;
-    wxString name;
-    VECTOR2I expansion{ 0, 0 };
-
-    if( LSET( { F_Mask, B_Mask } ).Contains( aLayer ) )
-        expansion.x = expansion.y = 2 * aPad.GetSolderMaskExpansion( PADSTACK::ALL_LAYERS );
-
-    if( LSET( { F_Paste, B_Paste } ).Contains( aLayer ) )
-        expansion = 2 * aPad.GetSolderPasteMargin( PADSTACK::ALL_LAYERS );
 
     switch( aPad.GetShape( PADSTACK::ALL_LAYERS ) )
     {
@@ -988,8 +1005,17 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         VECTOR2D pad_size = aPad.GetSize( PADSTACK::ALL_LAYERS ) + expansion;
         addAttribute( roundrect_node,  "width", floatVal( m_scale * pad_size.x ) );
         addAttribute( roundrect_node,  "height", floatVal( m_scale * pad_size.y ) );
-        roundrect_node->AddAttribute( "radius",
-                                      floatVal( m_scale * aPad.GetRoundRectCornerRadius( PADSTACK::ALL_LAYERS ) ) );
+
+        // A mask/paste aperture is the copper roundrect grown by the per-side margin, which
+        // also grows the corner radius by that margin (Minkowski sum with a disk). expansion
+        // carries twice the per-side margin. Asymmetric paste margins are not a true Minkowski
+        // sum, so follow the plotter and use the larger component, then clamp the radius to the
+        // aperture's half-extent so a shrunk aperture cannot yield an over-rounded shape.
+        int base_radius = aPad.GetRoundRectCornerRadius( PADSTACK::ALL_LAYERS );
+        int radius_margin = std::max( expansion.x, expansion.y ) / 2;
+        int max_radius = std::max( 0, KiROUND( std::min( pad_size.x, pad_size.y ) / 2.0 ) );
+        int radius = std::clamp( base_radius + radius_margin, 0, max_radius );
+        roundrect_node->AddAttribute( "radius", floatVal( m_scale * radius ) );
         addAttribute( roundrect_node,  "upperRight", "true" );
         addAttribute( roundrect_node,  "upperLeft", "true" );
         addAttribute( roundrect_node,  "lowerRight", "true" );
@@ -1147,8 +1173,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
             addXY( arc2_node, center, "centerX", "centerY" );
             addAttribute( arc2_node, "clockwise", "true" );
 
-            if( width > 0 )
-                addLineDesc( polyline_node, width, dash, true );
+            addLineDesc( polyline_node, width, dash, true );
 
             break;
         }
@@ -1208,8 +1233,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
             wxXmlNode* close_node = appendNode( polyline_node, "PolyStepSegment" );
             addXY( close_node, corners[0] );
 
-            if( stroke_width > 0 )
-                addLineDesc( polyline_node, stroke_width, dash, true );
+            addLineDesc( polyline_node, stroke_width, dash, true );
 
             break;
         }
@@ -1224,24 +1248,23 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
         int width = std::abs( aShape.GetRectangleWidth() );
         int height = std::abs( aShape.GetRectangleHeight() );
         int stroke_width = aShape.GetStroke().GetWidth();
+        int corner_radius = aShape.GetCornerRadius();
 
         wxXmlNode* rect_node = appendNode( special_node, "RectRound" );
         addLineDesc( rect_node, aShape.GetStroke().GetWidth(), aShape.GetStroke().GetLineStyle(),
                      true );
 
-        if( aShape.GetFillMode() == FILL_T::NO_FILL )
+        // RectRound rounds only the corners whose flag is set. KiCad rounds all four when the
+        // rectangle carries a corner radius, so drive the flags off the radius rather than the
+        // fill mode. A filled rect is grown by the stroke width the same as before.
+        wxString cornerFlag = corner_radius > 0 ? "true" : "false";
+        addAttribute( rect_node,  "upperRight", cornerFlag );
+        addAttribute( rect_node,  "upperLeft", cornerFlag );
+        addAttribute( rect_node,  "lowerRight", cornerFlag );
+        addAttribute( rect_node,  "lowerLeft", cornerFlag );
+
+        if( aShape.GetFillMode() != FILL_T::NO_FILL )
         {
-            addAttribute( rect_node,  "upperRight", "false" );
-            addAttribute( rect_node,  "upperLeft", "false" );
-            addAttribute( rect_node,  "lowerRight", "false" );
-            addAttribute( rect_node,  "lowerLeft", "false" );
-        }
-        else
-        {
-            addAttribute( rect_node,  "upperRight", "true" );
-            addAttribute( rect_node,  "upperLeft", "true" );
-            addAttribute( rect_node,  "lowerRight", "true" );
-            addAttribute( rect_node,  "lowerLeft", "true" );
             width += stroke_width;
             height += stroke_width;
         }
@@ -1250,7 +1273,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
 
         addAttribute( rect_node,  "width", floatVal( m_scale * width ) );
         addAttribute( rect_node,  "height", floatVal( m_scale * height ) );
-        addAttribute( rect_node,  "radius", floatVal( m_scale * ( stroke_width / 2.0 ) ) );
+        addAttribute( rect_node,  "radius", floatVal( m_scale * corner_radius ) );
 
         break;
     }
@@ -1290,8 +1313,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
                     addXY( close_node, pts[0] );
                 }
 
-                if( stroke_width > 0 )
-                    addLineDesc( polyline_node, stroke_width, dash, true );
+                addLineDesc( polyline_node, stroke_width, dash, true );
             }
 
             break;
@@ -1335,11 +1357,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
         //N.B. because our coordinate system is flipped, we need to flip the arc direction
         addAttribute( arc_node,  "clockwise", !aShape.IsClockwiseArc() ? "true" : "false" );
 
-        if( aShape.GetStroke().GetWidth() > 0 )
-        {
-            addLineDesc( arc_node, aShape.GetStroke().GetWidth(),
-                         aShape.GetStroke().GetLineStyle(), true );
-        }
+        addLineDesc( arc_node, aShape.GetStroke().GetWidth(), aShape.GetStroke().GetLineStyle(), true );
 
         break;
     }
@@ -1362,11 +1380,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
             addXY( seg_node, points[i] );
         }
 
-        if( aShape.GetStroke().GetWidth() > 0 )
-        {
-            addLineDesc( polyline_node, aShape.GetStroke().GetWidth(),
-                         aShape.GetStroke().GetLineStyle(), true );
-        }
+        addLineDesc( polyline_node, aShape.GetStroke().GetWidth(), aShape.GetStroke().GetLineStyle(), true );
 
         break;
     }
@@ -1377,11 +1391,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PCB_SHAPE& aShape,
         addXY( line_node, aShape.GetStart(), "startX", "startY" );
         addXY( line_node, aShape.GetEnd(), "endX", "endY" );
 
-        if( aShape.GetStroke().GetWidth() > 0 )
-        {
-            addLineDesc( line_node, aShape.GetStroke().GetWidth(),
-                         aShape.GetStroke().GetLineStyle(), true );
-        }
+        addLineDesc( line_node, aShape.GetStroke().GetWidth(), aShape.GetStroke().GetLineStyle(), true );
 
         break;
     }
@@ -1731,23 +1741,7 @@ void PCB_IO_IPC2581::generateCadSpecs( wxXmlNode* aCadLayerNode )
 
         for( int sublayer_id = 0; sublayer_id < stackup_item->GetSublayersCount(); sublayer_id++ )
         {
-            wxString ly_name = stackup_item->GetLayerName();
-
-            if( ly_name.IsEmpty() )
-            {
-                if( IsValidLayer( stackup_item->GetBrdLayerId() ) )
-                    ly_name = m_board->GetLayerName( stackup_item->GetBrdLayerId() );
-
-                if( ly_name.IsEmpty() && stackup_item->GetType() == BS_ITEM_TYPE_DIELECTRIC )
-                {
-                    ly_name = wxString::Format( "DIELECTRIC_%d", stackup_item->GetDielectricLayerId() );
-
-                    if( sublayer_id > 0 )
-                        ly_name += wxString::Format( "_%d", sublayer_id );
-                }
-            }
-
-            ly_name = genString( ly_name, "SPEC_LAYER" );
+            wxString ly_name = stackupLayerName( stackup_item, sublayer_id, "SPEC_LAYER" );
 
             wxXmlNode* specNode = appendNode( aCadLayerNode, "Spec" );
             addAttribute( specNode,  "name", ly_name );
@@ -1862,7 +1856,7 @@ void PCB_IO_IPC2581::addCadHeader( wxXmlNode* aEcadNode )
 
 bool PCB_IO_IPC2581::isValidLayerFor2581( PCB_LAYER_ID aLayer )
 {
-    return ( aLayer >= F_Cu && aLayer <= User_9 ) || aLayer == UNDEFINED_LAYER;
+    return IsCopperLayer( aLayer ) || ( IsNonCopperLayer( aLayer ) && aLayer <= User_9 ) || aLayer == UNDEFINED_LAYER;
 }
 
 
@@ -1999,24 +1993,8 @@ void PCB_IO_IPC2581::generateStackup( wxXmlNode* aCadLayerNode )
             }
 
             wxXmlNode* stackupLayer = appendNode( stackupGroup, "StackupLayer" );
-            wxString ly_name = stackup_item->GetLayerName();
-
-            if( ly_name.IsEmpty() )
-            {
-                if( IsValidLayer( stackup_item->GetBrdLayerId() ) )
-                    ly_name = m_board->GetLayerName( stackup_item->GetBrdLayerId() );
-
-                if( ly_name.IsEmpty() && stackup_item->GetType() == BS_ITEM_TYPE_DIELECTRIC )
-                {
-                    ly_name = wxString::Format( "DIELECTRIC_%d", stackup_item->GetDielectricLayerId() );
-
-                    if( sublayer_id > 0 )
-                        ly_name += wxString::Format( "_%d", sublayer_id );
-                }
-            }
-
-            wxString spec_name = genString( ly_name, "SPEC_LAYER" );
-            ly_name = genString( ly_name, "LAYER" );
+            wxString   spec_name = stackupLayerName( stackup_item, sublayer_id, "SPEC_LAYER" );
+            wxString   ly_name = stackupLayerName( stackup_item, sublayer_id, "LAYER" );
 
             addAttribute( stackupLayer,  "layerOrGroupRef", ly_name );
             addAttribute( stackupLayer,  "thickness", floatVal( m_scale * stackup_item->GetThickness() ) );
@@ -2059,30 +2037,10 @@ void PCB_IO_IPC2581::generateCadLayers( wxXmlNode* aCadLayerNode )
     {
         BOARD_STACKUP_ITEM* stackup_item = layers.at( i );
 
-        if( !isValidLayerFor2581( stackup_item->GetBrdLayerId() ) )
-            continue;
-
         for( int sublayer_id = 0; sublayer_id < stackup_item->GetSublayersCount(); sublayer_id++ )
         {
             wxXmlNode* cadLayerNode = appendNode( aCadLayerNode, "Layer" );
-            wxString ly_name = stackup_item->GetLayerName();
-
-            if( ly_name.IsEmpty() )
-            {
-
-                if( IsValidLayer( stackup_item->GetBrdLayerId() ) )
-                    ly_name = m_board->GetLayerName( stackup_item->GetBrdLayerId() );
-
-                if( ly_name.IsEmpty() && stackup_item->GetType() == BS_ITEM_TYPE_DIELECTRIC )
-                {
-                    ly_name = wxString::Format( "DIELECTRIC_%d", stackup_item->GetDielectricLayerId() );
-
-                    if( sublayer_id > 0 )
-                        ly_name += wxString::Format( "_%d", sublayer_id );
-                }
-            }
-
-            ly_name = genString( ly_name, "LAYER" );
+            wxString   ly_name = stackupLayerName( stackup_item, sublayer_id, "LAYER" );
 
             addAttribute( cadLayerNode,  "name", ly_name );
 
@@ -2925,7 +2883,7 @@ void PCB_IO_IPC2581::generateProfile( wxXmlNode* aStepNode )
 {
     SHAPE_POLY_SET board_outline;
 
-    if( ! m_board->GetBoardPolygonOutlines( board_outline, false ) )
+    if( !m_board->GetBoardPolygonOutlines( board_outline, false ) || board_outline.OutlineCount() == 0 )
     {
         Report( _( "Board outline is invalid or missing.  Please run DRC." ), RPT_SEVERITY_ERROR );
         return;
@@ -3403,6 +3361,9 @@ void PCB_IO_IPC2581::generateComponents( wxXmlNode* aStepNode )
 
             EDA_ANGLE fp_angle = fp->GetOrientation().Normalize();
 
+            if( fp->IsFlipped() )
+                fp_angle = ( fp_angle.Invert() - ANGLE_180 ).Normalize();
+
             if( fp_angle != ANGLE_0 )
                 addAttribute( xformNode, "rotation", floatVal( fp_angle.AsDegrees(), 2 ) );
 
@@ -3500,8 +3461,13 @@ void PCB_IO_IPC2581::generateLayerFeatures( wxXmlNode* aStepNode )
         for( PCB_FIELD* field : fp->GetFields() )
             elements[field->GetLayer()][0].push_back( field );
 
+        // A graphic can live on several layers at once (e.g. copper + mask). KiCad plots it on
+        // each, so emit it on every layer in its set rather than only its primary layer.
         for( BOARD_ITEM* item : fp->GraphicalItems() )
-            elements[item->GetLayer()][0].push_back( item );
+        {
+            for( PCB_LAYER_ID layer : item->GetLayerSet().Seq() )
+                elements[layer][0].push_back( item );
+        }
 
         for( PAD* pad : fp->Pads() )
         {
@@ -3515,14 +3481,22 @@ void PCB_IO_IPC2581::generateLayerFeatures( wxXmlNode* aStepNode )
 
             // Some SMD pad definitions omit the mask layer even though their copper needs a
             // mask opening. Add those implicit mask features on the corresponding copper side.
+            // This only applies when the pad authors no mask side at all. A pad that carries a
+            // mask on one side only (e.g. *.Cu + B.Mask) has intentionally suppressed the other,
+            // so it must not receive an implicit opening there.
             // Solder paste is intentionally NOT added here. Absence of F.Paste/B.Paste in the
             // pad's layer set means "no paste" and must be respected, e.g. for thermal/exposed
             // pads whose stencil apertures are modeled as separate paste-only pads.
-            if( pad->IsOnLayer( F_Cu ) && pad->FlashLayer( F_Cu ) && !pad->IsOnLayer( F_Mask ) )
-                elements[F_Mask][pad->GetNetCode()].push_back( pad );
+            bool hasAuthoredMask = pad->IsOnLayer( F_Mask ) || pad->IsOnLayer( B_Mask );
 
-            if( pad->IsOnLayer( B_Cu ) && pad->FlashLayer( B_Cu ) && !pad->IsOnLayer( B_Mask ) )
-                elements[B_Mask][pad->GetNetCode()].push_back( pad );
+            if( !hasAuthoredMask )
+            {
+                if( pad->IsOnLayer( F_Cu ) && pad->FlashLayer( F_Cu ) )
+                    elements[F_Mask][pad->GetNetCode()].push_back( pad );
+
+                if( pad->IsOnLayer( B_Cu ) && pad->FlashLayer( B_Cu ) )
+                    elements[B_Mask][pad->GetNetCode()].push_back( pad );
+            }
         }
     }
 
@@ -3845,6 +3819,13 @@ void PCB_IO_IPC2581::generateLayerSetNet( wxXmlNode* aLayerNode, PCB_LAYER_ID aL
                 if( !text_item || !text_item->IsVisible() || text_item->GetShownText( false ).empty() )
                     return;
 
+                bool isWhitespace = text_item->GetShownText( false ).Strip( wxString::both ).empty();
+                bool isKnockout = text->Type() == PCB_TEXT_T && static_cast<PCB_TEXT*>( text )->IsKnockout();
+                bool hasBorder = text->Type() == PCB_TEXTBOX_T && static_cast<PCB_TEXTBOX*>( text )->IsBorderEnabled();
+
+                if( isWhitespace && !isKnockout && !hasBorder )
+                    return;
+
                 wxXmlNode* tempSetNode = appendNode( aLayerNode, "Set" );
 
                 if( m_version > 'B' )
@@ -3863,20 +3844,24 @@ void PCB_IO_IPC2581::generateLayerSetNet( wxXmlNode* aLayerNode, PCB_LAYER_ID aL
                 addAttribute( nonStandardAttributeNode,  "value", text_item->GetShownText( false ) );
                 addAttribute( nonStandardAttributeNode,  "type", "STRING" );
 
-                wxXmlNode* tempFeature = appendNode( tempSetNode, "Features" );
-                addLocationNode( tempFeature, 0.0, 0.0 );
-
-                if( text->Type() == PCB_TEXT_T && static_cast<PCB_TEXT*>( text )->IsKnockout() )
-                    addKnockoutText( tempFeature, static_cast<PCB_TEXT*>( text ) );
-                else
-                    addText( tempFeature, text_item, text->GetFontMetrics() );
-
-                if( text->Type() == PCB_TEXTBOX_T )
+                if( !isWhitespace || isKnockout )
                 {
-                    PCB_TEXTBOX* textbox = static_cast<PCB_TEXTBOX*>( text );
+                    wxXmlNode* glyphFeature = appendNode( tempSetNode, "Features" );
+                    addLocationNode( glyphFeature, 0.0, 0.0 );
 
-                    if( textbox->IsBorderEnabled() )
-                        addShape( tempFeature, *static_cast<PCB_SHAPE*>( textbox ) );
+                    if( isKnockout )
+                        addKnockoutText( glyphFeature, static_cast<PCB_TEXT*>( text ) );
+                    else
+                        addText( glyphFeature, text_item, text->GetFontMetrics() );
+                }
+
+                if( hasBorder )
+                {
+                    PCB_SHAPE* border = static_cast<PCB_TEXTBOX*>( text );
+                    wxXmlNode* borderFeature = appendNode( tempSetNode, "Features" );
+
+                    addLocationNode( borderFeature, *border );
+                    addShape( borderFeature, *border );
                 }
             };
 
@@ -4016,25 +4001,27 @@ void PCB_IO_IPC2581::generateLayerSetAuxilliary( wxXmlNode* aStepNode )
             layerNode->AddAttribute( "layerRef", genLayersString( std::get<1>( layers ),
                                                                   std::get<2>( layers ), TO_UTF8( name ) ) );
 
+        wxXmlNode* setNode = appendNode( layerNode, "Set" );
+
         for( BOARD_ITEM* item : vec )
         {
-            if( item->Type() == PCB_VIA_T )
-            {
-                PCB_VIA* via = static_cast<PCB_VIA*>( item );
+            if( item->Type() != PCB_VIA_T )
+                continue;
 
-                PCB_SHAPE shape( nullptr, SHAPE_T::CIRCLE );
+            PCB_VIA* via = static_cast<PCB_VIA*>( item );
 
-                if( hole )
-                    shape.SetEnd( { KiROUND( via->GetDrillValue() / 2.0 ), 0 } );
-                else
-                    shape.SetEnd( { KiROUND( via->GetWidth( std::get<1>( layers ) ) / 2.0 ), 0 } );
+            PCB_SHAPE shape( nullptr, SHAPE_T::CIRCLE );
 
-                wxXmlNode* padNode = appendNode( layerNode, "Pad" );
-                addPadStack( padNode, via );
+            if( hole )
+                shape.SetEnd( { KiROUND( via->GetDrillValue() / 2.0 ), 0 } );
+            else
+                shape.SetEnd( { KiROUND( via->GetWidth( std::get<1>( layers ) ) / 2.0 ), 0 } );
 
-                addLocationNode( padNode, 0.0, 0.0 );
-                addShape( padNode, shape );
-            }
+            wxXmlNode* padNode = appendNode( setNode, "Pad" );
+            addPadStack( padNode, via );
+
+            addLocationNode( padNode, via->GetPosition().x, via->GetPosition().y );
+            addShape( padNode, shape );
         }
     }
 }
@@ -4182,6 +4169,13 @@ void PCB_IO_IPC2581::SaveBoard( const wxString& aFileName, BOARD* aBoard,
     m_units_str = "MILLIMETER";
     m_scale = 1.0 / PCB_IU_PER_MM;
     m_sigfig = 6;
+
+    // The base PCB_IO interface permits a null property set; alias it to an empty
+    // map so the optional lookups below remain valid.
+    const std::map<std::string, UTF8> emptyProperties;
+
+    if( !aProperties )
+        aProperties = &emptyProperties;
 
     if( auto it = aProperties->find( "units" ); it != aProperties->end() )
     {

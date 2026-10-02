@@ -77,6 +77,19 @@
 // which is dedicated to loading only a single DSO.
 KIWAY    Kiway( KFCTL_STANDALONE );
 
+#if defined(KICAD_MERGED_KIFACES)
+// WASM merged editor: the pcbnew, eeschema and cvpcb kifaces are statically linked
+// side by side, each compiled with its own getter symbol via -DKIFACE_GETTER=<name>
+// (see KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt). All are registered
+// in OnPgmInit below.
+extern "C" KIFACE* pcbnew_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
+                                         PGM_BASE* aProgram );
+extern "C" KIFACE* eeschema_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
+                                           PGM_BASE* aProgram );
+extern "C" KIFACE* cvpcb_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
+                                        PGM_BASE* aProgram );
+#endif
+
 
 // implement a PGM_BASE and a wxApp side by side:
 
@@ -377,7 +390,25 @@ bool PGM_SINGLE_TOP::OnPgmInit()
         return false;
     }
 
-#if !defined(BUILD_KIWAY_DLL)
+#if defined(KICAD_MERGED_KIFACES)
+
+    // WASM merged editor (kicad_editor): THREE kifaces are statically linked into this
+    // image, each compiled with a distinct KIFACE_GETTER name (kiway.h's macro is
+    // #ifndef-guarded; see KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt).
+    // Register all faces up front — OnKifaceStart still runs lazily on a face's first
+    // use (KIWAY::KiFACE), exactly like the native project manager loading the DSOs.
+    // cvpcb has no page-load --frame entry; it only opens via eeschema's Assign
+    // Footprints (KIWAY::Player( FRAME_CVPCB )).
+    int  kiface_version;
+
+    Kiway.set_kiface( KIWAY::FACE_PCB,
+                      pcbnew_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+    Kiway.set_kiface( KIWAY::FACE_SCH,
+                      eeschema_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+    Kiway.set_kiface( KIWAY::FACE_CVPCB,
+                      cvpcb_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+
+#elif !defined(BUILD_KIWAY_DLL)
 
     // Only bitmap2component and pcb_calculator use this code currently, as they
     // are not split to use single_top as a link image separate from a *.kiface.
@@ -401,7 +432,6 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
     GetSettingsManager().RegisterSettings( new KICAD_SETTINGS );
 
-
     if( const COMMON_SETTINGS* cfg = Pgm().GetCommonSettings() )
     {
         if( cfg->m_Appearance.app_theme == APP_THEME::DARK )
@@ -417,8 +447,58 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
     // Use KIWAY to create a top window, which registers its existence also.
     // "TOP_FRAME" is a macro that is passed on compiler command line from CMake,
-    // and is one of the types in FRAME_T.
-    KIWAY_PLAYER* frame = Kiway.Player( TOP_FRAME, true );
+    // and is one of the types in FRAME_T. It is the DEFAULT frame this launcher
+    // opens.
+    FRAME_T topFrame = TOP_FRAME;
+
+#ifdef __EMSCRIPTEN__
+    // WASM: one kiface binary already implements all of its sibling frames (e.g.
+    // the pcbnew kiface serves both FRAME_PCB_EDITOR and FRAME_FOOTPRINT_EDITOR;
+    // eeschema serves FRAME_SCH and FRAME_SCH_SYMBOL_EDITOR). Let the JS launcher
+    // choose the frame at RUNTIME via "--frame=<token>" (threaded through
+    // Module.arguments), so we don't build a separate image per frame. Mirrors the
+    // --frame parser in kicad/kicad.cpp. Falls back to TOP_FRAME when no flag given.
+    {
+        static const wxCmdLineEntryDesc frameDesc[] = {
+            { wxCMD_LINE_OPTION, "f", "frame", "Frame to load", wxCMD_LINE_VAL_STRING, 0 },
+            { wxCMD_LINE_PARAM, nullptr, nullptr, "File to load", wxCMD_LINE_VAL_STRING,
+              wxCMD_LINE_PARAM_MULTIPLE | wxCMD_LINE_PARAM_OPTIONAL },
+            { wxCMD_LINE_NONE, nullptr, nullptr, nullptr, wxCMD_LINE_VAL_NONE, 0 }
+        };
+
+        wxCmdLineParser frameParser( App().argc, App().argv );
+        frameParser.SetDesc( frameDesc );
+        frameParser.Parse( false );
+
+        wxString frameName;
+
+        if( frameParser.Found( "frame", &frameName ) )
+        {
+            const struct
+            {
+                const char* name;
+                FRAME_T     type;
+            } frameTokens[] = { { "pcb", FRAME_PCB_EDITOR },
+                                { "fpedit", FRAME_FOOTPRINT_EDITOR },
+                                { "sch", FRAME_SCH },
+                                { "symedit", FRAME_SCH_SYMBOL_EDITOR },
+                                { "gerb", FRAME_GERBER },
+                                { "ds", FRAME_PL_EDITOR },
+                                { "calc", FRAME_CALC } };
+
+            for( const auto& token : frameTokens )
+            {
+                if( frameName == token.name )
+                {
+                    topFrame = token.type;
+                    break;
+                }
+            }
+        }
+    }
+#endif
+
+    KIWAY_PLAYER* frame = Kiway.Player( topFrame, true );
 
     if( frame == nullptr )
     {
@@ -429,8 +509,12 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
     Kiway.SetTop( frame );
 
+#ifndef __EMSCRIPTEN__
+    // The first-run setup wizard (library / privacy / settings) targets desktop
+    // installs and is not applicable in the browser; skip it for WASM.
     STARTWIZARD startWizard;
     startWizard.CheckAndRun( frame );
+#endif
 
     // Load library tables after startup wizard
     GetLibraryManager().LoadGlobalTables();
@@ -455,6 +539,11 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
 
     static const wxCmdLineEntryDesc desc[] = {
+#ifdef __EMSCRIPTEN__
+        // Recognize (and ignore, for file purposes) the runtime frame selector so
+        // this positional-file parse doesn't error on "--frame=<token>".
+        { wxCMD_LINE_OPTION, "f", "frame", "Frame to load", wxCMD_LINE_VAL_STRING, 0 },
+#endif
         { wxCMD_LINE_PARAM, nullptr, nullptr, "File to load", wxCMD_LINE_VAL_STRING,
           wxCMD_LINE_PARAM_MULTIPLE | wxCMD_LINE_PARAM_OPTIONAL },
         { wxCMD_LINE_NONE, nullptr, nullptr, nullptr, wxCMD_LINE_VAL_NONE, 0 }
@@ -483,14 +572,38 @@ bool PGM_SINGLE_TOP::OnPgmInit()
         {
             wxFileName argv1( fileArgs[0] );
 
-#if defined(PGM_DATA_FILE_EXT)
-            // PGM_DATA_FILE_EXT, if present, may be different for each compile,
-            // it may come from CMake on the compiler command line, but often does not.
-            // This facility is mostly useful for those program footprints
-            // supporting a single argv[1].
             if( !argv1.GetExt() )
+            {
+#ifdef __EMSCRIPTEN__
+                // WASM: the default data-file extension follows the RUNTIME frame
+                // (topFrame, resolved above) rather than a per-build compile define,
+                // so one binary serves both an editor and its library editor.
+                wxString defaultExt;
+
+                switch( topFrame )
+                {
+                case FRAME_PCB_EDITOR:        defaultExt = wxT( "kicad_pcb" ); break;
+                case FRAME_FOOTPRINT_EDITOR:  defaultExt = wxT( "kicad_mod" ); break;
+                case FRAME_SCH:               defaultExt = wxT( "kicad_sch" ); break;
+                case FRAME_SCH_SYMBOL_EDITOR: defaultExt = wxT( "kicad_sym" ); break;
+                default:                                                       break;
+                }
+
+#  if defined(PGM_DATA_FILE_EXT)
+                if( defaultExt.IsEmpty() )
+                    defaultExt = wxT( PGM_DATA_FILE_EXT );
+#  endif
+
+                if( !defaultExt.IsEmpty() )
+                    argv1.SetExt( defaultExt );
+#elif defined(PGM_DATA_FILE_EXT)
+                // PGM_DATA_FILE_EXT, if present, may be different for each compile,
+                // it may come from CMake on the compiler command line, but often does not.
+                // This facility is mostly useful for those program footprints
+                // supporting a single argv[1].
                 argv1.SetExt( wxT( PGM_DATA_FILE_EXT ) );
 #endif
+            }
             argv1.MakeAbsolute();
 
             fileArgs[0] = argv1.GetFullPath();
@@ -499,8 +612,11 @@ bool PGM_SINGLE_TOP::OnPgmInit()
         frame->OpenProjectFiles( fileArgs );
     }
 
-    if( KIFACE* topFrame = Kiway.KiFACE( KIWAY::KifaceType( TOP_FRAME ) ) )
-        topFrame->PreloadLibraries( &Kiway );
+    // Preload for the RUNTIME-resolved frame: with the WASM --frame selector (and the
+    // merged image, where the flag can pick the OTHER engine's frame) the booted face
+    // may differ from the compile-time TOP_FRAME. On native topFrame == TOP_FRAME.
+    if( KIFACE* kf = Kiway.KiFACE( KIWAY::KifaceType( topFrame ) ) )
+        kf->PreloadLibraries( &Kiway );
 
     PreloadDesignBlockLibraries( &Kiway );
 

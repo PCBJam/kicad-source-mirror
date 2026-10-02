@@ -27,6 +27,9 @@ target_include_directories( scripting PRIVATE
     ${wxWidgets_LIBRARIES}
 )
 
+# Python scripting KIFACE - only built when Python is enabled
+if( KICAD_SCRIPTING )
+
 # Setup the KIFACE
 add_library( scripting_kiface MODULE
     kicad_scripting_main.cpp
@@ -101,3 +104,5 @@ install( DIRECTORY ${PROJECT_SOURCE_DIR}/scripting/kicad_pyshell/
     DESTINATION ${KICAD_DATA}/scripting/kicad_pyshell
     FILE_PERMISSIONS OWNER_EXECUTE OWNER_READ OWNER_WRITE GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
 )
+
+endif() # KICAD_SCRIPTING

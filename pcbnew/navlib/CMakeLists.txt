@@ -1,4 +1,16 @@
 
+# WASM: 3D mouse support not available, use stubs
+if( EMSCRIPTEN )
+    add_library(pcbnew_navlib STATIC
+        "${KICAD_WASM_LAYER}/stubs/nl_pcbnew_plugin_stub.cpp"
+    )
+    target_include_directories(pcbnew_navlib PRIVATE
+        ${CMAKE_SOURCE_DIR}/pcbnew
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    return()
+endif()
+
 add_library(pcbnew_navlib STATIC
     "nl_pcbnew_plugin.cpp"
     "nl_pcbnew_plugin_impl.cpp"

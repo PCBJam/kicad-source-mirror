@@ -69,6 +69,9 @@ void PCB_GROUP::Serialize( google::protobuf::Any &aContainer ) const
         itemId->set_value( item->m_Uuid.AsStdString() );
     }
 
+    if( const BOARD* board = GetBoard() )
+        group.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
     aContainer.PackFrom( group );
 }
 
@@ -80,7 +83,7 @@ bool PCB_GROUP::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &group ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( group.id().value() );
+    SetUuidDirect( KIID( group.id().value() ) );
     SetName( wxString( group.name().c_str(), wxConvUTF8 ) );
 
     BOARD* board = GetBoard();
@@ -222,7 +225,9 @@ PCB_GROUP* PCB_GROUP::DeepDuplicate( bool addToParentGroup, BOARD_COMMIT* aCommi
 
     for( EDA_ITEM* member : m_items )
     {
-        if( member->Type() == PCB_GROUP_T )
+        // A PCB_GENERATOR owns member items that are not in this group's m_items, so a shallow
+        // copy would leave the duplicate referencing the original's members.
+        if( member->Type() == PCB_GROUP_T || member->Type() == PCB_GENERATOR_T )
             newGroup->AddItem( static_cast<PCB_GROUP*>( member )->DeepDuplicate( IGNORE_PARENT_GROUP ) );
         else
             newGroup->AddItem( static_cast<BOARD_ITEM*>( member )->Duplicate( IGNORE_PARENT_GROUP ) );
@@ -388,6 +393,21 @@ void PCB_GROUP::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 
 void PCB_GROUP::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
+    // Footprints have no mirror, only flip. If the group holds one, leave the whole group alone
+    // rather than mirror the rest and tear it apart.
+    bool hasFootprint = false;
+
+    RunOnChildren(
+            [&]( BOARD_ITEM* aChild )
+            {
+                if( aChild->Type() == PCB_FOOTPRINT_T )
+                    hasFootprint = true;
+            },
+            RECURSE_MODE::RECURSE );
+
+    if( hasFootprint )
+        return;
+
     for( EDA_ITEM* item : m_items )
         static_cast<BOARD_ITEM*>( item )->Mirror( aCentre, aFlipDirection );
 }
