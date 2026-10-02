@@ -50,6 +50,14 @@ KICOMMON_API void NotifyDialog( bool aShown, const wxWindow* aWindow,
 KICOMMON_API void NotifyCheckFinished( const std::string& aKind, int aErrors, int aWarnings,
                                        int aUnconnected );
 
+/** KiCad's simulator finished a run (`aFinished`) or changed what its plot shows (a probe click,
+ *  the signals list): the analysis kind in lower case ("tran", "ac", "op"…), whether the run
+ *  produced data, the point count, and the names of the plotted traces ("I(D1)", "V(/Q1C)")
+ *  separated by newlines. Without it the page cannot tell that a simulation ran or what it
+ *  shows (overlay-system 0006). */
+KICOMMON_API void NotifySimulation( bool aFinished, const std::string& aKind, bool aOk, int aPoints,
+                                    const wxString& aTraces );
+
 /** The unqualified, demangled class name of a polymorphic object's dynamic
  *  type, e.g. "DIALOG_SYMBOL_CHOOSER". */
 KICOMMON_API std::string DynamicClassName( const std::type_info& aType );

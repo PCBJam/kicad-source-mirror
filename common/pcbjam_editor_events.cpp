@@ -80,6 +80,40 @@ void NotifyDialog( bool aShown, const wxWindow* aWindow, const std::string& aCla
 }
 
 
+void NotifySimulation( bool aFinished, const std::string& aKind, bool aOk, int aPoints,
+                       const wxString& aTraces )
+{
+#if defined( __EMSCRIPTEN__ )
+    EM_ASM(
+            {
+                try
+                {
+                    window.dispatchEvent( new CustomEvent( 'pcbjam:editor-event', {
+                        detail : {
+                            type : $0 ? 'simFinished' : 'simPlotChanged',
+                            kind : UTF8ToString( $1 ),
+                            ok : !!$2,
+                            points : $3,
+                            traces : UTF8ToString( $4 ).split( '\n' ).filter( function( t ) { return t.length > 0; } )
+                        }
+                    } ) );
+                }
+                catch( e )
+                {
+                    console.error( 'pcbjam:editor-event simulation', e );
+                }
+            },
+            aFinished ? 1 : 0, aKind.c_str(), aOk ? 1 : 0, aPoints, aTraces.utf8_str().data() );
+#else
+    (void) aFinished;
+    (void) aKind;
+    (void) aOk;
+    (void) aPoints;
+    (void) aTraces;
+#endif
+}
+
+
 void NotifyCheckFinished( const std::string& aKind, int aErrors, int aWarnings, int aUnconnected )
 {
 #if defined( __EMSCRIPTEN__ )

@@ -151,6 +151,12 @@ public:
      */
     bool Destroy() override;
 
+#ifdef __EMSCRIPTEN__
+    /// pcbjam WASM: the simulator and the footprint-assignment tool announce themselves to the
+    /// page like dialogs, and the simulator opens where the browser has room (kiway_player.cpp).
+    bool Show( bool aShow = true ) override;
+#endif
+
     bool IsModal() const override       { return m_modal; }
     void SetModal( bool aIsModal )      { m_modal = aIsModal; }
 
@@ -192,6 +198,10 @@ protected:
 
     wxSocketServer*             m_socketServer;
     std::vector<wxSocketBase*>  m_sockets;         /// Interprocess communication.
+
+#ifdef __EMSCRIPTEN__
+    bool m_pcbjamAnnounced = false; ///< told the page this tool frame is shown
+#endif
 
 #ifndef SWIG
     DECLARE_EVENT_TABLE()
