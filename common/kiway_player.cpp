@@ -36,7 +36,9 @@
 #include <wx/log.h>
 
 #ifdef __EMSCRIPTEN__
+#include <algorithm>
 #include <typeinfo>
+#include <wx/display.h>
 #include <pcbjam_editor_events.h>
 #endif
 
@@ -179,10 +181,60 @@ bool KIWAY_PLAYER::ShowModal( wxString* aResult, wxWindow* aResultantFocusWindow
 
 bool KIWAY_PLAYER::Destroy()
 {
+#ifdef __EMSCRIPTEN__
+    // A tool frame closes through doCloseWindow → Destroy(), never Show( false ): say it is
+    // gone here (Destroy can run twice; the flag reports it once).
+    if( m_pcbjamAnnounced )
+    {
+        m_pcbjamAnnounced = false;
+        PCBJAM_EDITOR_EVENTS::NotifyDialog( false, this, PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
+                                            GetTitle(), false );
+    }
+#endif
+
     Kiway().PlayerDidClose( GetFrameType() );
 
     return EDA_BASE_FRAME::Destroy();
 }
+
+
+#ifdef __EMSCRIPTEN__
+// pcbjam WASM addition (overlay-system 0006). The simulator and the footprint-assignment tool are
+// frames shown without a modal loop; to the page they are dialogs a guided tour points into, so
+// they announce themselves like DIALOG_SHIM::Show does — as modeless: the editor stays readable.
+// The main editor frames never do.
+static bool pcbjamToolFrame( FRAME_T aType )
+{
+    return aType == FRAME_SIMULATOR || aType == FRAME_CVPCB;
+}
+
+
+bool KIWAY_PLAYER::Show( bool aShow )
+{
+    // No window manager places the simulator in the browser: it would open at the page origin at
+    // 500x400, over the editor's menus, its toolbar clipped and its plot tiny. The first time,
+    // give it the bottom of the page instead — a wide plot, with the schematic still in view
+    // above it for probing.
+    if( aShow && GetFrameType() == FRAME_SIMULATOR && GetPosition().x <= 0 && GetPosition().y <= 0 )
+    {
+        const wxRect area = wxDisplay( this ).GetClientArea();
+        const int    height = std::max( 360, area.height * 55 / 100 );
+
+        SetSize( area.x + 8, area.GetBottom() - height - 8, area.width - 16, height );
+    }
+
+    bool ret = EDA_BASE_FRAME::Show( aShow );
+
+    if( pcbjamToolFrame( GetFrameType() ) && !IsModal() && aShow != m_pcbjamAnnounced )
+    {
+        m_pcbjamAnnounced = aShow;
+        PCBJAM_EDITOR_EVENTS::NotifyDialog( aShow, this, PCBJAM_EDITOR_EVENTS::DynamicClassName( typeid( *this ) ),
+                                            GetTitle(), false );
+    }
+
+    return ret;
+}
+#endif
 
 
 bool KIWAY_PLAYER::IsDismissed()

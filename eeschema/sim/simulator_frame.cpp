@@ -65,11 +65,50 @@
 #include <memory>
 
 #ifdef __EMSCRIPTEN__
+#include <algorithm>
 #include <emscripten.h>
+#include <pcbjam_editor_events.h>
 
 // wasm/stubs/sharedspice_client.cpp — the browser harness's final-refresh
 // receipt (findings E-7).
 extern "C" void pcbjam_sim_run_applied( uint32_t aGeneration );
+
+// pcbjam WASM addition (overlay-system 0006): tell the page what the simulator shows, so a guided
+// tour can follow a simulation lesson — a run finished (with the time axis's length when nothing
+// is plotted yet), or the plot's traces changed (a probe click, the signals list: no simulator
+// calls then).
+static void pcbjamNotifySimulation( SIMULATOR_FRAME* aFrame, bool aFinished )
+{
+    SIM_TAB* tab = aFrame->GetCurrentSimTab();
+
+    if( !tab )
+        return;
+
+    const SIM_TYPE type = tab->GetSimType();
+    wxString       traces;
+    size_t         points = 0;
+
+    if( SIM_PLOT_TAB* plotTab = dynamic_cast<SIM_PLOT_TAB*>( tab ) )
+    {
+        for( const auto& [id, trace] : plotTab->GetTraces() )
+        {
+            traces << trace->GetName() << wxS( "\n" );
+            points = std::max( points, trace->GetDataX().size() );
+        }
+    }
+
+    if( aFinished && points == 0 && aFrame->GetSimulator() )
+    {
+        const wxString xAxis = aFrame->GetSimulator()->GetXAxis( type );
+
+        if( !xAxis.IsEmpty() )
+            points = aFrame->GetSimulator()->GetRealVector( xAxis.ToStdString() ).size();
+    }
+
+    PCBJAM_EDITOR_EVENTS::NotifySimulation( aFinished,
+                                            SPICE_SIMULATOR::TypeToName( type, true ).Lower().ToStdString(),
+                                            points > 1, (int) points, traces );
+}
 #endif
 
 
@@ -1026,6 +1065,8 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
     m_lastAppliedSimRunGeneration = generation;
 
 #ifdef __EMSCRIPTEN__
+    pcbjamNotifySimulation( this, true );
+
     // Final-refresh receipt (findings E-7) — deliberately after every final
     // native refresh; implemented in wasm/stubs/sharedspice_client.cpp.
     // Optional test evidence, no mainline/native behavior.
@@ -1111,6 +1152,10 @@ void SIMULATOR_FRAME::OnModify()
     KIWAY_PLAYER::OnModify();
     m_workbookModified = true;
     UpdateTitle();
+
+#ifdef __EMSCRIPTEN__
+    pcbjamNotifySimulation( this, false );
+#endif
 }
 
 
