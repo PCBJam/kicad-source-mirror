@@ -747,6 +747,16 @@ bool SIMULATOR_FRAME::SaveWorkbook( const wxString& aPath )
         m_workbookModified = false;
         UpdateTitle();
 
+#ifdef __EMSCRIPTEN__
+        // Push the new workbook pointer into the project settings now, as SaveSettings
+        // does on close: a browser tab is often closed with the simulator still open.
+        if( Prj().GetProjectFile().m_SchematicSettings->m_NgspiceSettings->SaveToFile()
+                && m_schematicFrame )
+        {
+            m_schematicFrame->OnModify();
+        }
+#endif
+
         return true;
     }
 

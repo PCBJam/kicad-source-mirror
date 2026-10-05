@@ -59,6 +59,13 @@
 #include <magic_enum.hpp>
 #include <widgets/wx_infobar.h>
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/kicad_editor_embind.cpp): notifies the
+// web app after a successful save so it can persist the MEMFS bytes. Same hook as the
+// schematic save in files-io.cpp.
+extern "C" void kicadCollabOnSave( const char* aPath );
+#endif
+
 
 SIM_TRACE_TYPE operator|( SIM_TRACE_TYPE aFirst, SIM_TRACE_TYPE aSecond )
 {
@@ -2840,6 +2847,12 @@ bool SIMULATOR_FRAME_UI::SaveWorkbook( const wxString& aPath )
     // Store the filename of the last saved workbook.
     if( res )
     {
+#ifdef __EMSCRIPTEN__
+        // Every workbook save (close prompt, Save, Save As) ends here; without this the
+        // .wbk stays MEMFS-only and is gone on reload while the project still points at it.
+        kicadCollabOnSave( filename.GetFullPath().utf8_str() );
+#endif
+
         filename.MakeRelativeTo( m_schematicFrame->Prj().GetProjectPath() );
         simulator()->Settings()->SetWorkbookFilename( filename.GetFullPath() );
     }
