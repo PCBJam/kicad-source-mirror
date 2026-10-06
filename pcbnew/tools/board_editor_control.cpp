@@ -2097,9 +2097,20 @@ int BOARD_EDITOR_CONTROL::CrossProbeToSch( const TOOL_EVENT& aEvent )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// pcbjam/wasm/cross_probe: an explicit probe may open the other editor's browser tab.
+void PcbjamCrossProbeExplicit( bool aExplicit );
+#endif
+
 int BOARD_EDITOR_CONTROL::ExplicitCrossProbeToSch( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    PcbjamCrossProbeExplicit( true );
+#endif
     doCrossProbePcbToSch( aEvent, true );
+#ifdef __EMSCRIPTEN__
+    PcbjamCrossProbeExplicit( false );
+#endif
     return 0;
 }
 

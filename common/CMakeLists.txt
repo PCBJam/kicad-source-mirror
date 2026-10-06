@@ -908,6 +908,14 @@ if( NOT EMSCRIPTEN )
     )
 endif()
 
+# WASM: cross-probe goes to the web shell (BroadcastChannel between tabs), not localhost sockets
+if( EMSCRIPTEN )
+    list( REMOVE_ITEM COMMON_SRCS eda_dde.cpp )
+    list( APPEND COMMON_SRCS
+        ${KICAD_WASM_LAYER}/cross_probe/eda_dde_wasm.cpp
+    )
+endif()
+
 # API enums require protobuf
 if( KICAD_IPC_API )
     list( APPEND COMMON_SRCS
