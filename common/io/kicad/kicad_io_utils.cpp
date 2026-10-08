@@ -19,6 +19,9 @@
 
 #include "io/kicad/kicad_io_utils.h"
 
+#include <algorithm>
+#include <string>
+
 // For some reason wxWidgets is built with wxUSE_BASE64 unset so expose the wxWidgets
 // base64 code.
 #define wxUSE_BASE64 1
@@ -56,18 +59,20 @@ void FormatStreamData( OUTPUTFORMATTER& aOut, const wxStreamBuffer& aStream )
 {
     aOut.Print( "(data" );
 
-    const wxString out = wxBase64Encode( aStream.GetBufferStart(), aStream.GetBufferSize() );
+    // Base64 is ASCII: slice the bytes, not a wxString. With a UTF-8 wxString
+    // (wxUSE_UNICODE_UTF8) every substring walks from the start, which made
+    // this loop quadratic in the image size.
+    const std::string out =
+            wxBase64Encode( aStream.GetBufferStart(), aStream.GetBufferSize() ).ToStdString();
 
     // Apparently the MIME standard character width for base64 encoding is 76 (unconfirmed)
     // so use it in a vein attempt to be standard like.
-    static constexpr unsigned MIME_BASE64_LENGTH = 76;
+    static constexpr size_t MIME_BASE64_LENGTH = 76;
 
-    size_t first = 0;
-
-    while( first < out.Length() )
+    for( size_t first = 0; first < out.size(); first += MIME_BASE64_LENGTH )
     {
-        aOut.Print( "\n\"%s\"", TO_UTF8( out( first, MIME_BASE64_LENGTH ) ) );
-        first += MIME_BASE64_LENGTH;
+        const size_t length = std::min( MIME_BASE64_LENGTH, out.size() - first );
+        aOut.Print( "\n\"%.*s\"", static_cast<int>( length ), out.data() + first );
     }
 
     aOut.Print( ")" ); // Closes data token.
