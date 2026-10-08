@@ -122,9 +122,6 @@ void ZONE::CopyFrom( const BOARD_ITEM* aOther )
 ZONE::~ZONE()
 {
     delete m_Poly;
-
-    if( BOARD* board = GetBoard() )
-        board->IncrementTimeStamp();
 }
 
 
@@ -212,6 +209,9 @@ void ZONE::InitDataFromSrcInCopyCtor( const ZONE& aZone, PCB_LAYER_ID aLayer )
     m_netinfo                 = aZone.m_netinfo;
     m_area                    = aZone.m_area;
     m_outlinearea             = aZone.m_outlinearea;
+
+    // Fresh outline; lock-free bbox cache starts invalid.
+    m_bboxCacheTimeStamp.store( -1, std::memory_order_relaxed );
 }
 
 
@@ -226,6 +226,23 @@ ZONE* ZONE::Clone( PCB_LAYER_ID aLayer ) const
     ZONE* clone = new ZONE( BOARD_ITEM::GetParent() );
     clone->InitDataFromSrcInCopyCtor( *this, aLayer );
     return clone;
+}
+
+
+BOARD_ITEM* ZONE::Duplicate( bool addToParentGroup, BOARD_COMMIT* aCommit ) const
+{
+    BOARD_ITEM* dupe = BOARD_ITEM::Duplicate( addToParentGroup, aCommit );
+
+    if( const BOARD* board = GetBoard() )
+    {
+        ZONE* newZone = static_cast<ZONE*>( dupe );
+
+        // Give the copy its own name so it does not collide with the original (issue 23131)
+        if( !newZone->GetZoneName().IsEmpty() )
+            newZone->SetZoneName( board->GetUniqueZoneName( newZone->GetZoneName(), newZone ) );
+    }
+
+    return dupe;
 }
 
 
@@ -252,6 +269,11 @@ void ZONE::Serialize( google::protobuf::Any& aContainer ) const
     zone.set_name( m_zoneName.ToUTF8() );
     zone.set_priority( m_priority );
     zone.set_filled( m_isFilled );
+
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        zone.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+    else if( const BOARD* board = GetBoard() )
+        zone.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
 
     if( m_isRuleArea )
     {
@@ -340,7 +362,7 @@ bool ZONE::Deserialize( const google::protobuf::Any& aContainer )
     if( !aContainer.UnpackTo( &zone ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( zone.id().value() );
+    SetUuidDirect( KIID( zone.id().value() ) );
     SetLayerSet( UnpackLayerSet( zone.layers() ) );
     SetAssignedPriority( zone.priority() );
     SetZoneName( wxString::FromUTF8( zone.name() ) );
@@ -665,6 +687,11 @@ const BOX2I ZONE::GetBoundingBox() const
 {
     if( const BOARD* board = GetBoard() )
     {
+        // Lock-free fast path, valid while the board timestamp matches what we cached for.
+        // Skips the caches mutex that otherwise serializes every fill worker.
+        if( m_bboxCacheTimeStamp.load( std::memory_order_acquire ) == board->GetTimeStamp() )
+            return m_bboxCache;
+
         std::unordered_map<const ZONE*, BOX2I>& cache = board->m_ZoneBBoxCache;
 
         {
@@ -692,9 +719,22 @@ const BOX2I ZONE::GetBoundingBox() const
 
 void ZONE::CacheBoundingBox()
 {
-    // GetBoundingBox() will cache it for us, and there's no sense duplicating the somewhat tricky
-    // locking code.
-    GetBoundingBox();
+    const BOARD* board = GetBoard();
+    BOX2I        bbox = m_Poly->BBox();
+
+    if( board )
+    {
+        // Board cache, for callers that read it directly.
+        {
+            std::unique_lock<std::shared_mutex> writeLock( board->m_CachesMutex );
+            board->m_ZoneBBoxCache[this] = bbox;
+        }
+
+        // Per-zone lock-free copy.  Single-threaded per zone, so box-before-timestamp (release)
+        // suffices for the acquiring reader in GetBoundingBox().
+        m_bboxCache = bbox;
+        m_bboxCacheTimeStamp.store( board->GetTimeStamp(), std::memory_order_release );
+    }
 }
 
 
@@ -1069,6 +1109,10 @@ void ZONE::Move( const VECTOR2I& offset )
         if( it != GetBoard()->m_ZoneBBoxCache.end() )
             it->second.Move( offset );
     }
+
+    // Move doesn't bump the board timestamp, so invalidate the lock-free copy rather than race
+    // readers by mutating it.  GetBoundingBox() falls back to the board cache (moved above).
+    m_bboxCacheTimeStamp.store( -1, std::memory_order_release );
 }
 
 

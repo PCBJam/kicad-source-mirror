@@ -714,9 +714,14 @@ public:
                                        } );
 
                 wxASSERT( p != m_items.end() );
+
+                // Keep the parent alive through the ItemDeleted notification; erasing it from
+                // m_items destroys the LIST_ITEM, after which parent would be dangling.
+                wxDataViewItem             grandParent( parent->Parent() );
+                std::unique_ptr<LIST_ITEM> removedParent = std::move( *p );
                 m_items.erase( p );
 
-                ItemDeleted( wxDataViewItem( parent->Parent() ), wxDataViewItem( parent ) );
+                ItemDeleted( grandParent, wxDataViewItem( removedParent.get() ) );
             }
         }
 
@@ -747,6 +752,8 @@ public:
 
     void deleteAllItems()
     {
+        // BeforeReset() drives the canceller, dropping any deferred EnsureVisible before the
+        // clear frees items it may point at.
         BeforeReset();
         m_items.clear();
         AfterReset();

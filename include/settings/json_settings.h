@@ -36,6 +36,7 @@
 class wxConfigBase;
 class NESTED_SETTINGS;
 class PARAM_BASE;
+class PROJECT;
 class SETTINGS_MANAGER;
 
 class wxAuiPaneInfo;
@@ -93,10 +94,24 @@ public:
     void SetLocation( SETTINGS_LOC aLocation ) { m_location = aLocation; }
     SETTINGS_LOC GetLocation() const { return m_location; }
 
+    /**
+     * Project-located settings override this to report the project they belong to so their
+     * save path is resolved against that project rather than the active one.
+     */
+    virtual const PROJECT* GetOwningProject() const { return nullptr; }
+
     void SetLegacyFilename( const wxString& aFilename ) { m_legacy_filename = aFilename; }
 
     bool IsReadOnly() const { return !m_writeFile; }
     void SetReadOnly( bool aReadOnly ) { m_writeFile = !aReadOnly; }
+
+    /**
+     * @return true if a param absent from the file is reset to its default on load, meaning an
+     *         absent key whose value equals the default is a faithful round-trip of the file.
+     *         When false (e.g. board design settings), an absent key preserves the loaded value,
+     *         so absent-and-default must still be treated as a change.
+     */
+    bool ResetsParamsIfMissing() const { return m_resetParamsIfMissing; }
 
     /**
      * Wrappers for the underlying JSON API so that most consumers don't need json.hpp

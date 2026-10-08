@@ -38,18 +38,20 @@
 #include <pcb_edit_frame.h>
 #include <board_design_settings.h>
 #include <3d_viewer/eda_3d_viewer_frame.h>
+#include <footprint_import_reconciler.h>
 #include <footprint_library_adapter.h>
+#include <import_proj_properties.h>
 #include <kiface_base.h>
 #include <macros.h>
 #include <trace_helpers.h>
 #include <length_delay_calculation/length_delay_calculation.h>
 #include <lockfile.h>
 #include <wx/snglinst.h>
-#include <netlist_reader/pcb_netlist.h>
 #include <pcbnew_id.h>
 #include <wildcards_and_files_ext.h>
 #include <tool/tool_manager.h>
 #include <board.h>
+#include <footprint.h>
 #include <collectors.h>
 #include <component_classes/component_class_manager.h>
 #include <kiplatform/app.h>
@@ -75,6 +77,7 @@
 #include <dialogs/dialog_import_choose_project.h>
 #include <tools/pcb_actions.h>
 #include <tools/board_editor_control.h>
+#include <tools/zone_filler_tool.h>
 #include <board_commit.h>
 #include <reporter.h>
 #include <zone_filler.h>
@@ -481,7 +484,6 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
     wxString   fullFileName( aFileSet[0] );
     wxFileName wx_filename( fullFileName );
-    Kiway().LocalHistory().Init( wx_filename.GetPath() );
     wxString   msg;
 
     if( Kiface().IsSingle() )
@@ -655,6 +657,9 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
         bool failedLoad = false;
 
+        // importer template footprints, captured at load for reconciliation
+        std::vector<std::unique_ptr<FOOTPRINT>> importedLibFootprints;
+
         try
         {
             if( pi == nullptr )
@@ -698,6 +703,20 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
             pi->SetProgressReporter( &progressReporter );
             loadedBoard = pi->LoadBoard( fullFileName, nullptr, &props, &Prj() );
+
+            // grab cached lib footprints while the plugin is alive, for reconciliation below
+            if( loadedBoard && ( aCtl & KICTL_IMPORT_LIB ) )
+            {
+                try
+                {
+                    for( FOOTPRINT* fp : pi->GetImportedCachedLibraryFootprints() )
+                        importedLibFootprints.emplace_back( fp );
+                }
+                catch( const IO_ERROR& )
+                {
+                    // no cached library, reconcile from placed only
+                }
+            }
 
 #if USE_INSTRUMENTATION
             int64_t stopTime = GetRunningMicroSecs();
@@ -842,95 +861,9 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                                     wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
         }
 
-        // TODO(JE) library tables -- I think this functionality should be deleted
-#if 0
-
-        // Import footprints into a project-specific library
-        //==================================================
-        // TODO: This should be refactored out of here into somewhere specific to the Project Import
-        // E.g. KICAD_MANAGER_FRAME::ImportNonKiCadProject
+        // extract a project fp library and re-link board FPIDs so update-from-schematic works
         if( aCtl & KICTL_IMPORT_LIB )
-        {
-            wxFileName loadedBoardFn( fullFileName );
-            wxString   libNickName = loadedBoardFn.GetName();
-
-            // Extract a footprint library from the design and add it to the fp-lib-table
-            // The footprints are saved in a new .pretty library.
-            // If this library already exists, all previous footprints will be deleted
-            std::vector<FOOTPRINT*> loadedFootprints = pi->GetImportedCachedLibraryFootprints();
-            wxString                newLibPath = CreateNewProjectLibrary( _( "New Footprint Library" ),
-                                                                          libNickName );
-
-            // Only create the new library if CreateNewLibrary succeeded (note that this fails if
-            // the library already exists and the user aborts after seeing the warning message
-            // which prompts the user to continue with overwrite or abort)
-            if( newLibPath.Length() > 0 )
-            {
-                IO_RELEASER<PCB_IO> piSexpr( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
-
-                for( FOOTPRINT* footprint : loadedFootprints )
-                {
-                    try
-                    {
-                        if( !footprint->GetFPID().GetLibItemName().empty() ) // Handle old boards.
-                        {
-                            footprint->SetReference( "REF**" );
-                            piSexpr->FootprintSave( newLibPath, footprint );
-                            delete footprint;
-                        }
-                    }
-                    catch( const IO_ERROR& ioe )
-                    {
-                        wxLogError( _( "Error saving footprint %s to project specific library." )
-                                    + wxS( "\n%s" ),
-                                    footprint->GetFPID().GetUniStringLibItemName(),
-                                    ioe.What() );
-                    }
-                }
-
-                FP_LIB_TABLE*   prjlibtable = PROJECT_PCB::PcbFootprintLibs( &Prj() );
-                const wxString& project_env = PROJECT_VAR_NAME;
-                wxString        rel_path, env_path;
-
-                wxASSERT_MSG( wxGetEnv( project_env, &env_path ),
-                              wxT( "There is no project variable?" ) );
-
-                wxString result( newLibPath );
-
-                if( result.Replace( env_path, wxT( "$(" ) + project_env + wxT( ")" ) ) )
-                    rel_path = result;
-
-                FP_LIB_TABLE_ROW* row = new FP_LIB_TABLE_ROW( libNickName, rel_path,
-                                                              wxT( "KiCad" ), wxEmptyString );
-                prjlibtable->InsertRow( row );
-
-                wxString tblName = Prj().FootprintLibTblName();
-
-                try
-                {
-                    PROJECT_PCB::PcbFootprintLibs( &Prj() )->Save( tblName );
-                }
-                catch( const IO_ERROR& ioe )
-                {
-                    wxLogError( _( "Error saving project specific footprint library table." )
-                                + wxS( "\n%s" ),
-                                ioe.What() );
-                }
-
-                // Update footprint LIB_IDs to point to the just imported library
-                for( FOOTPRINT* footprint : GetBoard()->Footprints() )
-                {
-                    LIB_ID libId = footprint->GetFPID();
-
-                    if( libId.GetLibItemName().empty() )
-                        continue;
-
-                    libId.SetLibNickname( libNickName );
-                    footprint->SetFPID( libId );
-                }
-            }
-        }
-#endif
+            reconcileImportedFootprintLibraries( std::move( importedLibFootprints ), fullFileName );
     }
 
     {
@@ -1034,6 +967,14 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/pcbnew_embind.cpp): notifies the
+// web app after a successful save so it can persist the MEMFS bytes. Same pattern
+// as the kicadCollabOnModify hook.
+extern "C" void kicadCollabOnSave( const char* aPath );
+#endif
+
+
 bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
                                   bool aChangeProject )
 {
@@ -1094,7 +1035,6 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
         GetBoard()->SynchronizeNetsAndNetClasses( false );
     }
 
-    wxString   upperTxt;
     wxString   lowerTxt;
 
     // On Windows, ensure the target file is writeable by clearing problematic attributes like
@@ -1116,16 +1056,10 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
         return false;
     }
 
-    if( !Kiface().IsSingle() )
-    {
-        WX_STRING_REPORTER backupReporter;
+    WX_STRING_REPORTER backupReporter;
 
-        if( !GetSettingsManager()->TriggerBackupIfNeeded( backupReporter ) )
-        {
-            upperTxt = backupReporter.GetMessages();
-            SetStatusText( upperTxt, 1 );
-        }
-    }
+    if( !Kiface().IsSingle() )
+        GetSettingsManager()->TriggerBackupIfNeeded( backupReporter );
 
     GetBoard()->SetFileName( pcbFileName.GetFullPath() );
 
@@ -1146,6 +1080,12 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     if( m_infoBar->IsShownOnScreen() && m_infoBar->HasCloseButton() )
         m_infoBar->Dismiss();
+
+    if( backupReporter.HasMessage() )
+    {
+        wxString backupMsg = backupReporter.GetMessages();
+        m_infoBar->ShowMessageFor( backupMsg.Trim(), 10000, wxICON_WARNING );
+    }
 
     GetScreen()->SetContentModified( false );
     UpdateTitle();
@@ -1170,6 +1110,17 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     m_autoSavePending = false;
     m_autoSaveRequired = false;
+
+#ifdef __EMSCRIPTEN__
+    kicadCollabOnSave( pcbFileName.GetFullPath().utf8_str() );
+
+    // The project settings (netclasses, DRC exclusions, board setup) were written
+    // above when the project file exists — route that file through the save hook
+    // too, or it stays MEMFS-only and is lost on reload (project-sync 0001).
+    if( projectFile.FileExists() )
+        kicadCollabOnSave( projectFile.GetFullPath().utf8_str() );
+#endif
+
     return true;
 }
 
@@ -1258,17 +1209,56 @@ bool PCB_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
     case PCB_IO_MGR::EASYEDA:
     case PCB_IO_MGR::EASYEDAPRO:
     case PCB_IO_MGR::GEDA_PCB:
-        return OpenProjectFiles( std::vector<wxString>( 1, aFileName ), KICTL_NONKICAD_ONLY | KICTL_IMPORT_LIB );
-
     case PCB_IO_MGR::ALTIUM_DESIGNER:
     case PCB_IO_MGR::ALTIUM_CIRCUIT_MAKER:
     case PCB_IO_MGR::ALTIUM_CIRCUIT_STUDIO:
+        return OpenProjectFiles( std::vector<wxString>( 1, aFileName ), KICTL_NONKICAD_ONLY | KICTL_IMPORT_LIB );
+
     case PCB_IO_MGR::SOLIDWORKS_PCB:
     case PCB_IO_MGR::PADS:
         return OpenProjectFiles( std::vector<wxString>( 1, aFileName ), KICTL_NONKICAD_ONLY );
 
     default:
         return false;
+    }
+}
+
+
+void PCB_EDIT_FRAME::reconcileImportedFootprintLibraries(
+        std::vector<std::unique_ptr<FOOTPRINT>> aDefinitions, const wxString& aBoardPath )
+{
+    FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &Prj() );
+
+    if( !adapter )
+        return;
+
+    // manager pre-commits the cache nickname + source libs; standalone import derives from filename
+    wxString              cacheNick;
+    std::vector<wxString> sourceLibs;
+    IMPORT_PROJ_PROPS::ReadFootprintProps( m_importProperties, cacheNick, sourceLibs );
+
+    if( cacheNick.IsEmpty() )
+        cacheNick = IMPORT_PROJ_PROPS::MakeCacheNickname( wxFileName( aBoardPath ).GetName() );
+
+    WX_STRING_REPORTER          reporter;
+    FOOTPRINT_IMPORT_RECONCILER reconciler( *adapter, Prj().GetProjectPath(), &reporter );
+
+    // reconciliation failure must not abort the import
+    try
+    {
+        reconciler.Reconcile( GetBoard(), std::move( aDefinitions ), cacheNick, sourceLibs );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        reporter.Report( wxString::Format( _( "Could not reconcile imported footprint "
+                                              "libraries: %s" ), ioe.What() ),
+                         RPT_SEVERITY_ERROR );
+    }
+
+    if( reporter.HasMessage() )
+    {
+        if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
+            statusBar->AddWarningMessages( "load", reporter.GetMessages() );
     }
 }
 
@@ -1289,6 +1279,9 @@ int BOARD_EDITOR_CONTROL::GenerateODBPPFiles( const TOOL_EVENT& aEvent )
 
     if( dlg.ShowModal() != wxID_OK )
         return 0;
+
+    // Refill zones if they are out-of-date so the export matches the current layout.
+    m_toolMgr->GetTool<ZONE_FILLER_TOOL>()->CheckAllZones( m_frame );
 
     JOB_EXPORT_PCB_ODB job;
 

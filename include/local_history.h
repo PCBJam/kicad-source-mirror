@@ -25,9 +25,11 @@
 
 #include <kicommon.h>
 #include <io/kicad/kicad_io_utils.h>
+#include <settings/common_settings.h>
 
 #include <atomic>
 #include <future>
+#include <memory>
 #include <vector>
 #include <set>
 #include <map>
@@ -93,10 +95,16 @@ public:
      *  The callback receives the project path and should populate aFileData with
      *  serialized content or source paths for inclusion.
      *  @param aSaverObject Unique object pointer identifier for this saver (to prevent duplicate registration)
-     *  @param aSaver The saver callback function */
+     *  @param aSaver The saver callback function
+     *  @param aLifetime Optional liveness token owned by the serialized document.  When supplied,
+     *         an expired token makes the saver-runner skip and drop the saver instead of invoking a
+     *         callback that would dereference a freed document.  The autosave timer is shared across
+     *         editor frames, so a saver can outlive the document it captures unless its lifetime is
+     *         tracked here. */
     void RegisterSaver(
             const void* aSaverObject,
-            const std::function<void( const wxString&, std::vector<HISTORY_FILE_DATA>& )>& aSaver );
+            const std::function<void( const wxString&, std::vector<HISTORY_FILE_DATA>& )>& aSaver,
+            const std::weak_ptr<void>& aLifetime = {} );
 
     /** Unregister a previously registered saver callback.
      *  @param aSaverObject The object pointer that was used to register the saver */
@@ -137,6 +145,22 @@ public:
      */
     std::vector<std::pair<wxString, wxString>> FindStaleAutosaveFiles( const wxString&              aProjectPath,
                                                                        const std::vector<wxString>& aExtensions ) const;
+
+    /**
+     * Enumerate every (autosave, source) pair found under @p aAutosaveRoot for the project
+     * at @p aProjectPath, honoring @p aLocation for name resolution.  The walk terminates on
+     * symlink cycles and refuses to follow links out of @p aAutosaveRoot, so a project
+     * directory that contains a root-escape symlink (e.g. a Wine prefix's dosdevices/z: -> /)
+     * cannot send it walking the whole filesystem.  Exposed as a static entry point so the
+     * traversal can be exercised without the settings singleton.
+     *
+     * Each entry has:
+     *   first  - autosave file path
+     *   second - corresponding source path under the project directory
+     */
+    static std::vector<std::pair<wxString, wxString>>
+    CollectAutosaveFilePairs( const wxString& aAutosaveRoot, const wxString& aProjectPath,
+                              BACKUP_LOCATION aLocation );
 
     /**
      * Remove every autosave file under the project at @p aProjectPath regardless of
@@ -183,8 +207,11 @@ public:
     /** Return the current head commit hash. */
     wxString GetHeadHash( const wxString& aProjectPath );
 
-    /** Restore the project files to the state recorded by the given commit hash. */
-    bool RestoreCommit( const wxString& aProjectPath, const wxString& aHash, wxWindow* aParent = nullptr );
+    /** Restore the project files to the state recorded by the given commit hash.  When aConfirm
+     *  is true a yes/no prompt is shown before any file is overwritten, callers that have already
+     *  asked the user (the startup recovery prompt) pass false to avoid a double prompt. */
+    bool RestoreCommit( const wxString& aProjectPath, const wxString& aHash, wxWindow* aParent = nullptr,
+                        bool aConfirm = true );
 
     /** Show a dialog allowing the user to choose a snapshot to restore. */
     void ShowRestoreDialog( const wxString& aProjectPath, wxWindow* aParent );
@@ -201,9 +228,21 @@ private:
     bool commitInBackground( const wxString& aProjectPath, const wxString& aTitle,
                              const std::vector<HISTORY_FILE_DATA>& aFileData, bool aIsManualSave );
 
-    std::set<wxString> m_pendingFiles;
-    std::map<const void*,
-             std::function<void( const wxString&, std::vector<HISTORY_FILE_DATA>& )>> m_savers;
+    /** Drop tracked savers whose owning document has been freed, before any saver runs. */
+    void pruneExpiredSavers();
+
+    // A registered saver plus the optional liveness token of the document it serializes.  Tracking
+    // is opt-in because a live token at registration is what distinguishes a tracked saver from an
+    // untracked one (a default-constructed weak_ptr is indistinguishable from an expired one).
+    struct SAVER_ENTRY
+    {
+        std::function<void( const wxString&, std::vector<HISTORY_FILE_DATA>& )> saver;
+        std::weak_ptr<void>                                                     lifetime;
+        bool                                                                    tracked = false;
+    };
+
+    std::set<wxString>                 m_pendingFiles;
+    std::map<const void*, SAVER_ENTRY> m_savers;
 
     std::atomic<bool> m_saveInProgress{ false };
     std::future<bool> m_pendingFuture;

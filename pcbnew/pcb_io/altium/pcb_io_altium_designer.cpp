@@ -257,6 +257,7 @@ BOARD* PCB_IO_ALTIUM_DESIGNER::LoadBoard( const wxString& aFileName, BOARD* aApp
             { ALTIUM_PCB_DIR::REGIONS6, "Regions6" },
             { ALTIUM_PCB_DIR::RULES6, "Rules6" },
             { ALTIUM_PCB_DIR::SHAPEBASEDREGIONS6, "ShapeBasedRegions6" },
+            { ALTIUM_PCB_DIR::SMARTUNIONS, "SmartUnions" },
             { ALTIUM_PCB_DIR::TEXTS6, "Texts6" },
             { ALTIUM_PCB_DIR::TRACKS6, "Tracks6" },
             { ALTIUM_PCB_DIR::VIAS6, "Vias6" },
@@ -477,8 +478,9 @@ std::vector<FOOTPRINT*> PCB_IO_ALTIUM_DESIGNER::GetImportedCachedLibraryFootprin
 {
     std::vector<FOOTPRINT*> footprints;
 
+    // caller owns result, clone not alias
     for( FOOTPRINT* fp : m_board->Footprints() )
-        footprints.push_back( fp );
+        footprints.push_back( static_cast<FOOTPRINT*>( fp->Clone() ) );
 
     return footprints;
 }

@@ -746,95 +746,53 @@ int BOARD_EDITOR_CONTROL::RepairBoard( const TOOL_EVENT& aEvent )
     wxString details;
     bool     quiet = aEvent.Parameter<bool>();
 
-    // Repair duplicate IDs and missing nets.
-    std::set<KIID> ids;
-    int            duplicates = 0;
-
-    auto processItem =
-            [&]( EDA_ITEM* aItem )
-            {
-                if( ids.count( aItem->m_Uuid ) )
-                {
-                    duplicates++;
-                    const_cast<KIID&>( aItem->m_Uuid ) = KIID();
-                }
-
-                ids.insert( aItem->m_Uuid );
-
-                BOARD_CONNECTED_ITEM* cItem = dynamic_cast<BOARD_CONNECTED_ITEM*>( aItem );
-
-                if( cItem && cItem->GetNetCode() )
-                {
-                    NETINFO_ITEM* netinfo = cItem->GetNet();
-
-                    if( netinfo && !board()->FindNet( netinfo->GetNetname() ) )
-                    {
-                        board()->Add( netinfo );
-
-                        details += wxString::Format( _( "Orphaned net %s re-parented.\n" ),
-                                                     netinfo->GetNetname() );
-                        errors++;
-                    }
-                }
-            };
-
-    // Footprint IDs are the most important, so give them the first crack at "claiming" a
-    // particular KIID.
-
-    for( FOOTPRINT* footprint : board()->Footprints() )
-        processItem( footprint );
-
-    // After that the principal use is for DRC marker pointers, which are most likely to pads
-    // or tracks.
-
-    for( FOOTPRINT* footprint : board()->Footprints() )
-    {
-        for( PAD* pad : footprint->Pads() )
-            processItem( pad );
-    }
-
-    for( PCB_TRACK* track : board()->Tracks() )
-        processItem( track );
-
-    // From here out I don't think order matters much.
-
-    for( FOOTPRINT* footprint : board()->Footprints() )
-    {
-        processItem( &footprint->Reference() );
-        processItem( &footprint->Value() );
-
-        for( BOARD_ITEM* item : footprint->GraphicalItems() )
-            processItem( item );
-
-        for( ZONE* zone : footprint->Zones() )
-            processItem( zone );
-
-        for( PCB_GROUP* group : footprint->Groups() )
-            processItem( group );
-    }
-
-    // Everything owned by the board not handled above
-    for( BOARD_ITEM* item : board()->GetItemSet() )
-    {
-        // Top-level footprints and tracks were handled above.
-        switch( item->Type() )
-        {
-        case PCB_FOOTPRINT_T:
-        case PCB_TRACE_T:
-        case PCB_ARC_T:
-        case PCB_VIA_T:
-            break;
-
-        default:
-            processItem( item );
-            break;
-        }
-    }
+    int duplicates = board()->RepairDuplicateItemUuids();
 
     if( duplicates )
     {
         errors += duplicates;
         details += wxString::Format( _( "%d duplicate IDs replaced.\n" ), duplicates );
+    }
+
+    for( FOOTPRINT* footprint : board()->Footprints() )
+    {
+        for( PAD* pad : footprint->Pads() )
+        {
+            BOARD_CONNECTED_ITEM* cItem = pad;
+
+            if( cItem->GetNetCode() )
+            {
+                NETINFO_ITEM* netinfo = cItem->GetNet();
+
+                if( netinfo && !board()->FindNet( netinfo->GetNetname() ) )
+                {
+                    board()->Add( netinfo );
+
+                    details += wxString::Format( _( "Orphaned net %s re-parented.\n" ),
+                                                 netinfo->GetNetname() );
+                    errors++;
+                }
+            }
+        }
+    }
+
+    for( PCB_TRACK* track : board()->Tracks() )
+    {
+        BOARD_CONNECTED_ITEM* cItem = track;
+
+        if( cItem->GetNetCode() )
+        {
+            NETINFO_ITEM* netinfo = cItem->GetNet();
+
+            if( netinfo && !board()->FindNet( netinfo->GetNetname() ) )
+            {
+                board()->Add( netinfo );
+
+                details += wxString::Format( _( "Orphaned net %s re-parented.\n" ),
+                                             netinfo->GetNetname() );
+                errors++;
+            }
+        }
     }
 
     /*******************************
@@ -938,7 +896,17 @@ int BOARD_EDITOR_CONTROL::ShowEeschema( const TOOL_EVENT& aEvent )
         }
     }
 
+#ifdef __EMSCRIPTEN__
+    // The merged WASM editor registers the SCH kiface for project-sync, whose
+    // in-process eeschema player is deliberately kept HIDDEN (see
+    // TestStandalone) — routing the user-facing switch through it would show
+    // nothing. Every tool owns its own browser tab, so the switch must go
+    // through ExecuteFile, which the WASM port forwards to
+    // window.kicadWebOpenTool (a browser navigation).
     if( Kiface().IsSingle() )
+#else
+    if( Kiface().IsSingle() && !KIWAY::FaceRegistered( KIWAY::FACE_SCH ) )
+#endif
     {
         ExecuteFile( EESCHEMA_EXE, schematic.GetFullPath() );
     }
@@ -1647,6 +1615,16 @@ int BOARD_EDITOR_CONTROL::modifyLockSelected( MODIFY_MODE aMode )
             board_item->SetLocked( true );
         else
             board_item->SetLocked( false );
+
+        if( aMode == OFF && board_item->Type() == PCB_FOOTPRINT_T )
+        {
+            board_item->RunOnChildren(
+                    []( BOARD_ITEM* child )
+                    {
+                        child->SetLocked( false );
+                    },
+                    RECURSE_MODE::RECURSE );
+        }
     }
 
     if( !commit.Empty() )
@@ -1829,6 +1807,9 @@ int BOARD_EDITOR_CONTROL::ZoneDuplicate( const TOOL_EVENT& aEvent )
     newZone->ClearSelected();
     newZone->UnFill();
     zoneSettings.ExportSetting( *newZone );
+
+    if( !newZone->GetZoneName().IsEmpty() )
+        newZone->SetZoneName( board()->GetUniqueZoneName( newZone->GetZoneName() ) );
 
     // If the new zone is on the same layer(s) as the initial zone,
     // offset it a bit so it can more easily be picked.
@@ -2116,9 +2097,20 @@ int BOARD_EDITOR_CONTROL::CrossProbeToSch( const TOOL_EVENT& aEvent )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// pcbjam/wasm/cross_probe: an explicit probe may open the other editor's browser tab.
+void PcbjamCrossProbeExplicit( bool aExplicit );
+#endif
+
 int BOARD_EDITOR_CONTROL::ExplicitCrossProbeToSch( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    PcbjamCrossProbeExplicit( true );
+#endif
     doCrossProbePcbToSch( aEvent, true );
+#ifdef __EMSCRIPTEN__
+    PcbjamCrossProbeExplicit( false );
+#endif
     return 0;
 }
 
@@ -2159,6 +2151,9 @@ int BOARD_EDITOR_CONTROL::AssignNetclass( const TOOL_EVENT& aEvent )
 
                 sTool->FilterCollectorForLockedItems( aCollector );
             } );
+
+    if( selectionTool->ReportFilteredLockedItems() )
+        return 0;
 
     std::set<wxString> netNames;
     std::set<int>      netCodes;

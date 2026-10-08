@@ -28,6 +28,12 @@ elseif( KICAD_WX_PORT STREQUAL gtk )
     include_directories( SYSTEM ${GTK3_INCLUDE_DIRS} )
     link_directories( ${GTK3_LIBRARY_DIRS} )
     add_definitions( ${GTK3_CFLAGS_OTHER} )
+elseif( KICAD_WX_PORT STREQUAL wasm )
+    # WASM port - uses stub implementations from wasm layer
+    set( PLATFORM_SRCS
+        ${KICAD_WASM_LAYER}/kiplatform/ui.cpp
+        )
+    message( STATUS "Using WASM kiplatform stub implementation" )
 endif()
 
 
@@ -72,6 +78,19 @@ elseif( WIN32 )
         "imm32"
         "windowsapp"
         )
+elseif( EMSCRIPTEN )
+    # WebAssembly / Emscripten - use stub implementations
+    list( APPEND PLATFORM_SRCS
+        ${KICAD_WASM_LAYER}/kiplatform/app.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/drivers.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/environment.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/io.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/policy.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/secrets.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/sysinfo.cpp
+        ${KICAD_WASM_LAYER}/kiplatform/printing.cpp
+        )
+    message( STATUS "Using WASM kiplatform OS stubs" )
 elseif( UNIX )
     list( APPEND PLATFORM_SRCS
         os/unix/app.cpp

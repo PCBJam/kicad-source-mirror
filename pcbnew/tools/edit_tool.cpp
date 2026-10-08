@@ -48,6 +48,7 @@
 #include <drawing_sheet/ds_proxy_view_item.h>
 #include <kiway.h>
 #include <status_popup.h>
+#include <tool/action_manager.h>
 #include <tool/selection_conditions.h>
 #include <tool/tool_manager.h>
 #include <tools/pcb_actions.h>
@@ -127,6 +128,50 @@ static const std::vector<KICAD_T> baseConnectedTypes = { PCB_PAD_T, PCB_VIA_T, P
 static const std::vector<KICAD_T> connectedTypes = { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T, PCB_PAD_T, PCB_ZONE_T };
 
 static const std::vector<KICAD_T> routableTypes = { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T, PCB_PAD_T, PCB_FOOTPRINT_T };
+
+
+// Types with no Mirror() override, which would fall through to the warning-dialog
+// BOARD_ITEM::Mirror. Free pads are handled specially by the tool but not by PCB_GROUP::Mirror.
+static const std::vector<KICAD_T> nonMirrorableTypes = {
+    PCB_FOOTPRINT_T, PCB_PAD_T, PCB_TARGET_T, PCB_REFERENCE_IMAGE_T,
+};
+
+
+// A group is mirrorable only if none of its members hit BOARD_ITEM::Mirror.
+static bool groupMirrorable( const PCB_GROUP* aGroup )
+{
+    bool ok = true;
+
+    aGroup->RunOnChildren(
+            [&]( BOARD_ITEM* aChild )
+            {
+                if( aChild->IsType( nonMirrorableTypes ) )
+                    ok = false;
+            },
+            RECURSE_MODE::RECURSE );
+
+    return ok;
+}
+
+
+// True if at least one selected item can be mirrored. A group counts only if all its members can.
+static bool selectionMirrorable( const SELECTION& aSelection )
+{
+    for( EDA_ITEM* item : aSelection )
+    {
+        if( item->Type() == PCB_GROUP_T )
+        {
+            if( groupMirrorable( static_cast<PCB_GROUP*>( item ) ) )
+                return true;
+        }
+        else if( item->IsType( EDIT_TOOL::MirrorableItems ) )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 
 EDIT_TOOL::EDIT_TOOL() :
@@ -510,6 +555,12 @@ bool EDIT_TOOL::Init()
     std::shared_ptr<ACTION_MENU> gateSwapSubMenu = makeGateSwapMenu( this );
     m_selectionTool->GetToolMenu().RegisterSubMenu( gateSwapSubMenu );
 
+    auto fpAttributesMenu = std::make_shared<CONDITIONAL_MENU>( this );
+    fpAttributesMenu->SetUntranslatedTitle( _HKI( "Attributes" ) );
+    fpAttributesMenu->AddCheckItem( PCB_ACTIONS::toggleExcludeFromBOM, SELECTION_CONDITIONS::ShowAlways );
+    fpAttributesMenu->AddCheckItem( PCB_ACTIONS::toggleExcludeFromPosFiles, SELECTION_CONDITIONS::ShowAlways );
+    m_selectionTool->GetToolMenu().RegisterSubMenu( fpAttributesMenu );
+
     auto positioningToolsCondition = [this]( const SELECTION& aSel )
     {
         std::shared_ptr<CONDITIONAL_MENU> subMenu = makePositioningToolsMenu( this );
@@ -598,14 +649,9 @@ bool EDIT_TOOL::Init()
     auto canMirror = [this]( const SELECTION& aSelection )
     {
         if( !m_isFootprintEditor && SELECTION_CONDITIONS::OnlyTypes( padTypes )( aSelection ) )
-        {
             return false;
-        }
 
-        if( SELECTION_CONDITIONS::HasTypes( groupTypes )( aSelection ) )
-            return true;
-
-        return SELECTION_CONDITIONS::HasTypes( EDIT_TOOL::MirrorableItems )( aSelection );
+        return selectionMirrorable( aSelection );
     };
 
     auto singleFootprintCondition =
@@ -627,6 +673,50 @@ bool EDIT_TOOL::Init()
         }
 
         return false;
+    };
+
+    auto excludeFromBOMCond = [this]( const SELECTION& aSel )
+    {
+        wxString variantName;
+        int      checked = 0, unchecked = 0;
+
+        if( BOARD* board = frame()->GetBoard() )
+            variantName = board->GetCurrentVariant();
+
+        for( const EDA_ITEM* item : aSel )
+        {
+            if( item->Type() == PCB_FOOTPRINT_T )
+            {
+                if( static_cast<const FOOTPRINT*>( item )->GetExcludedFromBOMForVariant( variantName ) )
+                    checked++;
+                else
+                    unchecked++;
+            }
+        }
+
+        return checked > 0 && unchecked == 0;
+    };
+
+    auto excludeFromPosFilesCond = [this]( const SELECTION& aSel )
+    {
+        wxString variantName;
+        int      checked = 0, unchecked = 0;
+
+        if( BOARD* board = frame()->GetBoard() )
+            variantName = board->GetCurrentVariant();
+
+        for( const EDA_ITEM* item : aSel )
+        {
+            if( item->Type() == PCB_FOOTPRINT_T )
+            {
+                if( static_cast<const FOOTPRINT*>( item )->GetExcludedFromPosFilesForVariant( variantName ) )
+                    checked++;
+                else
+                    unchecked++;
+            }
+        }
+
+        return checked > 0 && unchecked == 0;
     };
 
     auto noActiveToolCondition = [this]( const SELECTION& aSelection )
@@ -716,6 +806,7 @@ bool EDIT_TOOL::Init()
     menu.AddItem( PCB_ACTIONS::updateFootprints,  multipleFootprintsCondition );
     menu.AddItem( PCB_ACTIONS::changeFootprint,   singleFootprintCondition );
     menu.AddItem( PCB_ACTIONS::changeFootprints,  multipleFootprintsCondition );
+    menu.AddMenu( fpAttributesMenu.get(),         singleFootprintCondition || multipleFootprintsCondition );
 
     // Add the submenu for the special tools: modfiers and positioning tools
     menu.AddSeparator( 100 );
@@ -739,6 +830,10 @@ bool EDIT_TOOL::Init()
     menu.AddItem( ACTIONS::selectAll,             noItemsCondition, 150 );
     menu.AddItem( ACTIONS::unselectAll,           noItemsCondition, 150 );
     // clang-format on
+
+    ACTION_MANAGER* mgr = m_toolMgr->GetActionManager();
+    mgr->SetConditions( PCB_ACTIONS::toggleExcludeFromBOM, ACTION_CONDITIONS().Check( excludeFromBOMCond ) );
+    mgr->SetConditions( PCB_ACTIONS::toggleExcludeFromPosFiles, ACTION_CONDITIONS().Check( excludeFromPosFilesCond ) );
 
     return true;
 }
@@ -963,359 +1058,76 @@ int EDIT_TOOL::Drag( const TOOL_EVENT& aEvent )
     if( selection.Empty() )
         return 0;
 
-    if( selection.Size() == 1 && selection.Front()->Type() == PCB_ARC_T )
-    {
-        // TODO: This really should be done in PNS to ensure DRC is maintained, but for now
-        // it allows interactive editing of an arc track
-        return DragArcTrack( aEvent );
-    }
-    else
-    {
-        invokeInlineRouter( mode );
-    }
+    invokeInlineRouter( mode );
 
     return 0;
 }
 
 
-int EDIT_TOOL::DragArcTrack( const TOOL_EVENT& aEvent )
+int EDIT_TOOL::ToggleFootprintAttribute( const TOOL_EVENT& aEvent )
 {
-    PCB_SELECTION& selection = m_selectionTool->GetSelection();
+    const PCB_SELECTION& selection = m_selectionTool->RequestSelection( EDIT_TOOL::FootprintFilter );
 
-    if( selection.Size() != 1 || selection.Front()->Type() != PCB_ARC_T )
+    if( selection.Empty() )
         return 0;
 
-    PCB_ARC*  theArc = static_cast<PCB_ARC*>( selection.Front() );
-    EDA_ANGLE maxTangentDeviation( ADVANCED_CFG::GetCfg().m_MaxTangentAngleDeviation, DEGREES_T );
+    wxString variantName;
 
-    if( theArc->GetAngle() + maxTangentDeviation >= ANGLE_180 )
+    if( BOARD* board = frame()->GetBoard() )
+        variantName = board->GetCurrentVariant();
+
+    bool new_state = false;
+
+    for( const EDA_ITEM* item : selection )
     {
-        wxString msg = wxString::Format( _( "Unable to resize arc tracks of %s or greater." ),
-                                         EDA_UNIT_UTILS::UI::MessageTextFromValue( ANGLE_180 - maxTangentDeviation ) );
-        frame()->ShowInfoBarError( msg );
+        const FOOTPRINT* fp = static_cast<const FOOTPRINT*>( item );
 
-        return 0; // don't bother with > 180 degree arcs
+        if( ( aEvent.IsAction( &PCB_ACTIONS::toggleExcludeFromBOM )
+              && !fp->GetExcludedFromBOMForVariant( variantName ) )
+            || ( aEvent.IsAction( &PCB_ACTIONS::toggleExcludeFromPosFiles )
+                 && !fp->GetExcludedFromPosFilesForVariant( variantName ) ) )
+        {
+            new_state = true;
+            break;
+        }
     }
-
-    KIGFX::VIEW_CONTROLS* controls = getViewControls();
-
-    Activate();
-    // Must be done after Activate() so that it gets set into the correct context
-    controls->ShowCursor( true );
-    controls->SetAutoPan( true );
 
     BOARD_COMMIT commit( this );
-    bool         restore_state = false;
 
-    commit.Modify( theArc );
-
-    VECTOR2I arcCenter = theArc->GetCenter();
-    SEG      tanStart = SEG( arcCenter, theArc->GetStart() ).PerpendicularSeg( theArc->GetStart() );
-    SEG      tanEnd = SEG( arcCenter, theArc->GetEnd() ).PerpendicularSeg( theArc->GetEnd() );
-
-    //Ensure the tangent segments are in the correct orientation
-    OPT_VECTOR2I tanIntersect = tanStart.IntersectLines( tanEnd );
-
-    if( !tanIntersect )
-        return 0;
-
-    tanStart.A = *tanIntersect;
-    tanStart.B = theArc->GetStart();
-    tanEnd.A = *tanIntersect;
-    tanEnd.B = theArc->GetEnd();
-
-    std::set<PCB_TRACK*> addedTracks;
-
-    auto getUniqueTrackAtAnchorCollinear = [&]( const VECTOR2I& aAnchor, const SEG& aCollinearSeg ) -> PCB_TRACK*
+    for( EDA_ITEM* item : selection )
     {
-        std::shared_ptr<CONNECTIVITY_DATA> conn = board()->GetConnectivity();
+        FOOTPRINT* fp = static_cast<FOOTPRINT*>( item );
+        commit.Modify( fp );
 
-        // Allow items at a distance within the width of the arc track
-        int allowedDeviation = theArc->GetWidth();
-
-        std::vector<BOARD_CONNECTED_ITEM*> itemsOnAnchor;
-
-        for( int i = 0; i < 3; i++ )
+        if( !variantName.IsEmpty() )
         {
-            itemsOnAnchor = conn->GetConnectedItemsAtAnchor( theArc, aAnchor, baseConnectedTypes, allowedDeviation );
-            allowedDeviation /= 2;
+            FOOTPRINT_VARIANT* variant = fp->GetVariant( variantName );
 
-            if( itemsOnAnchor.size() == 1 )
-                break;
-        }
+            if( !variant )
+                variant = fp->AddVariant( variantName );
 
-        PCB_TRACK* track = nullptr;
-
-        if( itemsOnAnchor.size() == 1 && itemsOnAnchor.front()->Type() == PCB_TRACE_T )
-        {
-            track = static_cast<PCB_TRACK*>( itemsOnAnchor.front() );
-            commit.Modify( track );
-
-            SEG trackSeg( track->GetStart(), track->GetEnd() );
-
-            // Allow deviations in colinearity as defined in ADVANCED_CFG
-            if( trackSeg.Angle( aCollinearSeg ) > maxTangentDeviation )
-                track = nullptr;
-        }
-
-        if( !track )
-        {
-            track = new PCB_TRACK( theArc->GetParent() );
-            track->SetStart( aAnchor );
-            track->SetEnd( aAnchor );
-            track->SetNet( theArc->GetNet() );
-            track->SetLayer( theArc->GetLayer() );
-            track->SetWidth( theArc->GetWidth() );
-            track->SetLocked( theArc->IsLocked() );
-            track->SetHasSolderMask( theArc->HasSolderMask() );
-            track->SetLocalSolderMaskMargin( theArc->GetLocalSolderMaskMargin() );
-            track->SetFlags( IS_NEW );
-            getView()->Add( track );
-            addedTracks.insert( track );
-        }
-
-        return track;
-    };
-
-    PCB_TRACK* trackOnStart = getUniqueTrackAtAnchorCollinear( theArc->GetStart(), tanStart );
-    PCB_TRACK* trackOnEnd = getUniqueTrackAtAnchorCollinear( theArc->GetEnd(), tanEnd );
-
-    if( trackOnStart->GetLength() != 0 )
-    {
-        tanStart.A = trackOnStart->GetStart();
-        tanStart.B = trackOnStart->GetEnd();
-    }
-
-    if( trackOnEnd->GetLength() != 0 )
-    {
-        tanEnd.A = trackOnEnd->GetStart();
-        tanEnd.B = trackOnEnd->GetEnd();
-    }
-
-    // Recalculate intersection point
-    if( tanIntersect = tanStart.IntersectLines( tanEnd ); !tanIntersect )
-        return 0;
-
-    auto isTrackStartClosestToArcStart = [&]( PCB_TRACK* aTrack ) -> bool
-    {
-        double trackStartToArcStart = aTrack->GetStart().Distance( theArc->GetStart() );
-        double trackEndToArcStart = aTrack->GetEnd().Distance( theArc->GetStart() );
-
-        return trackStartToArcStart < trackEndToArcStart;
-    };
-
-    bool isStartTrackOnStartPt = isTrackStartClosestToArcStart( trackOnStart );
-    bool isEndTrackOnStartPt = isTrackStartClosestToArcStart( trackOnEnd );
-
-    // Calculate constraints
-    //======================
-    // maxTanCircle is the circle with maximum radius that is tangent to the two adjacent straight
-    // tracks and whose tangent points are constrained within the original tracks and their
-    // projected intersection points.
-    //
-    // The cursor will be constrained first within the isosceles triangle formed by the segments
-    // cSegTanStart, cSegTanEnd and cSegChord. After that it will be constrained to be outside
-    // maxTanCircle.
-    //
-    //
-    //                   ____________  <-cSegTanStart
-    //                  /     *   . '   *
-    //    cSegTanEnd-> /  *   . '           *
-    //                /*  . ' <-cSegChord     *
-    //               /. '
-    //              /*                           *
-    //
-    //              *             c               *  <-maxTanCircle
-    //
-    //               *                           *
-    //
-    //                  *                     *
-    //                    *                 *
-    //                        *        *
-    //
-
-    auto getFurthestPointToTanInterstect = [&]( VECTOR2I& aPointA, VECTOR2I& aPointB ) -> VECTOR2I
-    {
-        if( ( aPointA - *tanIntersect ).EuclideanNorm() > ( aPointB - *tanIntersect ).EuclideanNorm() )
-        {
-            return aPointA;
-        }
-        else
-        {
-            return aPointB;
-        }
-    };
-
-    CIRCLE   maxTanCircle;
-    VECTOR2I tanStartPoint = getFurthestPointToTanInterstect( tanStart.A, tanStart.B );
-    VECTOR2I tanEndPoint = getFurthestPointToTanInterstect( tanEnd.A, tanEnd.B );
-    VECTOR2I tempTangentPoint = tanEndPoint;
-
-    if( getFurthestPointToTanInterstect( tanStartPoint, tanEndPoint ) == tanEndPoint )
-        tempTangentPoint = tanStartPoint;
-
-    maxTanCircle.ConstructFromTanTanPt( tanStart, tanEnd, tempTangentPoint );
-    VECTOR2I maxTanPtStart = tanStart.LineProject( maxTanCircle.Center );
-    VECTOR2I maxTanPtEnd = tanEnd.LineProject( maxTanCircle.Center );
-
-    SEG cSegTanStart( maxTanPtStart, *tanIntersect );
-    SEG cSegTanEnd( maxTanPtEnd, *tanIntersect );
-    SEG cSegChord( maxTanPtStart, maxTanPtEnd );
-
-    int cSegTanStartSide = cSegTanStart.Side( theArc->GetMid() );
-    int cSegTanEndSide = cSegTanEnd.Side( theArc->GetMid() );
-    int cSegChordSide = cSegChord.Side( theArc->GetMid() );
-
-    bool eatFirstMouseUp = true;
-
-    // Start the tool loop
-    while( TOOL_EVENT* evt = Wait() )
-    {
-        m_cursor = controls->GetMousePosition();
-
-        // Constrain cursor within the isosceles triangle
-        if( cSegTanStartSide != cSegTanStart.Side( m_cursor ) || cSegTanEndSide != cSegTanEnd.Side( m_cursor )
-            || cSegChordSide != cSegChord.Side( m_cursor ) )
-        {
-            std::vector<VECTOR2I> possiblePoints;
-
-            possiblePoints.push_back( cSegTanEnd.NearestPoint( m_cursor ) );
-            possiblePoints.push_back( cSegChord.NearestPoint( m_cursor ) );
-
-            VECTOR2I closest = cSegTanStart.NearestPoint( m_cursor );
-
-            for( const VECTOR2I& candidate : possiblePoints )
+            if( variant )
             {
-                if( ( candidate - m_cursor ).SquaredEuclideanNorm() < ( closest - m_cursor ).SquaredEuclideanNorm() )
-                {
-                    closest = candidate;
-                }
-            }
+                if( aEvent.IsAction( &PCB_ACTIONS::toggleExcludeFromBOM ) )
+                    variant->SetExcludedFromBOM( new_state );
+                else if( aEvent.IsAction( &PCB_ACTIONS::toggleExcludeFromPosFiles ) )
+                    variant->SetExcludedFromPosFiles( new_state );
 
-            m_cursor = closest;
-        }
-
-        // Constrain cursor to be outside maxTanCircle
-        if( ( m_cursor - maxTanCircle.Center ).EuclideanNorm() < maxTanCircle.Radius )
-            m_cursor = maxTanCircle.NearestPoint( m_cursor );
-
-        controls->ForceCursorPosition( true, m_cursor );
-
-        // Calculate resulting object coordinates
-        CIRCLE circlehelper;
-        circlehelper.ConstructFromTanTanPt( cSegTanStart, cSegTanEnd, m_cursor );
-
-        VECTOR2I newCenter = circlehelper.Center;
-        VECTOR2I newStart = cSegTanStart.LineProject( newCenter );
-        VECTOR2I newEnd = cSegTanEnd.LineProject( newCenter );
-        VECTOR2I newMid = CalcArcMid( newStart, newEnd, newCenter );
-
-        // Update objects
-        theArc->SetStart( newStart );
-        theArc->SetEnd( newEnd );
-        theArc->SetMid( newMid );
-
-        if( isStartTrackOnStartPt )
-            trackOnStart->SetStart( newStart );
-        else
-            trackOnStart->SetEnd( newStart );
-
-        if( isEndTrackOnStartPt )
-            trackOnEnd->SetStart( newEnd );
-        else
-            trackOnEnd->SetEnd( newEnd );
-
-        // Update view
-        getView()->Update( trackOnStart );
-        getView()->Update( trackOnEnd );
-        getView()->Update( theArc );
-
-        // Handle events
-        if( evt->IsMotion() || evt->IsDrag( BUT_LEFT ) )
-        {
-            eatFirstMouseUp = false;
-        }
-        else if( evt->IsCancelInteractive() || evt->IsActivate() )
-        {
-            restore_state = true; // Canceling the tool means that items have to be restored
-            break;                // Finish
-        }
-        else if( evt->IsAction( &ACTIONS::undo ) )
-        {
-            restore_state = true; // Perform undo locally
-            break;                // Finish
-        }
-        else if( evt->IsMouseUp( BUT_LEFT ) || evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT ) )
-        {
-            // Eat mouse-up/-click events that leaked through from the lock dialog
-            if( eatFirstMouseUp && !evt->IsAction( &ACTIONS::cursorClick ) )
-            {
-                eatFirstMouseUp = false;
                 continue;
             }
-
-            break; // Finish
         }
+
+        if( aEvent.IsAction( &PCB_ACTIONS::toggleExcludeFromBOM ) )
+            fp->SetExcludedFromBOM( new_state );
+        else if( aEvent.IsAction( &PCB_ACTIONS::toggleExcludeFromPosFiles ) )
+            fp->SetExcludedFromPosFiles( new_state );
     }
 
-    // Amend the end points of the arc if we delete the joining tracks
-    VECTOR2I newStart = trackOnStart->GetStart();
-    VECTOR2I newEnd = trackOnEnd->GetStart();
+    if( !commit.Empty() )
+        commit.Push( _( "Toggle Attribute" ) );
 
-    if( isStartTrackOnStartPt )
-        newStart = trackOnStart->GetEnd();
-
-    if( isEndTrackOnStartPt )
-        newEnd = trackOnEnd->GetEnd();
-
-    int maxLengthIU = KiROUND( ADVANCED_CFG::GetCfg().m_MaxTrackLengthToKeep * pcbIUScale.IU_PER_MM );
-
-    if( trackOnStart->GetLength() <= maxLengthIU )
-    {
-        if( addedTracks.count( trackOnStart ) )
-        {
-            getView()->Remove( trackOnStart );
-            addedTracks.erase( trackOnStart );
-            delete trackOnStart;
-        }
-        else
-        {
-            commit.Remove( trackOnStart );
-        }
-
-        theArc->SetStart( newStart );
-    }
-
-    if( trackOnEnd->GetLength() <= maxLengthIU )
-    {
-        if( addedTracks.count( trackOnEnd ) )
-        {
-            getView()->Remove( trackOnEnd );
-            addedTracks.erase( trackOnEnd );
-            delete trackOnEnd;
-        }
-        else
-        {
-            commit.Remove( trackOnEnd );
-        }
-
-        theArc->SetEnd( newEnd );
-    }
-
-    if( theArc->GetLength() <= 0 )
-        commit.Remove( theArc );
-
-    for( PCB_TRACK* added : addedTracks )
-    {
-        getView()->Remove( added );
-        commit.Add( added );
-    }
-
-    // Should we commit?
-    if( restore_state )
-        commit.Revert();
-    else
-        commit.Push( _( "Drag Arc Track" ) );
+    if( selection.IsHover() )
+        m_toolMgr->RunAction( ACTIONS::selectionClear );
 
     return 0;
 }
@@ -1483,7 +1295,8 @@ int EDIT_TOOL::FilletTracks( const TOOL_EVENT& aEvent )
                 sTool->FilterCollectorForLockedItems( aCollector );
             } );
 
-    m_selectionTool->ReportFilteredLockedItems();
+    if( m_selectionTool->ReportFilteredLockedItems() )
+        return 0;
 
     if( selection.Size() < 2 )
     {
@@ -2642,6 +2455,7 @@ int EDIT_TOOL::Mirror( const TOOL_EVENT& aEvent )
                                                                             : FLIP_DIRECTION::LEFT_RIGHT;
 
     int skippedFootprints = 0;
+    int skippedGroups = 0;
 
     for( EDA_ITEM* item : selection )
     {
@@ -2650,6 +2464,13 @@ int EDIT_TOOL::Mirror( const TOOL_EVENT& aEvent )
             if( item->Type() == PCB_FOOTPRINT_T )
                 skippedFootprints++;
 
+            continue;
+        }
+
+        // Skip groups that hold non-mirrorable items, else the rest would tear away from them.
+        if( item->Type() == PCB_GROUP_T && !groupMirrorable( static_cast<PCB_GROUP*>( item ) ) )
+        {
+            skippedGroups++;
             continue;
         }
 
@@ -2714,6 +2535,11 @@ int EDIT_TOOL::Mirror( const TOOL_EVENT& aEvent )
     {
         frame()->ShowInfoBarMsg( _( "Footprints cannot be mirrored. Use Flip to move them to "
                                     "the other side of the board." ) );
+    }
+    else if( skippedGroups > 0 && !m_dragging )
+    {
+        frame()->ShowInfoBarMsg( _( "Groups containing footprints or other items that cannot be "
+                                    "mirrored were skipped." ) );
     }
 
     if( selection.IsHover() && !m_dragging )
@@ -3911,8 +3737,10 @@ void EDIT_TOOL::setTransitions()
     Go( &EDIT_TOOL::Swap,                  PCB_ACTIONS::swap.MakeEvent() );
     Go( &EDIT_TOOL::SwapPadNets,           PCB_ACTIONS::swapPadNets.MakeEvent() );
     Go( &EDIT_TOOL::SwapGateNets,          PCB_ACTIONS::swapGateNets.MakeEvent() );
-    Go( &EDIT_TOOL::PackAndMoveFootprints, PCB_ACTIONS::packAndMoveFootprints.MakeEvent() );
-    Go( &EDIT_TOOL::ChangeTrackWidth,      PCB_ACTIONS::changeTrackWidth.MakeEvent() );
+    Go( &EDIT_TOOL::PackAndMoveFootprints,    PCB_ACTIONS::packAndMoveFootprints.MakeEvent() );
+    Go( &EDIT_TOOL::ToggleFootprintAttribute, PCB_ACTIONS::toggleExcludeFromBOM.MakeEvent() );
+    Go( &EDIT_TOOL::ToggleFootprintAttribute, PCB_ACTIONS::toggleExcludeFromPosFiles.MakeEvent() );
+    Go( &EDIT_TOOL::ChangeTrackWidth,         PCB_ACTIONS::changeTrackWidth.MakeEvent() );
     Go( &EDIT_TOOL::ChangeTrackLayer,      PCB_ACTIONS::changeTrackLayerNext.MakeEvent() );
     Go( &EDIT_TOOL::ChangeTrackLayer,      PCB_ACTIONS::changeTrackLayerPrev.MakeEvent() );
     Go( &EDIT_TOOL::FilletTracks,          PCB_ACTIONS::filletTracks.MakeEvent() );

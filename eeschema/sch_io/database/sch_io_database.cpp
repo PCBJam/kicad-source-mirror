@@ -19,6 +19,7 @@
  */
 
 #include <iostream>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <wx/datetime.h>
@@ -31,6 +32,7 @@
 #include <database/database_connection.h>
 #include <database/database_lib_settings.h>
 #include <fmt.h>
+#include <hash.h>
 #include <ki_exception.h>
 #include <lib_symbol.h>
 
@@ -46,7 +48,8 @@ SCH_IO_DATABASE::SCH_IO_DATABASE() :
         m_conn()
 {
     m_cacheTimestamp = 0;
-    m_cacheModifyHash = 0;
+    m_cachePopulated = false;
+    m_cacheSignature = 0;
 }
 
 
@@ -223,16 +226,39 @@ bool SCH_IO_DATABASE::TestConnection( wxString* aErrorMsg )
 
 void SCH_IO_DATABASE::cacheLib()
 {
+    // Guard against re-entrant cacheLib() calls. A self-referential symbol row (issue #24249)
+    // causes m_adapter->LoadSymbol to route back into SCH_IO_DATABASE::LoadSymbol, which would
+    // otherwise call cacheLib() again while it is in the middle of populating its caches.
+    if( m_inCacheLib )
+        return;
+
     long long currentTimestampSeconds = wxDateTime::Now().GetValue().GetValue() / 1000;
 
-    if( m_adapter->GetModifyHash() == m_cacheModifyHash
+    // The materialized LIB_SYMBOL cache is expensive to rebuild for large databases because every
+    // row is duplicated from its source library and has all of its fields processed. Re-check the
+    // database only after max_age has elapsed, and even then rebuild the symbols only if the
+    // underlying row data has actually changed. The global library modify hash must not gate this:
+    // the async library loader bumps it whenever any unrelated library finishes loading, which
+    // would otherwise freeze the symbol chooser for seconds at a time.
+    if( m_cachePopulated
         && ( currentTimestampSeconds - m_cacheTimestamp ) < m_settings->m_Cache.max_age )
     {
         return;
     }
 
-    std::map<wxString, std::unique_ptr<LIB_SYMBOL>> newSymbolCache;
-    std::map<wxString, std::pair<std::string, std::string>> newSanitizedNameMap;
+    m_inCacheLib = true;
+
+    struct CACHE_LIB_GUARD
+    {
+        bool* flag;
+        ~CACHE_LIB_GUARD() { *flag = false; }
+    } cacheLibGuard{ &m_inCacheLib };
+
+    // Re-query the database (the connection layer caches results subject to its own max_age) and
+    // compute a lightweight signature of the raw rows so we can skip the costly materialization
+    // when nothing relevant has changed.
+    std::vector<std::pair<const DATABASE_LIB_TABLE*, std::vector<DATABASE_CONNECTION::ROW>>> tableResults;
+    size_t signature = 0;
 
     for( const DATABASE_LIB_TABLE& table : m_settings->m_Tables )
     {
@@ -250,22 +276,73 @@ void SCH_IO_DATABASE::cacheLib()
             continue;
         }
 
-        for( DATABASE_CONNECTION::ROW& result : results )
+        hash_combine( signature, std::string_view( table.table ) );
+
+        for( const DATABASE_CONNECTION::ROW& result : results )
         {
-            if( !result.count( table.key_col ) )
+            for( const auto& [column, value] : result )
+            {
+                hash_combine( signature, std::string_view( column ) );
+
+                if( const std::string* str = std::any_cast<std::string>( &value ) )
+                    hash_combine( signature, std::string_view( *str ) );
+            }
+
+            // The materialized symbols are duplicated from their source libraries, so fold the
+            // modify hash of each referenced (and loaded) source library into the signature. This
+            // rebuilds the cache when a dependency actually changes - for example when an
+            // asynchronously loaded source library finishes loading and a previously empty
+            // placeholder can now be resolved - without being disturbed by unrelated libraries.
+            if( auto it = result.find( table.symbols_col ); it != result.end() )
+            {
+                if( const std::string* str = std::any_cast<std::string>( &it->second ) )
+                {
+                    LIB_ID symbolId;
+                    symbolId.Parse( *str );
+
+                    if( symbolId.IsValid() )
+                    {
+                        const UTF8& nickname = symbolId.GetLibNickname();
+                        hash_combine( signature, std::string_view( nickname.c_str() ) );
+
+                        if( std::optional<int> libHash = m_adapter->GetLibraryModifyHash( nickname ) )
+                            hash_combine( signature, *libHash );
+                    }
+                }
+            }
+        }
+
+        tableResults.emplace_back( &table, std::move( results ) );
+    }
+
+    if( m_cachePopulated && signature == m_cacheSignature )
+    {
+        // Data is unchanged; just reset the timer so we throttle the next re-check.
+        m_cacheTimestamp = currentTimestampSeconds;
+        return;
+    }
+
+    std::map<wxString, std::unique_ptr<LIB_SYMBOL>> newSymbolCache;
+    std::map<wxString, std::pair<std::string, std::string>> newSanitizedNameMap;
+
+    for( const auto& [table, results] : tableResults )
+    {
+        for( const DATABASE_CONNECTION::ROW& result : results )
+        {
+            if( !result.count( table->key_col ) )
                 continue;
 
-            std::string rawName = std::any_cast<std::string>( result[table.key_col] );
+            std::string rawName = std::any_cast<std::string>( result.at( table->key_col ) );
             UTF8        sanitizedName = LIB_ID::FixIllegalChars( rawName, false );
             std::string sanitizedKey = sanitizedName.c_str();
             std::string prefix =
-                    ( m_settings->m_GloballyUniqueKeys || table.name.empty() ) ? "" : fmt::format( "{}/", table.name );
+                    ( m_settings->m_GloballyUniqueKeys || table->name.empty() ) ? "" : fmt::format( "{}/", table->name );
             std::string sanitizedDisplayName = fmt::format( "{}{}", prefix, sanitizedKey );
             wxString    name( sanitizedDisplayName );
 
-            newSanitizedNameMap[name] = std::make_pair( table.name, rawName );
+            newSanitizedNameMap[name] = std::make_pair( table->name, rawName );
 
-            std::unique_ptr<LIB_SYMBOL> symbol = loadSymbolFromRow( name, table, result );
+            std::unique_ptr<LIB_SYMBOL> symbol = loadSymbolFromRow( name, *table, result );
 
             if( symbol )
                 newSymbolCache[symbol->GetName()] = std::move( symbol );
@@ -276,7 +353,8 @@ void SCH_IO_DATABASE::cacheLib()
     m_sanitizedNameMap = std::move( newSanitizedNameMap );
 
     m_cacheTimestamp = currentTimestampSeconds;
-    m_cacheModifyHash = m_adapter->GetModifyHash();
+    m_cacheSignature = signature;
+    m_cachePopulated = true;
 }
 
 void SCH_IO_DATABASE::ensureSettings( const wxString& aSettingsPath )
@@ -373,23 +451,23 @@ void SCH_IO_DATABASE::connect()
 
         for( const DATABASE_LIB_TABLE& tableIter : m_settings->m_Tables )
         {
-            std::set<std::string> columns;
-
-            columns.insert( boost::to_lower_copy( tableIter.key_col ) );
-            columns.insert( boost::to_lower_copy( tableIter.footprints_col ) );
-            columns.insert( boost::to_lower_copy( tableIter.symbols_col ) );
-
-            columns.insert( boost::to_lower_copy( tableIter.properties.description ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.footprint_filters ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.keywords ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.exclude_from_sim ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.exclude_from_bom ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.exclude_from_board ) );
+            // Trusted even if unreported by the driver, to support generated columns (#16952)
+            std::set<std::string> requiredColumns{ tableIter.key_col,
+                                                   tableIter.footprints_col,
+                                                   tableIter.symbols_col };
 
             for( const DATABASE_FIELD_MAPPING& field : tableIter.fields )
-                columns.insert( boost::to_lower_copy( field.column ) );
+                requiredColumns.insert( field.column );
 
-            m_conn->CacheTableInfo( tableIter.table, columns );
+            // Only used if confirmed present, so a misconfigured mapping can't break the table (#23532)
+            std::set<std::string> optionalColumns{ tableIter.properties.description,
+                                                   tableIter.properties.footprint_filters,
+                                                   tableIter.properties.keywords,
+                                                   tableIter.properties.exclude_from_sim,
+                                                   tableIter.properties.exclude_from_bom,
+                                                   tableIter.properties.exclude_from_board };
+
+            m_conn->CacheTableInfo( tableIter.table, requiredColumns, optionalColumns );
         }
 
         m_conn->SetCacheParams( m_settings->m_Cache.max_size, m_settings->m_Cache.max_age );
@@ -461,8 +539,43 @@ std::unique_ptr<LIB_SYMBOL>  SCH_IO_DATABASE::loadSymbolFromRow( const wxString&
         LIB_ID symbolId;
         symbolId.Parse( std::any_cast<std::string>( aRow.at( aTable.symbols_col ) ) );
 
+        // A row's Symbols column may resolve back into the same database library (issue #24249,
+        // e.g. a mistyped library nickname). The adapter would route that lookup back into
+        // SCH_IO_DATABASE::LoadSymbol and re-enter loadSymbolFromRow on the same row until the
+        // stack overflows. Track in-flight LIB_IDs and skip the recursive load on re-entry.
+        struct CYCLE_GUARD
+        {
+            std::unordered_set<wxString>* set;
+            wxString                      key;
+            bool                          owns = false;
+
+            ~CYCLE_GUARD()
+            {
+                if( owns )
+                    set->erase( key );
+            }
+        } guard{ &m_inProgressLoads, {}, false };
+
+        bool cycle = false;
+
         if( symbolId.IsValid() )
-            originalSymbol = m_adapter->LoadSymbol( symbolId );
+        {
+            guard.key = symbolId.Format().wx_str();
+            guard.owns = m_inProgressLoads.insert( guard.key ).second;
+            cycle = !guard.owns;
+
+            if( cycle )
+            {
+                wxLogTrace( traceDatabase,
+                            wxT( "loadSymbolFromRow: cycle detected resolving '%s' "
+                                 "(row '%s' in table '%s'); skipping recursive load" ),
+                            symbolIdStr, aSymbolName, aTable.name );
+            }
+            else
+            {
+                originalSymbol = m_adapter->LoadSymbol( symbolId );
+            }
+        }
 
         if( originalSymbol )
         {
@@ -470,6 +583,12 @@ std::unique_ptr<LIB_SYMBOL>  SCH_IO_DATABASE::loadSymbolFromRow( const wxString&
                         symbolIdStr );
             symbol.reset( originalSymbol->Duplicate() );
             symbol->SetSourceLibId( symbolId );
+        }
+        else if( cycle )
+        {
+            wxLogTrace( traceDatabase, wxT( "loadSymbolFromRow: source symbol '%s' is a "
+                                            "self-reference, will create empty symbol" ),
+                        symbolIdStr );
         }
         else if( !symbolId.IsValid() )
         {
@@ -708,6 +827,11 @@ std::unique_ptr<LIB_SYMBOL>  SCH_IO_DATABASE::loadSymbolFromRow( const wxString&
     }
 
     symbol->GetDrawItems().sort();
+
+    // Field mappings (including Description) are applied with SCH_FIELD::SetText, which does not
+    // refresh the cached values the library tree and chooser read. Without this the upper chooser
+    // panel keeps the source symbol's description while the details panel shows the database value.
+    symbol->RefreshLibraryTreeCaches();
 
     return symbol;
 }

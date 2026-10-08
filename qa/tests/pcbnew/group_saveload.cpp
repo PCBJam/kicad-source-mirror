@@ -24,16 +24,20 @@
 
 #include <bitset>
 #include <filesystem>
+#include <set>
 #include <string>
+#include <vector>
 
 #include <board.h>
 #include <footprint.h>
+#include <lset.h>
 #include <pcb_generator.h>
 #include <pcb_group.h>
 #include <pcb_text.h>
 #include <pcb_track.h>
 #include <generators/pcb_tuning_pattern.h>
 #include <common.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <pcbnew_utils/board_construction_utils.h>
 #include <pcbnew_utils/board_file_utils.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
@@ -408,6 +412,158 @@ BOOST_AUTO_TEST_CASE( DeepCloneNestedGeneratorMembership )
     delete clonedText;
     delete clonedNested;
     delete deepCopy;
+}
+
+
+static PCB_TRACK* makeSegment( BOARD* aBoard, const VECTOR2I& aStart, const VECTOR2I& aEnd )
+{
+    PCB_TRACK* track = new PCB_TRACK( aBoard );
+    track->SetStart( aStart );
+    track->SetEnd( aEnd );
+    track->SetWidth( pcbIUScale.mmToIU( 0.2 ) );
+    track->SetLayer( F_Cu );
+    aBoard->Add( track );
+
+    return track;
+}
+
+
+/**
+ * Deep-duplicating a group that wraps a PCB_GENERATOR must give the copy a generator owning fresh
+ * copies of its member tracks. The shallow path left the duplicate aliasing the source's tracks,
+ * so arraying the group moved the originals and corrupted the design (#23771).
+ */
+BOOST_AUTO_TEST_CASE( DeepDuplicateGeneratorMembersAreDeepCopied )
+{
+    auto board = std::make_unique<BOARD>();
+    board->SetEnabledLayers( LSET::AllCuMask() | LSET::AllTechMask() );
+
+    PCB_TUNING_PATTERN* generator = new PCB_TUNING_PATTERN( board.get(), F_Cu );
+    board->Add( generator );
+
+    PCB_TRACK* seg1 = makeSegment( board.get(), VECTOR2I( 0, 0 ), VECTOR2I( pcbIUScale.mmToIU( 1 ), 0 ) );
+    PCB_TRACK* seg2 =
+            makeSegment( board.get(), VECTOR2I( pcbIUScale.mmToIU( 1 ), 0 ), VECTOR2I( pcbIUScale.mmToIU( 2 ), 0 ) );
+
+    generator->AddItem( seg1 );
+    generator->AddItem( seg2 );
+
+    // Wrap the generator in a group, as "Create from Selection > Group" does.
+    PCB_GROUP* group = new PCB_GROUP( board.get() );
+    group->AddItem( generator );
+    board->Add( group );
+
+    PCB_GROUP* dupGroup = group->DeepDuplicate( IGNORE_PARENT_GROUP );
+    BOOST_REQUIRE( dupGroup );
+    BOOST_REQUIRE_EQUAL( dupGroup->GetItems().size(), 1u );
+
+    PCB_GENERATOR* dupGenerator = nullptr;
+
+    for( EDA_ITEM* member : dupGroup->GetItems() )
+    {
+        BOOST_REQUIRE_EQUAL( member->Type(), PCB_GENERATOR_T );
+        dupGenerator = static_cast<PCB_GENERATOR*>( member );
+    }
+
+    BOOST_REQUIRE( dupGenerator );
+
+    // KIID has no ostream operator, so compare with BOOST_CHECK instead of BOOST_CHECK_NE.
+    BOOST_CHECK_NE( dupGenerator, static_cast<PCB_GENERATOR*>( generator ) );
+    BOOST_CHECK( dupGenerator->m_Uuid != generator->m_Uuid );
+
+    BOOST_REQUIRE_EQUAL( dupGenerator->GetItems().size(), generator->GetItems().size() );
+
+    std::set<EDA_ITEM*> originalMembers( generator->GetItems().begin(), generator->GetItems().end() );
+
+    for( EDA_ITEM* member : dupGenerator->GetItems() )
+    {
+        BOARD_ITEM* boardItem = dynamic_cast<BOARD_ITEM*>( member );
+        BOOST_REQUIRE( boardItem );
+
+        BOOST_CHECK_EQUAL( originalMembers.count( member ), 0u );
+        BOOST_CHECK( boardItem->m_Uuid != seg1->m_Uuid );
+        BOOST_CHECK( boardItem->m_Uuid != seg2->m_Uuid );
+        BOOST_CHECK_EQUAL( boardItem->GetParentGroup(), static_cast<EDA_GROUP*>( dupGenerator ) );
+    }
+
+    // The source generator must be left untouched.
+    BOOST_CHECK_EQUAL( generator->GetItems().size(), 2u );
+    BOOST_CHECK_EQUAL( seg1->GetParentGroup(), static_cast<EDA_GROUP*>( generator ) );
+    BOOST_CHECK_EQUAL( seg2->GetParentGroup(), static_cast<EDA_GROUP*>( generator ) );
+
+    // Groups do not own their members, and these copies were never added to the board.
+    std::vector<EDA_ITEM*> dupMembers( dupGenerator->GetItems().begin(), dupGenerator->GetItems().end() );
+
+    for( EDA_ITEM* member : dupMembers )
+        delete member;
+
+    delete dupGenerator;
+    delete dupGroup;
+}
+
+
+/**
+ * PCB_IO_KICAD_SEXPR caches a board-item pointer set to validate PCB_GROUP members against
+ * use-after-free (see format( const PCB_GROUP* )). If a caller reuses the same plugin instance
+ * to save the same BOARD* more than once, a save after a group's membership changed must
+ * reflect the current membership, not one cached from an earlier save on the same instance.
+ */
+BOOST_AUTO_TEST_CASE( GroupMembershipReflectsChangesAcrossReusedInstanceSaves )
+{
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+
+    PCB_TEXT* text0 = new PCB_TEXT( board.get() );
+    text0->SetText( wxT( "member-0" ) );
+    board->Add( text0 );
+
+    PCB_TEXT* text1 = new PCB_TEXT( board.get() );
+    text1->SetText( wxT( "member-1" ) );
+    board->Add( text1 );
+
+    PCB_GROUP* group = new PCB_GROUP( board.get() );
+    group->AddItem( text0 );
+    group->AddItem( text1 );
+    board->Add( group );
+
+    PCB_IO_KICAD_SEXPR io;
+
+    auto firstPath = std::filesystem::temp_directory_path() / "group_reuse_before.kicad_pcb";
+    io.SaveBoard( firstPath.string(), board.get() );
+
+    // Same instance, same BOARD*: add a brand new item to both the board and the group without
+    // removing anything, so this only exercises the "gained a member" half of the bug (the
+    // "lost a member, stale pointer still validates" half is not reliably testable here: the
+    // allocator is free to reuse a just-freed item's address for the next allocation, which
+    // would make a dangling cache entry accidentally validate against the wrong new item).
+    PCB_TEXT* text2 = new PCB_TEXT( board.get() );
+    text2->SetText( wxT( "member-2" ) );
+    board->Add( text2 );
+    group->AddItem( text2 );
+
+    auto secondPath = std::filesystem::temp_directory_path() / "group_reuse_after.kicad_pcb";
+    io.SaveBoard( secondPath.string(), board.get() );
+
+    std::unique_ptr<BOARD> reloaded = ::KI_TEST::ReadBoardFromFileOrStream( secondPath.string() );
+
+    BOOST_REQUIRE_EQUAL( reloaded->Groups().size(), 1 );
+
+    PCB_GROUP* reloadedGroup = static_cast<PCB_GROUP*>( reloaded->Groups().front() );
+
+    // The second save must reflect the membership as of the second save (text0, text1, text2),
+    // not the membership cached from the first save (text0, text1 only; text2 did not exist yet).
+    BOOST_CHECK_EQUAL( reloadedGroup->GetItems().size(), 3u );
+
+    std::set<wxString> memberUuids;
+
+    for( EDA_ITEM* member : reloadedGroup->GetItems() )
+        memberUuids.insert( member->m_Uuid.AsString() );
+
+    BOOST_CHECK_MESSAGE( memberUuids.count( text0->m_Uuid.AsString() ),
+                         "Reloaded group is missing text0, present in both saves" );
+    BOOST_CHECK_MESSAGE( memberUuids.count( text1->m_Uuid.AsString() ),
+                         "Reloaded group is missing text1, present in both saves" );
+    BOOST_CHECK_MESSAGE( memberUuids.count( text2->m_Uuid.AsString() ),
+                         "Reloaded group is missing text2, added before the second save only" );
 }
 
 

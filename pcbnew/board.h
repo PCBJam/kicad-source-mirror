@@ -25,6 +25,7 @@
 #ifndef CLASS_BOARD_H_
 #define CLASS_BOARD_H_
 
+#include <atomic>
 #include <board_item_container.h>
 #include <board_stackup_manager/board_stackup.h>
 #include <embedded_files.h>
@@ -39,6 +40,7 @@
 #include <title_block.h>
 #include <zone_settings.h>
 #include <shared_mutex>
+#include <sharded_cache.h>
 #include <unordered_set>
 #include <project.h>
 #include <list>
@@ -55,6 +57,7 @@ class PICKED_ITEMS_LIST;
 class LENGTH_DELAY_CALCULATION;
 class BOARD;
 class FOOTPRINT;
+class FOOTPRINT_COURTYARD_INDEX;
 class ZONE;
 class PCB_TRACK;
 class PAD;
@@ -125,6 +128,34 @@ struct PTR_PTR_LAYER_CACHE_KEY
     }
 };
 
+// Caches the whole-predicate result of a footprint-selector query (e.g. intersectsCourtyard)
+// for one item, so a rule set that repeats the same condition does not re-scan every footprint.
+struct ITEM_SELECTOR_LAYER_CACHE_KEY
+{
+    const BOARD_ITEM* A;
+    wxString          Selector;     // the selector argument string, compared verbatim
+    PCB_LAYER_ID      Layer;
+    int               Constraint;   // some predicates (intersectsArea) branch on the constraint
+
+    bool operator==( const ITEM_SELECTOR_LAYER_CACHE_KEY& other ) const
+    {
+        return A == other.A && Selector == other.Selector && Layer == other.Layer
+               && Constraint == other.Constraint;
+    }
+};
+
+// Caches getField('x') text per (item, field name)
+struct ITEM_FIELD_CACHE_KEY
+{
+    const BOARD_ITEM* A;
+    std::size_t       FieldHash;
+
+    bool operator==( const ITEM_FIELD_CACHE_KEY& other ) const
+    {
+        return A == other.A && FieldHash == other.FieldHash;
+    }
+};
+
 struct LAYERS_CHECKED
 {
     LAYERS_CHECKED() :
@@ -173,6 +204,28 @@ namespace std
         {
             std::size_t seed = 0xa82de1c0;
             hash_combine( seed, k.A, k.B, k.Layer );
+            return seed;
+        }
+    };
+
+    template <>
+    struct hash<ITEM_SELECTOR_LAYER_CACHE_KEY>
+    {
+        std::size_t operator()( const ITEM_SELECTOR_LAYER_CACHE_KEY& k ) const
+        {
+            std::size_t seed = 0xa82de1c0;
+            hash_combine( seed, k.A, k.Selector, k.Layer, k.Constraint );
+            return seed;
+        }
+    };
+
+    template <>
+    struct hash<ITEM_FIELD_CACHE_KEY>
+    {
+        std::size_t operator()( const ITEM_FIELD_CACHE_KEY& k ) const
+        {
+            std::size_t seed = 0xa82de1c0;
+            hash_combine( seed, k.A, k.FieldHash );
             return seed;
         }
     };
@@ -343,7 +396,7 @@ public:
 
     void IncrementTimeStamp();
 
-    int GetTimeStamp() const { return m_timeStamp; }
+    int GetTimeStamp() const { return m_timeStamp.load( std::memory_order_acquire ); }
 
     /**
      * Find out if the board is being used to hold a single footprint for editing/viewing.
@@ -366,6 +419,13 @@ public:
     const DRAWINGS& Drawings() const { return m_drawings; }
 
     const ZONES& Zones() const { return m_zones; }
+
+    /**
+     * Return a name based on aBaseName that is not used by any other zone or rule area on
+     * the board. An empty or already-unique name is returned unchanged. aExclude is skipped
+     * during the search, used when renaming an existing zone so it does not collide with itself.
+     */
+    wxString GetUniqueZoneName( const wxString& aBaseName, const ZONE* aExclude = nullptr ) const;
 
     const GENERATORS& Generators() const { return m_generators; }
 
@@ -548,6 +608,20 @@ public:
      *         Type() == NOT_USED or null, depending on \a aAllowNullptrReturn.
      */
     BOARD_ITEM* ResolveItem( const KIID& aID, bool aAllowNullptrReturn = false ) const;
+
+    /**
+     * Rebind the UUID of an attached item and keep the item-by-id cache coherent.
+     */
+    void RebindItemUuid( BOARD_ITEM* aItem, const KIID& aNewId );
+
+    /**
+     * Rebind duplicate attached-item UUIDs so each live board item has a unique ID.
+     *
+     * Traversal order is stable and earlier items keep their existing UUIDs.
+     *
+     * @return number of duplicate IDs repaired.
+     */
+    int RepairDuplicateItemUuids();
 
     void FillItemMap( std::map<KIID, EDA_ITEM*>& aMap );
 
@@ -1420,10 +1494,30 @@ public:
      */
     void SaveToHistory( const wxString& aProjectPath, std::vector<HISTORY_FILE_DATA>& aFileData );
 
+    /**
+     * Liveness token handed to LOCAL_HISTORY::RegisterSaver so a shared autosave timer skips this
+     * board's saver once the board is destroyed instead of serializing freed memory.
+     */
+    std::weak_ptr<void> GetHistoryLifetimeToken() const { return m_historyLifetime; }
+
     const std::unordered_map<KIID, BOARD_ITEM*>& GetItemByIdCache() const
     {
         return m_itemByIdCache;
     }
+
+    bool IsItemIndexedById( const BOARD_ITEM* aItem ) const
+    {
+        return m_cachedIdByItem.contains( aItem );
+    }
+
+    /**
+     * Return a cached item for @a aId if the entry is still self-consistent.
+     *
+     * UUIDs can still be rewritten in-place in some attached-item paths.  When that happens, the
+     * cache may temporarily contain a stale alias from the old UUID to the live item.  Drop those
+     * aliases on read so lookups never return an item whose current UUID no longer matches the key.
+     */
+    BOARD_ITEM* GetCachedItemById( const KIID& aId ) const;
 
     /**
      * Add an item to the item-by-id cache.
@@ -1431,13 +1525,7 @@ public:
      * This is called by FOOTPRINT::Add() when items are added to footprints that are already
      * on the board, to keep the cache in sync.
      */
-    void CacheItemById( BOARD_ITEM* aItem )
-    {
-        if( IsFootprintHolder() )
-            return;
-
-        m_itemByIdCache.insert( { aItem->m_Uuid, aItem } );
-    }
+    void CacheItemById( BOARD_ITEM* aItem ) const;
 
     /**
      * Remove an item from the item-by-id cache.
@@ -1445,10 +1533,71 @@ public:
      * This is called by FOOTPRINT::Remove() when items are removed from footprints that are
      * already on the board, to keep the cache in sync.
      */
-    void UncacheItemById( const KIID& aId )
+    void UncacheItemById( const KIID& aId ) const;
+
+    void CacheItemSubtreeById( BOARD_ITEM* aItem )
     {
-        m_itemByIdCache.erase( aId );
+        wxCHECK( aItem, /* void */ );
+
+        CacheItemById( aItem );
+
+        aItem->RunOnChildren(
+                [this]( BOARD_ITEM* aChild )
+                {
+                    CacheItemSubtreeById( aChild );
+                },
+                RECURSE_MODE::NO_RECURSE );
     }
+
+    void CacheChildrenById( const BOARD_ITEM* aParent )
+    {
+        wxCHECK( aParent, /* void */ );
+
+        aParent->RunOnChildren(
+                [this]( BOARD_ITEM* aChild )
+                {
+                    CacheItemSubtreeById( aChild );
+                },
+                RECURSE_MODE::NO_RECURSE );
+    }
+
+    void UncacheItemSubtreeById( const BOARD_ITEM* aItem )
+    {
+        wxCHECK( aItem, /* void */ );
+
+        UncacheItemById( aItem->m_Uuid );
+
+        aItem->RunOnChildren(
+                [this]( BOARD_ITEM* aChild )
+                {
+                    UncacheItemSubtreeById( aChild );
+                },
+                RECURSE_MODE::NO_RECURSE );
+    }
+
+    void UncacheChildrenById( const BOARD_ITEM* aParent )
+    {
+        wxCHECK( aParent, /* void */ );
+
+        aParent->RunOnChildren(
+                [this]( BOARD_ITEM* aChild )
+                {
+                    UncacheItemSubtreeById( aChild );
+                },
+                RECURSE_MODE::NO_RECURSE );
+    }
+
+    /**
+     * Remove every cache entry that still points to @a aItem.
+     *
+     * Safe to call from ~BOARD_ITEM and UUID-rebind paths: avoids evicting live items that
+     * share the same UUID while still purging stale aliases after in-place UUID changes.
+     */
+    void UncacheItemByPtr( const BOARD_ITEM* aItem );
+
+    BOARD_ITEM* CacheAndReturnItemById( const KIID& aId, BOARD_ITEM* aItem ) const;
+
+    void ClearItemByIdCache();
 
     // --------- Item order comparators ---------
 
@@ -1463,13 +1612,32 @@ public:
     };
 
 public:
+    /**
+     * Return a spatial index of footprint courtyards, building it on first use.  Lets
+     * intersectsCourtyard()-style predicates query only nearby footprints instead of scanning
+     * the whole board.  Invalidated, like the other run-time caches, by IncrementTimeStamp().
+     *
+     * Returned by shared_ptr so a caller mid-query keeps the index alive even if a concurrent
+     * IncrementTimeStamp() detaches it; the held copy simply goes stale (the FOOTPRINT* it yields
+     * follow the same invalidation contract as the other run-time caches).
+     */
+    std::shared_ptr<const FOOTPRINT_COURTYARD_INDEX> GetFootprintCourtyardIndex();
+
     // ------------ Run-time caches -------------
     mutable std::shared_mutex                             m_CachesMutex;
-    std::unordered_map<PTR_PTR_CACHE_KEY, bool>           m_IntersectsCourtyardCache;
-    std::unordered_map<PTR_PTR_CACHE_KEY, bool>           m_IntersectsFCourtyardCache;
-    std::unordered_map<PTR_PTR_CACHE_KEY, bool>           m_IntersectsBCourtyardCache;
-    std::unordered_map<PTR_PTR_LAYER_CACHE_KEY, bool>     m_IntersectsAreaCache;
-    std::unordered_map<PTR_PTR_LAYER_CACHE_KEY, bool>     m_EnclosedByAreaCache;
+    // These predicate caches are written per item-pair from every DRC worker thread, so they
+    // carry their own internal sharded locks and are NOT covered by m_CachesMutex.
+    SHARDED_CACHE<PTR_PTR_CACHE_KEY, bool>                m_IntersectsCourtyardCache;
+    SHARDED_CACHE<PTR_PTR_CACHE_KEY, bool>                m_IntersectsFCourtyardCache;
+    SHARDED_CACHE<PTR_PTR_CACHE_KEY, bool>                m_IntersectsBCourtyardCache;
+    SHARDED_CACHE<PTR_PTR_LAYER_CACHE_KEY, bool>          m_IntersectsAreaCache;
+    SHARDED_CACHE<PTR_PTR_LAYER_CACHE_KEY, bool>          m_EnclosedByAreaCache;
+    SHARDED_CACHE<ITEM_SELECTOR_LAYER_CACHE_KEY, bool>    m_IntersectsCourtyardResultCache;
+    SHARDED_CACHE<ITEM_SELECTOR_LAYER_CACHE_KEY, bool>    m_IntersectsFCourtyardResultCache;
+    SHARDED_CACHE<ITEM_SELECTOR_LAYER_CACHE_KEY, bool>    m_IntersectsBCourtyardResultCache;
+    SHARDED_CACHE<ITEM_SELECTOR_LAYER_CACHE_KEY, bool>    m_IntersectsAreaResultCache;
+    SHARDED_CACHE<ITEM_SELECTOR_LAYER_CACHE_KEY, bool>    m_EnclosedByAreaResultCache;
+    SHARDED_CACHE<ITEM_FIELD_CACHE_KEY, wxString>         m_ItemFieldCache;
     std::unordered_map< wxString, LSET >                  m_LayerExpressionCache;
     std::unordered_map<ZONE*, std::unique_ptr<DRC_RTREE>> m_CopperZoneRTreeCache;
     std::shared_ptr<DRC_RTREE>                            m_CopperItemRTreeCache;
@@ -1485,6 +1653,9 @@ public:
     // Deflated zone outline cache for DRC area checks. Caches the deflated outline for each zone
     // to avoid repeated expensive deflation operations during collidesWithArea calls.
     mutable std::unordered_map<const ZONE*, SHAPE_POLY_SET> m_DeflatedZoneOutlineCache;
+
+    // Spatial index of footprint courtyards, built lazily by GetFootprintCourtyardIndex().
+    std::shared_ptr<const FOOTPRINT_COURTYARD_INDEX>     m_footprintCourtyardIndex;
 
     // ------------ DRC caches -------------
     std::vector<ZONE*>    m_DRCZones;
@@ -1519,7 +1690,7 @@ private:
 
     /// What is this board being used for
     BOARD_USE           m_boardUse;
-    int                 m_timeStamp;                // actually a modification counter
+    std::atomic<int>    m_timeStamp;                // actually a modification counter
 
     wxString            m_fileName;
 
@@ -1536,7 +1707,8 @@ private:
 
     // Cache for fast access to items in the containers above by KIID, including children.
     // Mutable because it's a performance cache that can be populated during const lookups.
-    mutable std::unordered_map<KIID, BOARD_ITEM*> m_itemByIdCache;
+    mutable std::unordered_map<KIID, BOARD_ITEM*>        m_itemByIdCache;
+    mutable std::unordered_map<const BOARD_ITEM*, KIID>  m_cachedIdByItem;
 
     std::map<int, LAYER> m_layers;                  // layer data
 
@@ -1548,6 +1720,9 @@ private:
 
     std::map<wxString, wxString>        m_properties;
     std::shared_ptr<CONNECTIVITY_DATA>  m_connectivity;
+
+    // Sentinel whose expiry signals to LOCAL_HISTORY that this board has been destroyed.
+    std::shared_ptr<void>               m_historyLifetime = std::make_shared<char>();
 
     PAGE_INFO           m_paper;
     TITLE_BLOCK         m_titles;                   // text in lower right of screen and plots

@@ -26,24 +26,6 @@
 
 #include <wx/string.h>
 
-// GTK renders native controls with slightly different baseline/padding than macOS Cocoa.
-// These offsets shift all overlay field positions to compensate.
-#ifdef __WXGTK__
-constexpr int DRC_RE_OVERLAY_XO = -3;
-constexpr int DRC_RE_OVERLAY_YO = -5;
-#else
-constexpr int DRC_RE_OVERLAY_XO = 0;
-constexpr int DRC_RE_OVERLAY_YO = 0;
-#endif
-
-// Windows text controls have more internal border padding than GTK/macOS, so numeric
-// fields need extra width to display 4-decimal values without clipping.
-#ifdef __WXMSW__
-constexpr int DRC_RE_OVERLAY_WE = 15;
-#else
-constexpr int DRC_RE_OVERLAY_WE = 0;
-#endif
-
 
 /**
  * Specifies the position of a label relative to its associated field.
@@ -63,36 +45,42 @@ enum class LABEL_POSITION
  *
  * All coordinates are in 1x bitmap pixels. When the system selects a higher-resolution
  * bitmap (1.5x or 2x), these values are automatically scaled at runtime.
+ *
+ * yCenter is the vertical center of the field.
  */
 struct DRC_RE_FIELD_POSITION
 {
     int xStart;     ///< Left edge X coordinate where the field starts
     int xEnd;       ///< Right edge X coordinate where the field ends
-    int yTop;       ///< Top edge Y coordinate of the field
+    int yCenter;    ///< Vertical center Y coordinate of the field
     int tabOrder;   ///< Tab navigation order (1-based, lower numbers receive focus first)
 
     wxString       labelText;      ///< Optional label text (empty for no label)
     LABEL_POSITION labelPosition;  ///< Position of label relative to field
+    wxString       prefixText;     ///< Optional text placed on the left
 
     DRC_RE_FIELD_POSITION() :
             xStart( 0 ),
             xEnd( 0 ),
-            yTop( 0 ),
+            yCenter( 0 ),
             tabOrder( 0 ),
             labelText(),
-            labelPosition( LABEL_POSITION::NONE )
+            labelPosition( LABEL_POSITION::NONE ),
+            prefixText()
     {
     }
 
-    DRC_RE_FIELD_POSITION( int aXStart, int aXEnd, int aYTop, int aTabOrder,
+    DRC_RE_FIELD_POSITION( int aXStart, int aXEnd, int aYCenter, int aTabOrder,
                            const wxString& aLabelText = wxEmptyString,
-                           LABEL_POSITION aLabelPos = LABEL_POSITION::NONE ) :
+                           LABEL_POSITION  aLabelPos = LABEL_POSITION::NONE,
+                           const wxString& aPrefixText = wxEmptyString ) :
             xStart( aXStart ),
             xEnd( aXEnd ),
-            yTop( aYTop ),
+            yCenter( aYCenter ),
             tabOrder( aTabOrder ),
             labelText( aLabelText ),
-            labelPosition( aLabelPos )
+            labelPosition( aLabelPos ),
+            prefixText( aPrefixText )
     {
     }
 };

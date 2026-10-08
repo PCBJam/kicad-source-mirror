@@ -250,6 +250,7 @@ void DS_DATA_MODEL_IO::Format( DS_DATA_MODEL* aSheet ) const
 void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_TEXT* aItem ) const
 {
     m_out->Print( "(tbtext %s", m_out->Quotew( aItem->m_TextBase ).c_str() );
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
 
     formatCoordinate( getTokenName( T_pos ), aItem->m_Pos );
@@ -342,6 +343,7 @@ void DS_DATA_MODEL_IO::format( DS_DATA_MODEL* aModel, DS_DATA_ITEM* aItem ) cons
     else
         m_out->Print( "(line" );
 
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
 
     formatCoordinate( getTokenName( T_start ), aItem->m_Pos );
@@ -363,6 +365,7 @@ void DS_DATA_MODEL_IO::format( DS_DATA_MODEL* aModel, DS_DATA_ITEM* aItem ) cons
 void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_POLYGONS* aItem ) const
 {
     m_out->Print( "(polygon" );
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
     formatCoordinate( "pos", aItem->m_Pos );
     formatOptions( aItem );
@@ -409,6 +412,7 @@ void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_BITMAP* aItem ) const
         return;
 
     m_out->Print( "(bitmap" );
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
     formatCoordinate( "pos", aItem->m_Pos );
     formatOptions( aItem );

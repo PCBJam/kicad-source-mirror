@@ -481,6 +481,7 @@ void TEMPLATE_WIDGET::onDuplicateTemplate( wxCommandEvent& event )
 DIALOG_TEMPLATE_SELECTOR::DIALOG_TEMPLATE_SELECTOR( wxWindow* aParent, const wxPoint& aPos,
                                                     const wxSize& aSize, const wxString& aUserTemplatesPath,
                                                     const wxString& aSystemTemplatesPath,
+                                                    const wxString& aDefaultTemplatesPath,
                                                     const std::vector<wxString>& aRecentTemplates ) :
         DIALOG_TEMPLATE_SELECTOR_BASE( aParent, wxID_ANY, _( "Project Template Selector" ), aPos, aSize ),
         m_state( DialogState::Initial ),
@@ -488,12 +489,14 @@ DIALOG_TEMPLATE_SELECTOR::DIALOG_TEMPLATE_SELECTOR( wxWindow* aParent, const wxP
         m_selectedTemplate( nullptr ),
         m_userTemplatesPath( aUserTemplatesPath ),
         m_systemTemplatesPath( aSystemTemplatesPath ),
+        m_defaultTemplatesPath( aDefaultTemplatesPath ),
         m_recentTemplates( aRecentTemplates ),
         m_searchTimer( this ),
         m_refreshTimer( this ),
         m_watcher( nullptr ),
         m_webviewPanel( nullptr ),
-        m_loadingExternalHtml( false )
+        m_loadingExternalHtml( false ),
+        m_previewSashPos( 0 )
 {
     // The base class now provides the UI structure via wxFormBuilder.
     // Configure the scrolled windows.
@@ -501,9 +504,7 @@ DIALOG_TEMPLATE_SELECTOR::DIALOG_TEMPLATE_SELECTOR( wxWindow* aParent, const wxP
     m_scrolledTemplates->SetScrollRate( 0, 25 );
     m_scrolledTemplates->SetBackgroundColour( wxSystemSettings::GetColour( wxSYS_COLOUR_BTNFACE ) );
 
-    // Override minimum sizes to allow dialog shrinking (base class Fit() sets large sizes)
-    m_scrolledTemplates->SetMinSize( FromDIP( wxSize( 300, 300 ) ) );
-    m_panelTemplates->SetMinSize( FromDIP( wxSize( 500, 500 ) ) );
+    m_scrolledTemplates->SetMinSize( FromDIP( wxSize( 200, 200 ) ) );
 
     // Configure the search control
     m_searchCtrl->ShowSearchButton( true );
@@ -563,6 +564,24 @@ DIALOG_TEMPLATE_SELECTOR::~DIALOG_TEMPLATE_SELECTOR()
 }
 
 
+void DIALOG_TEMPLATE_SELECTOR::EnsurePreviewSplit()
+{
+    if( m_splitter->IsSplit() )
+        return;
+
+    int sashPos = m_previewSashPos;
+
+    // Fall back to a third of the available width the first time the preview is shown
+    if( sashPos <= 0 )
+    {
+        int width = m_splitter->GetClientSize().GetWidth();
+        sashPos = width > 0 ? width / 3 : FromDIP( 300 );
+    }
+
+    m_splitter->SplitVertically( m_panelTemplates, m_panelPreview, sashPos );
+}
+
+
 void DIALOG_TEMPLATE_SELECTOR::SetState( DialogState aState )
 {
     m_state = aState;
@@ -571,20 +590,27 @@ void DIALOG_TEMPLATE_SELECTOR::SetState( DialogState aState )
     {
     case DialogState::Initial:
         m_panelMRU->Show();
-        m_panelPreview->Hide();
         m_btnBack->Enable( false );
+
+        if( m_splitter->IsSplit() )
+        {
+            // Remember the sash so reselecting a template restores the user's layout
+            m_previewSashPos = m_splitter->GetSashPosition();
+            m_splitter->Unsplit( m_panelPreview );
+        }
+
         break;
 
     case DialogState::Preview:
         m_panelMRU->Hide();
-        m_panelPreview->Show();
         m_btnBack->Enable( true );
+        EnsurePreviewSplit();
         break;
 
     case DialogState::MRUWithPreview:
         m_panelMRU->Show();
-        m_panelPreview->Show();
         m_btnBack->Enable( true );
+        EnsurePreviewSplit();
         break;
     }
 
@@ -726,6 +752,11 @@ void DIALOG_TEMPLATE_SELECTOR::BuildTemplateList()
 
     scanDirectory( m_userTemplatesPath, true );
     scanDirectory( m_systemTemplatesPath, false );
+
+    // The built-in "default" template lives in the stable default user templates path.  It is
+    // always scanned so that the default remains available even when KICAD_USER_TEMPLATE_DIR
+    // points at a custom location.  Treated as a built-in, not a user template.
+    scanDirectory( m_defaultTemplatesPath, false );
 
     // Sort alphabetically with "Default" first
     std::sort( m_templateWidgets.begin(), m_templateWidgets.end(),
@@ -1001,29 +1032,25 @@ void DIALOG_TEMPLATE_SELECTOR::SetupFileWatcher()
 
     wxLogNull logNo;
 
-    if( !m_userTemplatesPath.IsEmpty() )
-    {
-        wxFileName userDir;
-        userDir.AssignDir( m_userTemplatesPath );
+    auto watchDir =
+            [this]( const wxString& aPath, const char* aLabel )
+            {
+                if( aPath.IsEmpty() )
+                    return;
 
-        if( userDir.DirExists() )
-        {
-            m_watcher->Add( userDir );
-            wxLogTrace( traceTemplateSelector, "Watching user templates: %s", m_userTemplatesPath );
-        }
-    }
+                wxFileName dir;
+                dir.AssignDir( aPath );
 
-    if( !m_systemTemplatesPath.IsEmpty() )
-    {
-        wxFileName systemDir;
-        systemDir.AssignDir( m_systemTemplatesPath );
+                if( dir.DirExists() )
+                {
+                    m_watcher->Add( dir );
+                    wxLogTrace( traceTemplateSelector, "Watching %s templates: %s", aLabel, aPath );
+                }
+            };
 
-        if( systemDir.DirExists() )
-        {
-            m_watcher->Add( systemDir );
-            wxLogTrace( traceTemplateSelector, "Watching system templates: %s", m_systemTemplatesPath );
-        }
-    }
+    watchDir( m_userTemplatesPath, "user" );
+    watchDir( m_systemTemplatesPath, "system" );
+    watchDir( m_defaultTemplatesPath, "default" );
 }
 
 

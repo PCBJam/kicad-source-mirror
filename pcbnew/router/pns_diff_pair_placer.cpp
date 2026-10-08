@@ -73,7 +73,14 @@ void DIFF_PAIR_PLACER::setWorld( NODE* aWorld )
 
 const VIA DIFF_PAIR_PLACER::makeVia( const VECTOR2I& aP, NET_HANDLE aNet )
 {
-    const PNS_LAYER_RANGE layers( m_sizes.GetLayerTop(), m_sizes.GetLayerBottom() );
+    auto iface = Router()->GetInterface();
+
+    int start =
+            m_sizes.ViaType() == VIATYPE::THROUGH ? iface->GetPNSLayerFromBoardLayer( F_Cu ) : m_sizes.GetLayerTop();
+    int end =
+            m_sizes.ViaType() == VIATYPE::THROUGH ? iface->GetPNSLayerFromBoardLayer( B_Cu ) : m_sizes.GetLayerBottom();
+
+    const PNS_LAYER_RANGE layers( start, end );
 
     VIA v( aP, layers, m_sizes.ViaDiameter(), m_sizes.ViaDrill(), aNet, m_sizes.ViaType() );
 
@@ -609,8 +616,7 @@ bool DIFF_PAIR_PLACER::FindDpPrimitivePair( NODE* aWorld, const VECTOR2I& aP, IT
 
 int DIFF_PAIR_PLACER::viaGap() const
 {
-    return std::max( m_sizes.DiffPairViaGap(),
-                     m_sizes.GetDiffPairHoleToHole() + m_sizes.ViaDrill() - m_sizes.ViaDiameter() );
+    return m_sizes.EffectiveDiffPairViaGap();
 }
 
 

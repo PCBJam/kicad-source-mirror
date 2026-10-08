@@ -50,6 +50,9 @@ public:
     ///< @copydoc EDA_DRAW_PANEL_GAL::OnShow()
     void OnShow() override;
 
+    ///< @copydoc EDA_DRAW_PANEL_GAL::SwitchBackend()
+    bool SwitchBackend( GAL_TYPE aGalType ) override;
+
     /// @copydoc wxWindow::Refresh()
     void Refresh( bool aEraseBackground, const wxRect* aRect ) override;
 

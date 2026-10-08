@@ -35,6 +35,7 @@
 #include <kiway.h>
 #include <symbol_viewer_frame.h>
 #include <symbol_tree_model_adapter.h>
+#include <symbol_chooser_timing.h>
 #include <symbol_editor/symbol_editor_settings.h>
 #include <algorithm>
 #include <sch_symbol.h>
@@ -60,8 +61,17 @@ PICKED_SYMBOL SCH_BASE_FRAME::PickSymbolFromLibrary( const SYMBOL_LIBRARY_FILTER
 
     bool aCancelled = false;
 
+    // Time the whole chooser bring-up (the dialog ctor builds the panel, which
+    // runs SYMBOL_TREE_MODEL_ADAPTER::AddLibraries -> per-lib GetSymbols ->
+    // cold fatLoad). mode=cold on the first open, warm thereafter.
+    SYM_CHOOSER_TIMING::Start();
+    SYM_CHOOSER_TIMING::STEP_LOGGER chooserTiming;
+
     DIALOG_SYMBOL_CHOOSER dlg( this, aHighlight, aFilter, aHistoryList, aAlreadyPlaced,
                                aAllowFields, aShowFootprints, aCancelled );
+
+    chooserTiming.Log( "dialog_constructed" );
+    SYM_CHOOSER_TIMING::g_firstRun = false;
 
     if( aCancelled || dlg.ShowModal() == wxID_CANCEL )
         return PICKED_SYMBOL();

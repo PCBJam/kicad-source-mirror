@@ -18,6 +18,8 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <wx/choice.h>
+
 #include <confirm.h>
 #include <common.h>
 #include <dialogs/dialog_map_gerber_layers_to_pcb.h>

@@ -108,14 +108,23 @@
 
 
 #define KIFACE_VERSION      1
+// Overridable so a build can give each kiface a distinct getter symbol when several
+// kifaces are statically linked into one image (WASM merged editor: the pcbnew and
+// eeschema kifaces are compiled with -DKIFACE_GETTER=<engine>_kiface_getter and a
+// combined launcher registers both). Native builds never predefine it.
+#ifndef KIFACE_GETTER
 #define KIFACE_GETTER       KIFACE_1
+#endif
 
 // The KIFACE acquisition function is declared extern "C" so its name should not
 // be mangled.
 #define KIFACE_INSTANCE_NAME_AND_VERSION   "KIFACE_1"
 
 #ifndef SWIG
-#if defined(__linux__) || defined(__FreeBSD__)
+#if defined(__EMSCRIPTEN__)
+ // WASM: No dynamic library loading, but define for compatibility
+ #define LIB_ENV_VAR    wxT( "" )
+#elif defined(__linux__) || defined(__FreeBSD__)
  #define LIB_ENV_VAR    wxT( "LD_LIBRARY_PATH" )
 #elif defined(__WXMAC__)
  #define LIB_ENV_VAR    wxT( "DYLD_LIBRARY_PATH" )
@@ -320,6 +329,18 @@ public:
      * @return a valid value #KIWAY::FACE_T or FACE_T(-1) if given a bad @a aFrameType.
      */
     static FACE_T KifaceType( FRAME_T aFrameType );
+
+    /**
+     * Return true if a KIFACE is already registered for \a aFaceId, without attempting
+     * to load or start one. On the merged WASM editor image both the PCB and SCH
+     * kifaces are statically linked and pre-registered (single_top.cpp), so this
+     * answers "is that editor reachable in-process" even though the program runs
+     * with KFCTL_STANDALONE.
+     */
+    static bool FaceRegistered( FACE_T aFaceId )
+    {
+        return (unsigned) aFaceId < m_kiface.size() && m_kiface[aFaceId] != nullptr;
+    }
 
     // If you change the vtable, recompile all of KiCad.
 

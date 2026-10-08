@@ -25,6 +25,9 @@
 #pragma once
 
 #include <map>
+#include <filesystem>
+#include <string>
+#include <unordered_set>
 #include <kicommon.h>
 #include <wx/arrstr.h>
 #include <wx/dir.h>
@@ -84,6 +87,20 @@ KICOMMON_API void CopySexprFile( const wxString& aSrcPath, const wxString& aDest
 KICOMMON_API int ExecuteFile( const wxString& aEditorName,
                               const wxString& aFileName = wxEmptyString,
                               wxProcess* aCallback = nullptr, bool aFileForKicad = true );
+
+/**
+ * Run a user-supplied command line through the platform shell so glob expansion, pipes, and
+ * other shell features work consistently.
+ *
+ * On Windows the command is wrapped as cmd.exe /d /s /c "<cmd>" so that absolute paths containing
+ * spaces or quotes survive cmd.exe's quote handling intact. On POSIX the command is handed to
+ * /bin/sh -c as a single argument.
+ *
+ * @param aCommand the command line exactly as entered by the user.
+ * @param aProcess an optional wxProcess for the call; pass a Redirect()ed process to capture output.
+ * @return the process exit code, or -1 if the command could not be executed.
+ */
+KICOMMON_API int ExecuteCommandThroughShell( const wxString& aCommand, wxProcess* aProcess = nullptr );
 
 /**
  * Add un " to the start and the end of string (if not already done).
@@ -180,3 +197,31 @@ KICOMMON_API void CollectFilesLoopSafe( const wxString& aRoot, wxArrayString& aF
  */
 KICOMMON_API void CollectSubdirsLoopSafe( const wxString& aRoot, wxArrayString& aDirs,
                                           int aFlags = wxDIR_DIRS );
+
+
+// how a symlink that resolves outside the scan root is treated
+enum class DIR_LOOP_POLICY
+{
+    CONFINE_TO_ROOT,    // descend only into targets that stay inside the root subtree
+    BLOCK_ROOT_ESCAPE   // descend anywhere except a link resolving to an ancestor of the root
+};
+
+
+// bounds a hand-rolled recursive dir walk against symlink cycles and root escapes
+// query ShouldDescend before recursing real dirs keyed by name links canonicalized
+class KICOMMON_API DIR_LOOP_GUARD
+{
+public:
+    explicit DIR_LOOP_GUARD( const wxString& aRoot,
+                             DIR_LOOP_POLICY aPolicy = DIR_LOOP_POLICY::CONFINE_TO_ROOT );
+
+    // false when the root itself would not resolve caller must not walk
+    bool IsRooted() const { return !m_root.empty(); }
+
+    bool ShouldDescend( const wxString& aDir );
+
+private:
+    std::filesystem::path           m_root;
+    DIR_LOOP_POLICY                 m_policy;
+    std::unordered_set<std::string> m_visited;
+};

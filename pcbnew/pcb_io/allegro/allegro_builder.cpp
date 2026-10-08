@@ -2075,7 +2075,11 @@ std::unique_ptr<PCB_TEXT> BOARD_BUILDER::buildPcbText( const BLK_0x30_STR_WRAPPE
     text->SetText( strGraphic->m_Value );
     text->SetTextWidth( scale( fontDef->m_CharWidth ) );
     text->SetTextHeight( scale( fontDef->m_CharHeight ) );
-    text->SetTextThickness( std::max( 1, scale( fontDef->m_StrokeWidth ) ) );
+
+    if( fontDef->m_StrokeWidth > 0 )
+        text->SetTextThickness( scale( fontDef->m_StrokeWidth ) );
+    else
+        text->SetTextThickness( GetPenSizeForNormal( scale( fontDef->m_CharHeight ) ) );
 
     const EDA_ANGLE textAngle = fromMillidegrees( aStrWrapper.m_Rotation );
     text->SetTextAngle( textAngle );
@@ -2984,17 +2988,43 @@ std::vector<std::unique_ptr<BOARD_ITEM>> BOARD_BUILDER::buildPadItems( const BLK
     if( thermalGap.has_value() )
         pad->SetThermalGap( thermalGap.value() );
 
-    padItems.push_back( std::move( pad ) );
-
     // Now, for each technical layer, we see if we can include it into the existing padstack, or if we need to add
     // it as a standalone pad
     for( size_t i = 0; i < aPadstack.m_NumFixedCompEntries; ++i )
     {
         const ALLEGRO::PADSTACK_COMPONENT& psComp = aPadstack.m_Components[i];
 
-        /// If this is zero just skip entirely
+        // Knock off known layers that are clearly null
         if( psComp.m_Type == PADSTACK_COMPONENT::TYPE_NULL)
+        {
+            if( m_brdDb.m_FmtVer < FMT_VER::V_165 )
+            {
+                if( i == BLK_0x1C_PADSTACK::SLOTS::SOLDERMASK_TOP_V16X )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( F_Mask ) );
+                else if( i == BLK_0x1C_PADSTACK::SLOTS::PASTEMASK_TOP_V16X )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( F_Paste ) );
+            }
+            else if( m_brdDb.m_FmtVer < FMT_VER::V_172 )
+            {
+                if( i == BLK_0x1C_PADSTACK::SLOTS::SOLDERMASK_TOP_V165 )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( F_Mask ) );
+                else if( i == BLK_0x1C_PADSTACK::SLOTS::PASTEMASK_TOP_V165 )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( F_Paste ) );
+            }
+            else
+            {
+                if( i == BLK_0x1C_PADSTACK::SLOTS::SOLDERMASK_TOP_V17X )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( F_Mask ) );
+                else if( i == BLK_0x1C_PADSTACK::SLOTS::SOLDERMASK_BOT_V17X )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( B_Mask ) );
+                else if( i == BLK_0x1C_PADSTACK::SLOTS::PASTEMASK_TOP_V17X )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( F_Paste ) );
+                else if( i == BLK_0x1C_PADSTACK::SLOTS::PASTEMASK_BOT_V17X )
+                    pad->SetLayerSet( pad->GetLayerSet().reset( B_Paste ) );
+            }
+
             continue;
+        }
 
         // All fixed slots are technical layers (solder mask, paste mask, film mask,
         // assembly variant, etc). Custom mask expansion extraction is not yet implemented;
@@ -3003,6 +3033,8 @@ std::vector<std::unique_ptr<BOARD_ITEM>> BOARD_BUILDER::buildPadItems( const BLK
                     "Fixed padstack slot %zu: type=%d, W=%d, H=%d",
                     i, static_cast<int>( psComp.m_Type ), psComp.m_W, psComp.m_H );
     }
+
+    padItems.push_back( std::move( pad ) );
 
     return padItems;
 }
@@ -3135,7 +3167,7 @@ std::unique_ptr<FOOTPRINT> BOARD_BUILDER::buildFootprint( const BLK_0x2D_FOOTPRI
         else if( textClass == LAYER_INFO::CLASS::REF_DES && isAssembly )
         {
             // Assembly refdes becomes a user field with the KiCad reference variable
-            PCB_FIELD* field = new PCB_FIELD( *text, FIELD_T::USER, wxS( "Reference" ) );
+            PCB_FIELD* field = new PCB_FIELD( *text, FIELD_T::USER, wxS( "Ref Des" ) );
             field->SetText( wxS( "${REFERENCE}" ) );
             field->SetVisible( false );
             fp->Add( field, ADD_MODE::APPEND );

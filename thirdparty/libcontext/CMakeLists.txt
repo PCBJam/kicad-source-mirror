@@ -41,3 +41,11 @@ add_library( libcontext STATIC
 target_include_directories( libcontext PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     )
+
+if( EMSCRIPTEN )
+    # Legacy of the fiber-era backend, which adapted over wx's scheduler
+    # registry; the JSPI backend is self-contained (emscripten headers only).
+    # Harmless — droppable after a wasm compile check confirms nothing else
+    # reaches wx headers through this target.
+    target_include_directories( libcontext PRIVATE ${wxWidgets_INCLUDE_DIRS} )
+endif()

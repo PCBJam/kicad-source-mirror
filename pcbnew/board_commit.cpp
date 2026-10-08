@@ -47,6 +47,7 @@
 #include <pcb_board_outline.h>
 
 #include <functional>
+#include <unordered_set>
 #include <project/project_file.h>
 using namespace std::placeholders;
 
@@ -197,6 +198,8 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
     PICKED_ITEMS_LIST   undoList;
     bool                itemsDeselected = false;
     bool                selectedModified = false;
+
+    std::unordered_set<EDA_ITEM*> removedItems;
 
     // Dirty flags and lists
     bool                     solderMaskDirty = false;
@@ -355,7 +358,8 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 
             if( !( aCommitFlags & SKIP_UNDO ) )
             {
-                ITEM_PICKER itemWrapper( nullptr, boardItem, UNDO_REDO::DELETED );
+                UNDO_REDO   status = boardItem->Type() == PCB_FIELD_T ? UNDO_REDO::CHANGED : UNDO_REDO::DELETED;
+                ITEM_PICKER itemWrapper( nullptr, boardItem, status );
                 itemWrapper.SetLink( entry.m_copy );
                 entry.m_copy = nullptr;   // We've transferred ownership to the undo list
                 undoList.PushItem( itemWrapper );
@@ -369,6 +373,8 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 itemsDeselected = true;
             }
 
+            removedItems.insert( boardItem );
+
             if( parentGroup && !( parentGroup->AsEdaItem()->GetFlags() & STRUCT_DELETED ) )
                 parentGroup->RemoveItem( boardItem );
 
@@ -379,6 +385,10 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
             {
             case PCB_FIELD_T:
                 static_cast<PCB_FIELD*>( boardItem )->SetVisible( false );
+
+                if( view )
+                    view->Update( boardItem );
+
                 break;
 
             case PCB_TEXT_T:
@@ -416,6 +426,12 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                     else if( FOOTPRINT* parentFP = boardItem->GetParentFootprint() )
                     {
                         parentFP->Remove( boardItem );
+
+                        // A child-only removal mutates the footprint's content but,
+                        // unlike the board->Remove branch, never reaches a listener
+                        // vector — board listeners would otherwise not hear about
+                        // this commit at all.
+                        itemsChanged.push_back( parentFP );
                     }
                     else
                     {
@@ -437,8 +453,10 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 break;
             }
 
-            // The item has been removed from the board; it is now owned by undo/redo.
-            boardItem->SetFlags( UR_TRANSIENT );
+            // Removed items are owned by undo/redo, but a hidden field still belongs to its footprint
+            if( boardItem->Type() != PCB_FIELD_T )
+                boardItem->SetFlags( UR_TRANSIENT );
+
             break;
         }
 
@@ -492,6 +510,26 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 },
                 RECURSE_MODE::RECURSE );
     } // ... and regenerate them.
+
+    // Deselection above keys off the SELECTED flag on the removed item itself, but the selection
+    // may separately hold an owned descendant such as a pad, field or table cell.  Descendants
+    // are freed along with the removed parent, so prune them here or the selection keeps a
+    // dangling pointer that the next repaint dereferences.
+    if( selTool && !removedItems.empty() )
+    {
+        for( EDA_ITEM* selectedItem : selTool->GetSelection().GetItems() )
+        {
+            for( EDA_ITEM* ancestor = selectedItem; ancestor; ancestor = ancestor->GetParent() )
+            {
+                if( removedItems.count( ancestor ) )
+                {
+                    selTool->RemoveItemFromSel( selectedItem, true /* quiet mode */ );
+                    itemsDeselected = true;
+                    break;
+                }
+            }
+        }
+    }
 
     // Invalidate component classes
     board->GetComponentClassManager().InvalidateComponentClasses();
@@ -735,6 +773,9 @@ void BOARD_COMMIT::Revert()
                     bulkRemovedItems.push_back( boardItem );
                 }
             }
+
+            if( PCB_GROUP* group = dynamic_cast<PCB_GROUP*>( boardItem ) )
+                group->RemoveAll();
 
             // Defer deletion until after OnItemsCompositeUpdate so that
             // board listeners do not receive dangling pointers.

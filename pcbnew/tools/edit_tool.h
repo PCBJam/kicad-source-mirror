@@ -78,11 +78,6 @@ public:
     int Drag( const TOOL_EVENT& aEvent );
 
     /**
-     * Drag-resize an arc (and change end points of connected straight segments).
-     */
-    int DragArcTrack( const TOOL_EVENT& aTrack );
-
-    /**
      * Display properties window for the selected object.
      */
     int Properties( const TOOL_EVENT& aEvent );
@@ -126,6 +121,8 @@ public:
      * Try to fit selected footprints inside a minimal area and start movement.
      */
     int PackAndMoveFootprints( const TOOL_EVENT& aEvent );
+
+    int ToggleFootprintAttribute( const TOOL_EVENT& aEvent );
 
     int ChangeTrackWidth( const TOOL_EVENT& aEvent );
     int ChangeTrackLayer( const TOOL_EVENT& aEvent );

@@ -204,6 +204,7 @@ LIB_TREE::LIB_TREE( wxWindow* aParent, const wxString& aRecentSearchesKey,
     SetSizer( sizer );
 
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_ITEM_ACTIVATED, &LIB_TREE::onTreeActivate, this );
+    m_tree_ctrl->Bind( wxEVT_DATAVIEW_ITEM_EXPANDING, &LIB_TREE::onTreeExpanding, this );
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_SELECTION_CHANGED, &LIB_TREE::onTreeSelect, this );
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_ITEM_CONTEXT_MENU, &LIB_TREE::onItemContextMenu, this );
     m_tree_ctrl->Bind( wxEVT_DATAVIEW_COLUMN_HEADER_RIGHT_CLICK, &LIB_TREE::onHeaderContextMenu,
@@ -374,7 +375,13 @@ int LIB_TREE::GetSelectedTreeNodes( std::vector<LIB_TREE_NODE*>& aSelection ) co
 
 void LIB_TREE::SelectLibId( const LIB_ID& aLibId )
 {
-    selectIfValid( m_adapter->FindItem( aLibId ) );
+    wxDataViewItem item = m_adapter->FindItem( aLibId );
+
+    // Expand the parent library so the row is visible and can be selected/scrolled to.
+    if( item.IsOk() )
+        m_tree_ctrl->ExpandAncestors( item );
+
+    selectIfValid( item );
 }
 
 
@@ -395,6 +402,25 @@ void LIB_TREE::Unselect()
 void LIB_TREE::ExpandLibId( const LIB_ID& aLibId )
 {
     expandIfValid( m_adapter->FindItem( aLibId ) );
+}
+
+
+std::vector<LIB_ID> LIB_TREE::GetExpandedLibraries() const
+{
+    std::vector<LIB_ID> expanded;
+    wxDataViewItemArray items;
+    m_adapter->GetChildren( wxDataViewItem( nullptr ), items );
+
+    for( const wxDataViewItem& item : items )
+    {
+        if( m_tree_ctrl->IsExpanded( item ) )
+        {
+            if( LIB_TREE_NODE* node = m_adapter->GetTreeNodeFor( item ) )
+                expanded.push_back( node->m_LibId );
+        }
+    }
+
+    return expanded;
 }
 
 
@@ -882,6 +908,28 @@ void LIB_TREE::onHoverTimer( wxTimerEvent& aEvent )
 
 void LIB_TREE::onTreeCharHook( wxKeyEvent& aKeyStroke )
 {
+    // Bare Left/Right collapse/expand the focused node. Consume them here so they
+    // do not fall through to the global cursorLeft/cursorRight canvas actions. This
+    // is the tree-only hook, so the search box keeps normal caret movement.
+    if( aKeyStroke.GetModifiers() == wxMOD_NONE
+        && ( aKeyStroke.GetKeyCode() == WXK_LEFT || aKeyStroke.GetKeyCode() == WXK_RIGHT ) )
+    {
+        wxDataViewItem sel = m_tree_ctrl->GetSelection();
+
+        if( !sel.IsOk() )
+            sel = m_adapter->GetCurrentDataViewItem();
+
+        if( sel.IsOk() )
+        {
+            if( aKeyStroke.GetKeyCode() == WXK_RIGHT )
+                m_tree_ctrl->Expand( sel );
+            else
+                m_tree_ctrl->Collapse( sel );
+        }
+
+        return;
+    }
+
     onQueryCharHook( aKeyStroke );
 
     if( aKeyStroke.GetSkipped() )
@@ -932,6 +980,19 @@ void LIB_TREE::onTreeSelect( wxDataViewEvent& aEvent )
         updateRecentSearchMenu();
 
     postPreselectEvent();
+}
+
+
+void LIB_TREE::onTreeExpanding( wxDataViewEvent& aEvent )
+{
+    // Give the adapter a chance to populate the node's children lazily (e.g. the
+    // symbol editor enumerates a library's symbols only when it is first
+    // expanded). This runs synchronously before the control builds the child
+    // rows, so anything added here is shown as part of this expand. Don't veto.
+    if( m_adapter )
+        m_adapter->OnExpanding( aEvent.GetItem() );
+
+    aEvent.Skip();
 }
 
 
@@ -990,24 +1051,24 @@ void LIB_TREE::onItemContextMenu( wxDataViewEvent& aEvent )
 
     m_previewDisabled = true;
 
+    // Select the item under the cursor before showing the context menu. On some platforms
+    // (notably macOS), right-clicking does not automatically change the selection.
+    wxDataViewItem item = aEvent.GetItem();
+
+    if( item.IsOk() )
+    {
+        m_tree_ctrl->SetFocus();
+
+        if( !m_tree_ctrl->IsSelected( item ) )
+        {
+            m_tree_ctrl->UnselectAll();
+            m_tree_ctrl->Select( item );
+            wxSafeYield();
+        }
+    }
+
     if( TOOL_INTERACTIVE* tool = m_adapter->GetContextMenuTool() )
     {
-        if( !GetCurrentTreeNode() )
-        {
-            wxPoint pos = m_tree_ctrl->ScreenToClient( wxGetMousePosition() );
-
-            wxDataViewItem    item;
-            wxDataViewColumn* col;
-            m_tree_ctrl->HitTest( pos, item, col );
-
-            if( item.IsOk() )
-            {
-                m_tree_ctrl->SetFocus();
-                m_tree_ctrl->Select( item );
-                wxSafeYield();
-            }
-        }
-
         tool->Activate();
         tool->GetManager()->VetoContextMenuMouseWarp();
         tool->GetToolMenu().ShowContextMenu();

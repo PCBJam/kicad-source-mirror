@@ -918,6 +918,59 @@ ARULE6::ARULE6( ALTIUM_BINARY_PARSER& aReader )
         THROW_IO_ERROR( wxT( "Rules6 stream was not parsed correctly" ) );
 }
 
+ASMARTUNION6::ASMARTUNION6( ALTIUM_BINARY_PARSER& aReader )
+{
+    std::map<wxString, wxString> props = aReader.ReadProperties();
+
+    if( props.empty() )
+        THROW_IO_ERROR( wxT( "SmartUnions stream has no props" ) );
+
+    unionindex = ALTIUM_PROPS_UTILS::ReadInt( props, wxT( "UNIONINDEX" ), 0 );
+    is_tuning  = ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "TRACETUNINGVALID" ), false );
+
+    // A tuned differential pair names its pair here; single-track tuning leaves it empty.
+    is_diffpair = !ALTIUM_PROPS_UTILS::ReadString( props, wxT( "TUNEDOBJECTDIFFPAIR" ),
+                                                   wxT( "" ) ).IsEmpty();
+
+    style        = ALTIUM_PROPS_UTILS::ReadInt( props, wxT( "STYLE" ), 0 );
+    gap          = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "GAP" ), wxT( "0mil" ) );
+    amplitude    = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "AMPLITUDE" ), wxT( "0mil" ) );
+    minamplitude = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "MINAMPLITUDE" ), wxT( "0mil" ) );
+    mitterradiusratio = ALTIUM_PROPS_UTILS::ReadDouble( props, wxT( "MITTERRADIUSRATIO" ), 0.0 );
+    singleside   = ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "SINGLESIDE" ), false );
+
+    // The un-meandered route the accordion replaced, as consecutive LINE<n> segments.  Nothing
+    // else records it, so it is the only source for KiCad's tuning-pattern baseline
+    auto readBaseline = [&props]( const wxString& aPrefix, std::vector<VECTOR2I>& aOut )
+    {
+        for( int i = 0;; ++i )
+        {
+            wxString prefix = wxString::Format( wxT( "%s%d." ), aPrefix, i );
+            wxString firstX = prefix + wxT( "X1" );
+
+            if( props.find( firstX ) == props.end() )
+                break;
+
+            VECTOR2I a( ALTIUM_PROPS_UTILS::ReadKicadUnit( props, firstX, wxT( "0mil" ) ),
+                        -ALTIUM_PROPS_UTILS::ReadKicadUnit( props, prefix + wxT( "Y1" ), wxT( "0mil" ) ) );
+            VECTOR2I b( ALTIUM_PROPS_UTILS::ReadKicadUnit( props, prefix + wxT( "X2" ), wxT( "0mil" ) ),
+                        -ALTIUM_PROPS_UTILS::ReadKicadUnit( props, prefix + wxT( "Y2" ), wxT( "0mil" ) ) );
+
+            for( const VECTOR2I& pt : { a, b } )
+            {
+                if( aOut.empty() || aOut.back() != pt )
+                    aOut.push_back( pt );
+            }
+        }
+    };
+
+    readBaseline( wxT( "LINE" ), baseline );
+    readBaseline( wxT( "LINEOTHER" ), baselinecoupled );
+
+    if( aReader.HasParsingError() )
+        THROW_IO_ERROR( wxT( "SmartUnions stream was not parsed correctly" ) );
+}
+
 AARC6::AARC6( ALTIUM_BINARY_PARSER& aReader )
 {
     ALTIUM_RECORD recordtype = static_cast<ALTIUM_RECORD>( aReader.Read<uint8_t>() );
@@ -953,7 +1006,8 @@ AARC6::AARC6( ALTIUM_BINARY_PARSER& aReader )
 
     if( remaining >= 9 )
     {
-        aReader.Skip( 5 );
+        aReader.Skip( 1 );
+        unionindex = aReader.Read<uint32_t>();
         layer_v7 = static_cast<ALTIUM_LAYER>( aReader.Read<uint32_t>() );
     }
 
@@ -1310,7 +1364,8 @@ ATRACK6::ATRACK6( ALTIUM_BINARY_PARSER& aReader )
 
     if( remaining >= 9 )
     {
-        aReader.Skip( 5 );
+        unionindex = aReader.Read<uint32_t>();
+        aReader.Skip( 1 );
         layer_v7 = static_cast<ALTIUM_LAYER>( aReader.Read<uint32_t>() );
     }
 

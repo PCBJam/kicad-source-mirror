@@ -52,6 +52,9 @@
 #include <footprint_info_impl.h>
 #include <footprint.h>
 #include <nlohmann/json.hpp>
+#ifdef __EMSCRIPTEN__
+#include <pcb_io/pcbjam_fp/pcb_io_pcbjam_fp.h>
+#endif
 #include <dialogs/dialog_configure_paths.h>
 #include <dialogs/panel_grid_settings.h>
 #include <panel_display_options.h>
@@ -63,11 +66,15 @@
 #include <panel_pcbnew_color_settings.h>
 #include <panel_pcbnew_action_plugins.h>
 #include <panel_pcbnew_display_origin.h>
+#ifndef __EMSCRIPTEN__
 #include <panel_3D_display_options.h>
 #include <panel_3D_opengl_options.h>
 #include <panel_3D_raytracing_options.h>
+#endif
 #include <project_pcb.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <string_utils.h>
 #include <thread_pool.h>
 #include <trace_helpers.h>
@@ -88,7 +95,73 @@
 
 /* init functions defined by swig */
 
+#ifdef KICAD_SCRIPTING
 extern "C" PyObject* PyInit__pcbnew( void );
+#endif
+
+
+#ifdef __EMSCRIPTEN__
+/**
+ * The publish-time footprint index: for every pcbjam CDN lib (keyed by the
+ * /mnt/pcbjam/<id> URI tail), each footprint's name + unique electrical pad
+ * count (FOOTPRINT::GetUniquePadCount( DO_NOT_INCLUDE_NPTH ), computed when the
+ * libs were published).  filterFootprints() filters against this instead of
+ * forcing a lazy fat-load of EVERY footprint library on the chooser's first
+ * symbol selection — the same cold-cost shape the symbol side needed the
+ * fat-list/parallel-parse work for, but here no bodies are needed at all.
+ * Fetched over the JS bridge ONCE and cached for the session; libs absent from
+ * the index (user libs) keep the load-and-parse fallback path.
+ */
+struct PCBJAM_FP_INDEX_ENTRY
+{
+    wxString name;
+    int      pads;
+};
+
+static const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>* pcbjamFpIndex()
+{
+    static std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> s_index;
+    static bool s_loaded = false;
+
+    if( s_loaded )
+        return &s_index;
+
+    // Null = provider absent or no index published: report "no index" so the
+    // caller falls back to per-lib loads, and retry on the next call (the JS
+    // side caches a definitive miss, so the retry crossing stays cheap).
+    std::optional<std::string> raw =
+            PCB_IO_PCBJAM_FP::BridgeRequest( "index", wxS( "/mnt/pcbjam/" ), wxEmptyString );
+
+    if( !raw )
+        return nullptr;
+
+    try
+    {
+        nlohmann::json parsed = nlohmann::json::parse( *raw );
+
+        for( const auto& [libId, entries] : parsed.at( "libs" ).items() )
+        {
+            std::vector<PCBJAM_FP_INDEX_ENTRY>& vec = s_index[libId];
+            vec.reserve( entries.size() );
+
+            for( const auto& e : entries )
+            {
+                vec.push_back( { wxString::FromUTF8( e.at( 0 ).get<std::string>() ),
+                                 e.at( 1 ).get<int>() } );
+            }
+        }
+    }
+    catch( const std::exception& )
+    {
+        // Malformed index: cache the empty map — every lib falls back to the
+        // load-and-parse path; refetching the same artifact wouldn't help.
+        s_index.clear();
+    }
+
+    s_loaded = true;
+    return &s_index;
+}
+#endif
 
 
 /**
@@ -161,12 +234,91 @@ static wxString filterFootprints( const wxString& aFilterJson )
         adapter->AsyncLoad();
         adapter->BlockUntilLoaded();
 
+        // Footprint filter patterns with case-insensitive matching
+        auto matchesFilters =
+                [&filterMatchers]( const wxString& aLibNickname, const wxString& aName ) -> bool
+                {
+                    if( filterMatchers.empty() )
+                        return true;
+
+                    for( const auto& matcher : filterMatchers )
+                    {
+                        wxString name;
+
+                        // If filter contains ':', include library nickname in match string
+                        if( matcher->GetPattern().Contains( wxS( ":" ) ) )
+                            name = aLibNickname.Lower() + wxS( ":" );
+
+                        name += aName.Lower();
+
+                        if( matcher->Find( name ) )
+                            return true;
+                    }
+
+                    return false;
+                };
+
         // Iterate through preloaded footprints directly instead of re-reading from disk
         json output = json::array();
         int  count = 0;
 
+#ifdef __EMSCRIPTEN__
+        const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>* fpIndex =
+                pcbjamFpIndex();
+#endif
+
         for( const wxString& nickname : adapter->GetLibraryNames() )
         {
+#ifdef __EMSCRIPTEN__
+            // Answer covered pcbjam libs from the publish-time index — names and
+            // pad counts only, NO body loads. A pcbjam lib NOT covered (user
+            // libs, no index published) is SKIPPED rather than fat-loaded: this
+            // filter runs inside the chooser's modal event pump, and the lazy
+            // per-lib fat-load fan-out (bridge suspend + thread-pool parse per
+            // library) would fan hundreds of suspending fetches into that modal
+            // wait (it crashed the retired asyncify pump outright). Skipping
+            // matches the pre-index behavior of the eeschema selector
+            // (default-only row). Non-pcbjam rows keep the native parse path
+            // below.
+            {
+                std::optional<LIBRARY_TABLE_ROW*> row = adapter->GetRow( nickname );
+                wxString uri = row ? LIBRARY_MANAGER::GetFullURI( *row, true ) : wxString();
+
+                if( uri.StartsWith( wxS( "/mnt/pcbjam/" ) ) )
+                {
+                    if( !fpIndex )
+                        continue;
+
+                    auto it = fpIndex->find(
+                            std::string( uri.Mid( strlen( "/mnt/pcbjam/" ) ).utf8_str() ) );
+
+                    if( it == fpIndex->end() )
+                        continue;
+
+                    for( const PCBJAM_FP_INDEX_ENTRY& entry : it->second )
+                    {
+                        // Pin count filter
+                        if( pinCount > 0 && entry.pads != pinCount )
+                            continue;
+
+                        if( !matchesFilters( nickname, entry.name ) )
+                            continue;
+
+                        wxString libId = LIB_ID( nickname, entry.name ).Format();
+                        output.push_back( libId.ToStdString() );
+
+                        if( ++count >= maxResults )
+                            break;
+                    }
+
+                    if( count >= maxResults )
+                        break;
+
+                    continue;
+                }
+            }
+#endif
+
             std::vector<FOOTPRINT*> footprints = adapter->GetFootprints( nickname, true );
 
             for( FOOTPRINT* fp : footprints )
@@ -183,31 +335,9 @@ static wxString filterFootprints( const wxString& aFilterJson )
                         continue;
                 }
 
-                // Footprint filter patterns with case-insensitive matching
-                if( !filterMatchers.empty() )
-                {
-                    bool matches = false;
-
-                    for( const auto& matcher : filterMatchers )
-                    {
-                        wxString name;
-
-                        // If filter contains ':', include library nickname in match string
-                        if( matcher->GetPattern().Contains( wxS( ":" ) ) )
-                            name = fp->GetFPID().GetLibNickname().wx_str().Lower() + wxS( ":" );
-
-                        name += fp->GetFPID().GetLibItemName().wx_str().Lower();
-
-                        if( matcher->Find( name ) )
-                        {
-                            matches = true;
-                            break;
-                        }
-                    }
-
-                    if( !matches )
-                        continue;
-                }
+                if( !matchesFilters( fp->GetFPID().GetLibNickname().wx_str(),
+                                     fp->GetFPID().GetLibItemName().wx_str() ) )
+                    continue;
 
                 wxString libId = fp->GetFPID().Format();
                 output.push_back( libId.ToStdString() );
@@ -254,8 +384,10 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         {
             auto frame = new PCB_EDIT_FRAME( aKiway, aParent );
 
+#ifdef KICAD_SCRIPTING
             // give the scripting helpers access to our frame
             ScriptingSetPcbEditFrame( frame );
+#endif
 
             if( Kiface().IsSingle() )
             {
@@ -469,6 +601,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         case PANEL_PCB_ACTION_PLUGINS:
             return new PANEL_PCBNEW_ACTION_PLUGINS( aParent );
 
+#ifndef __EMSCRIPTEN__
         case PANEL_3DV_DISPLAY_OPTIONS:
             return new PANEL_3D_DISPLAY_OPTIONS( aParent );
 
@@ -494,6 +627,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
 
             return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_PCB_DISPLAY3D, actions, controls );
         }
+#endif  // __EMSCRIPTEN__
 
         default:
             return nullptr;
@@ -545,8 +679,10 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             return reinterpret_cast<void*>( &filterFootprints );
         }
 
+#ifdef KICAD_SCRIPTING
         case KIFACE_SCRIPTING_LEGACY:
             return reinterpret_cast<void*>( PyInit__pcbnew );
+#endif
 
         default:
             return nullptr;
@@ -771,8 +907,8 @@ bool IFACE::HandleJobConfig( JOB* aJob, wxWindow* aParent )
 
 void IFACE::PreloadLibraries( KIWAY* aKiway )
 {
-    constexpr static int interval = 150;
-    constexpr static int timeLimit = 120000;
+    [[maybe_unused]] constexpr static int interval = 150;    // poll loop is native-only (WASM runs inline)
+    [[maybe_unused]] constexpr static int timeLimit = 120000;
 
     wxCHECK( aKiway, /* void */ );
 
@@ -797,12 +933,17 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
 
             FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &aKiway->Prj() );
 
-            int elapsed = 0;
+            [[maybe_unused]] int elapsed = 0;    // poll loop is native-only (WASM runs inline)
             bool aborted = false;
 
             reporter->Report( _( "Loading Footprint Libraries" ) );
             adapter->AsyncLoad();
 
+#ifndef __EMSCRIPTEN__
+            // Native: poll the background workers for progress. On WASM AsyncLoad()
+            // above ran inline+synchronously (the preload is dispatched inline on the
+            // main thread — see below), so the futures are already complete; skip the
+            // poll loop, whose sleep_for would otherwise just block the main thread.
             while( true )
             {
                 if( m_libraryPreloadAbort.load() )
@@ -833,6 +974,7 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
                 if( elapsed > timeLimit )
                     break;
             }
+#endif
 
             // AbortAsyncLoad() sets the adapter's worker abort flag and then blocks,
             // so workers exit at their next checkpoint. BlockUntilLoaded() alone just
@@ -891,8 +1033,20 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
             }
         };
 
+#ifdef __EMSCRIPTEN__
+    // WASM: std::async( launch::async ) would run the preload on a real pthread
+    // worker; on it the pcbjam footprint-library bridge takes its proxy-to-main path
+    // and deadlocks, because the main thread is still inside OpenProjectFiles and
+    // never returns to the event loop to pump the proxying queue. Run the preload
+    // inline on the main thread so the bridge uses its suspending main-thread path.
+    preload();
+    std::promise<void> preloadDone;
+    preloadDone.set_value();
+    m_libraryPreloadReturn = preloadDone.get_future();
+#else
     std::future<void> preloadFuture = std::async( std::launch::async, preload );
     m_libraryPreloadReturn = std::move( preloadFuture );
+#endif
 }
 
 

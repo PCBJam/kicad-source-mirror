@@ -47,6 +47,22 @@ static wxString getTestFontPath( const wxString& aFileName )
 }
 
 
+static KIFONT::OUTLINE_FONT* loadTestOutlineFont( const wxString& aFontName,
+                                                  const wxString& aFileName )
+{
+    wxString fontPath = getTestFontPath( aFileName );
+    BOOST_REQUIRE( wxFileExists( fontPath ) );
+
+    std::vector<wxString> embeddedFonts{ fontPath };
+    KIFONT::FONT*         font = KIFONT::FONT::GetFont( aFontName, false, false, &embeddedFonts );
+
+    BOOST_REQUIRE( font );
+    BOOST_REQUIRE( font->IsOutline() );
+
+    return static_cast<KIFONT::OUTLINE_FONT*>( font );
+}
+
+
 // Legacy "symbol" fonts place their glyphs in the U+F000..U+F0FF private-use range and carry no
 // Unicode charmap that maps Basic Latin, so forcing the Unicode charmap maps every character to
 // .notdef and text renders as tofu boxes. Drive the full load-and-shape path and confirm such a
@@ -108,6 +124,26 @@ BOOST_AUTO_TEST_CASE( UnicodeFontKeepsUnicodeCharmap )
     BOOST_REQUIRE( face->charmap );
     BOOST_CHECK_EQUAL( face->charmap->encoding, FT_ENCODING_UNICODE );
     BOOST_CHECK( FT_Get_Char_Index( face, 'A' ) != 0 );
+}
+
+
+// Scaling the em-relative interline pitch by the font's FT_Face height / units_per_EM ratio
+// double-counts and inflates multiline spacing, growing the text object and its selection box
+BOOST_AUTO_TEST_CASE( InterlineIgnoresFaceHeightRatio )
+{
+    KIFONT::OUTLINE_FONT* outline = loadTestOutlineFont( wxT( "Noto Sans" ),
+                                                         wxT( "NotoSans-Regular.ttf" ) );
+    FT_Face               face = outline->GetFace();
+
+    BOOST_REQUIRE( face );
+    BOOST_REQUIRE_GT( face->units_per_EM, 0 );
+    BOOST_REQUIRE_GT( face->height, face->units_per_EM );
+
+    const double           glyphHeight = 10000.0;
+    const KIFONT::METRICS& metrics = KIFONT::METRICS::Default();
+
+    BOOST_CHECK_CLOSE( outline->GetInterline( glyphHeight, metrics ),
+                       metrics.GetInterline( glyphHeight ), 1e-6 );
 }
 
 

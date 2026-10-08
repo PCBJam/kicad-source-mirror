@@ -1425,13 +1425,18 @@ BOARD* PCB_IO_KICAD_SEXPR_PARSER::parseBOARD_unchecked()
             {
                 LSET layers = curr_item.GetLayerSet();
 
-                if( layers.test( Rescue ) )
-                {
-                    layers.set( destLayer );
-                    layers.reset( Rescue );
-                }
+                if( !layers.test( Rescue ) )
+                    return;
 
-                curr_item.SetLayerSet( layers );
+                layers.set( destLayer );
+                layers.reset( Rescue );
+
+                // Single-layer items (shapes, text) ignore non-copper layers in SetLayerSet, so
+                // move them with SetLayer. Multi-layer items keep their full set.
+                if( layers.count() == 1 )
+                    curr_item.SetLayer( destLayer );
+                else
+                    curr_item.SetLayerSet( layers );
             };
 
             for( PCB_TRACK* track : m_board->Tracks() )
@@ -1482,11 +1487,16 @@ BOARD* PCB_IO_KICAD_SEXPR_PARSER::parseBOARD_unchecked()
             }
 
             m_undefinedLayers.clear();
+
+            // Rescued items make the board differ from disk. Mark modified so it gets re-saved.
+            m_board->SetModified();
         }
         else
         {
-            THROW_IO_ERROR( wxT( "One or more undefined undefinedLayerNames was found; "
-                                 "open the board in the PCB Editor to resolve." ) );
+            THROW_IO_ERROR( wxString::Format( _( "One or more items were found on undefined "
+                                                 "layers (%s). Open the board in the PCB Editor "
+                                                 "to resolve." ),
+                                              undefinedLayerNames ) );
         }
     }
 
@@ -1587,7 +1597,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::resolveGroups( BOARD_ITEM* aParent )
             group->SetName( groupInfo->name );
         }
 
-        const_cast<KIID&>( group->m_Uuid ) = groupInfo->uuid;
+        group->SetUuidDirect( groupInfo->uuid );
 
         if( groupInfo->libId.IsValid() )
             group->SetDesignBlockLibId( groupInfo->libId );
@@ -2012,8 +2022,18 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseBoardStackup()
         NeedSYMBOL();
         name = FromUTF8();
 
-        // init the layer id. For dielectric, layer id = UNDEFINED_LAYER
-        PCB_LAYER_ID layerId = m_board->GetLayerID( name );
+        // Match the canonical names that we write, not GetLayerID() because the user-name matching
+        // could end up being the same as a canonical name and corrupt the stack.
+        PCB_LAYER_ID layerId = UNDEFINED_LAYER;
+
+        for( PCB_LAYER_ID candidate : m_board->GetEnabledLayers().Seq() )
+        {
+            if( LSET::Name( candidate ) == name )
+            {
+                layerId = candidate;
+                break;
+            }
+        }
 
         // Init the type
         BOARD_STACKUP_ITEM_TYPE type = BS_ITEM_TYPE_UNDEFINED;
@@ -2294,7 +2314,10 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseLayers()
             else
                 anyHidden = true;
 
-            m_board->SetLayerDescr( PCB_LAYER_ID( cu_layer.m_number ), cu_layer );
+            if( !m_preserveDestinationStackup || !m_board->IsLayerEnabled( PCB_LAYER_ID( cu_layer.m_number ) ) )
+            {
+                m_board->SetLayerDescr( PCB_LAYER_ID( cu_layer.m_number ), cu_layer );
+            }
 
             UTF8 name = cu_layer.m_name;
 
@@ -2344,7 +2367,8 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseLayers()
         else
             anyHidden = true;
 
-        m_board->SetLayerDescr( it->second, layer );
+        if( !m_preserveDestinationStackup || !m_board->IsLayerEnabled( it->second ) )
+            m_board->SetLayerDescr( it->second, layer );
 
         token = NextTok();
 
@@ -2362,13 +2386,21 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseLayers()
         THROW_PARSE_ERROR( err, CurSource(), CurLine(), CurLineNumber(), CurOffset() );
     }
 
-    m_board->SetCopperLayerCount( copperLayerCount );
-    m_board->SetEnabledLayers( enabledLayers );
+    if( m_preserveDestinationStackup )
+    {
+        m_board->SetCopperLayerCount( std::max( copperLayerCount, m_board->GetCopperLayerCount() ) );
+        m_board->SetEnabledLayers( enabledLayers | m_board->GetEnabledLayers() );
+    }
+    else
+    {
+        m_board->SetCopperLayerCount( copperLayerCount );
+        m_board->SetEnabledLayers( enabledLayers );
 
-    // Only set this if any layers were explicitly marked as hidden.  Otherwise, we want to leave
-    // this alone; default visibility will show everything
-    if( anyHidden )
-        m_board->m_LegacyVisibleLayers = visibleLayers;
+        // Only set this if any layers were explicitly marked as hidden.  Otherwise, we want to leave
+        // this alone; default visibility will show everything
+        if( anyHidden )
+            m_board->m_LegacyVisibleLayers = visibleLayers;
+    }
 }
 
 
@@ -3537,7 +3569,7 @@ PCB_SHAPE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_SHAPE( BOARD_ITEM* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( shape->m_Uuid ) = CurStrToKIID();
+            shape->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -3708,7 +3740,7 @@ PCB_REFERENCE_IMAGE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_REFERENCE_IMAGE( BOARD_
         case T_uuid:
         {
             NextTok();
-            const_cast<KIID&>( bitmap->m_Uuid ) = CurStrToKIID();
+            bitmap->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
         }
@@ -3870,7 +3902,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TEXT_effects( PCB_TEXT* aText, PCB_TEXT
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( aText->m_Uuid ) = CurStrToKIID();
+            aText->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4053,7 +4085,7 @@ PCB_BARCODE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_BARCODE( BOARD_ITEM* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( barcode->m_Uuid ) = CurStrToKIID();
+            barcode->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4250,7 +4282,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseTextBoxContent( PCB_TEXTBOX* aTextBox )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( aTextBox->m_Uuid ) = CurStrToKIID();
+            aTextBox->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4324,7 +4356,7 @@ PCB_TABLE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TABLE( BOARD_ITEM* aParent )
 
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( table->m_Uuid ) = CurStrToKIID();
+            table->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4543,7 +4575,7 @@ PCB_DIMENSION_BASE* PCB_IO_KICAD_SEXPR_PARSER::parseDIMENSION( BOARD_ITEM* aPare
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( dim->m_Uuid ) = CurStrToKIID();
+            dim->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -5071,7 +5103,7 @@ FOOTPRINT* PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked( wxArrayString* a
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( footprint->m_Uuid ) = CurStrToKIID();
+            footprint->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -5465,13 +5497,13 @@ FOOTPRINT* PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked( wxArrayString* a
                 {
                 case FIELD_T::REFERENCE:
                     footprint->Reference() = PCB_FIELD( *text, FIELD_T::REFERENCE );
-                    const_cast<KIID&>( footprint->Reference().m_Uuid ) = text->m_Uuid;
+                    footprint->Reference().SetUuidDirect( text->m_Uuid );
                     delete text;
                     break;
 
                 case FIELD_T::VALUE:
                     footprint->Value() = PCB_FIELD( *text, FIELD_T::VALUE );
-                    const_cast<KIID&>( footprint->Value().m_Uuid ) = text->m_Uuid;
+                    footprint->Value().SetUuidDirect( text->m_Uuid );
                     delete text;
                     break;
 
@@ -6380,7 +6412,7 @@ PAD* PCB_IO_KICAD_SEXPR_PARSER::parsePAD( FOOTPRINT* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( pad->m_Uuid ) = CurStrToKIID();
+            pad->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7248,7 +7280,7 @@ PCB_ARC* PCB_IO_KICAD_SEXPR_PARSER::parseARC()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( arc->m_Uuid ) = CurStrToKIID();
+            arc->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7343,7 +7375,7 @@ PCB_TRACK* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TRACK()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( track->m_Uuid ) = CurStrToKIID();
+            track->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7545,7 +7577,7 @@ PCB_VIA* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_VIA()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( via->m_Uuid ) = CurStrToKIID();
+            via->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7897,7 +7929,7 @@ ZONE* PCB_IO_KICAD_SEXPR_PARSER::parseZONE( BOARD_ITEM_CONTAINER* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( zone->m_Uuid ) = CurStrToKIID();
+            zone->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -8585,7 +8617,7 @@ PCB_POINT* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_POINT()
         case T_uuid:
         {
             NextTok();
-            const_cast<KIID&>( point->m_Uuid ) = CurStrToKIID();
+            point->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
         }
@@ -8647,7 +8679,7 @@ PCB_TARGET* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TARGET()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( target->m_Uuid ) = CurStrToKIID();
+            target->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 

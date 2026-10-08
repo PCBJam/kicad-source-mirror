@@ -59,6 +59,11 @@ public:
 
     size_t Hash() const;
 
+    /**
+     * Return a KIID derived from a name, the same name always gives the same KIID.
+     */
+    static KIID FromName( const std::string& aName );
+
     bool        IsLegacyTimestamp() const;
     timestamp_t AsLegacyTimestamp() const;
 
@@ -261,6 +266,20 @@ template<> struct KICOMMON_API std::hash<KIID>
     std::size_t operator()( const KIID& aId ) const
     {
         return aId.Hash();
+    }
+};
+
+
+template<> struct std::hash<KIID_PATH>
+{
+    std::size_t operator()( const KIID_PATH& aPath ) const
+    {
+        std::size_t seed = 0;
+
+        for( const KIID& kiid : aPath )
+            seed ^= std::hash<KIID>()( kiid ) + 0x9e3779b9 + ( seed << 6 ) + ( seed >> 2 );
+
+        return seed;
     }
 };
 
