@@ -225,6 +225,21 @@ wxString PCBJAM_3D::NormalizeModelRef( const wxString& aModelRef )
 
         const wxString var = ref.Mid( 2, end - 2 );
 
+        // A team library's path variable (`${MYPARTS_DIR}/…`, libs 0020): the
+        // provider resolves it, so hand it over whole, in brace syntax. Env
+        // expansion doesn't work in the wasm resolver, so this bridge is the
+        // only way such a ref finds its model. ${KIPRJMOD} stays native.
+        if( var.EndsWith( wxT( "_DIR" ) ) && !var.Contains( wxT( "3DMODEL_DIR" ) )
+            && var != wxT( "KIPRJMOD" ) )
+        {
+            wxString rest = ref.Mid( end + 1 );
+
+            while( !rest.empty() && ( rest[0] == '/' || rest[0] == '\\' ) )
+                rest = rest.Mid( 1 );
+
+            return rest.empty() ? wxString() : wxT( "${" ) + var + wxT( "}/" ) + rest;
+        }
+
         // Any vintage of the model-dir var, plus the pre-v6 legacy alias.
         if( !var.Contains( wxT( "3DMODEL_DIR" ) ) && var != wxT( "KISYS3DMOD" ) )
             return wxEmptyString;
@@ -323,6 +338,9 @@ wxString PCBJAM_3D::EnsureModelFile( const wxString& aModelRef )
             path.clear();
     }
 
+    // A miss on a library-variable ref is not final: the model can be uploaded
+    // into the team library later in the same session (libs 0020).
+    if( !path.empty() || !rel.StartsWith( wxT( "${" ) ) )
     {
         std::lock_guard<std::mutex> lock( memoMutex );
         resolved[rel] = path;
