@@ -656,6 +656,27 @@ void SCH_IO_PCBJAM_LIB::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMB
 }
 
 
+void SCH_IO_PCBJAM_LIB::DeleteSymbol( const wxString& aLibraryPath, const wxString& aSymbolName,
+                                      const std::map<std::string, UTF8>* aProperties )
+{
+    // Throws IO_ERROR if the provider rejects the delete. Without this override
+    // the base class threw NOT_IMPLEMENTED, so a renamed symbol failed to save
+    // and "Delete" never removed anything (libs 0020 P13).
+    request( "delete", aLibraryPath, aSymbolName );
+
+    wxString key = aLibraryPath + wxS( "|" ) + aSymbolName;
+
+    if( auto it = m_cache.find( key ); it != m_cache.end() )
+    {
+        delete it->second;
+        m_cache.erase( it );
+    }
+
+    m_loadedLibs.erase( aLibraryPath );
+    m_libNames.erase( aLibraryPath );
+}
+
+
 void SCH_IO_PCBJAM_LIB::SaveLibrary( const wxString& aFileName,
                                      const std::map<std::string, UTF8>* aProperties )
 {

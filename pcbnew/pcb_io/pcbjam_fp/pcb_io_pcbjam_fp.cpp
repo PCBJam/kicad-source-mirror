@@ -603,3 +603,25 @@ void PCB_IO_PCBJAM_FP::FootprintSave( const wxString& aLibraryPath, const FOOTPR
     m_loadedLibs.erase( aLibraryPath );
     m_libNames.erase( aLibraryPath );
 }
+
+
+void PCB_IO_PCBJAM_FP::FootprintDelete( const wxString& aLibraryPath,
+                                        const wxString& aFootprintName,
+                                        const std::map<std::string, UTF8>* aProperties )
+{
+    // Throws IO_ERROR if the provider rejects the delete. Without this override
+    // the base class threw NOT_IMPLEMENTED, which the adapter swallowed, so a
+    // rename left the old footprint behind (libs 0020 P13).
+    request( "delete", aLibraryPath, aFootprintName );
+
+    wxString key = aLibraryPath + wxS( "|" ) + aFootprintName;
+
+    if( auto it = m_cache.find( key ); it != m_cache.end() )
+    {
+        delete it->second;
+        m_cache.erase( it );
+    }
+
+    m_loadedLibs.erase( aLibraryPath );
+    m_libNames.erase( aLibraryPath );
+}

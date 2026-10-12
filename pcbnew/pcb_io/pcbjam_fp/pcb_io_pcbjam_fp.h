@@ -60,6 +60,8 @@ class FOOTPRINT;
  *                                                document, or null if not found
  *   request( "save", uri, json, "footprint" ) -> persist one footprint; json is
  *                                                {"name":..,"body":<(footprint …)>}
+ *   request( "delete", uri, name, "footprint" ) -> remove one footprint (a rename
+ *                                                is delete-old + save-new upstream)
  *
  * The call suspends via the JSPI token wait on the main thread, or proxies to
  * the main thread and futex-blocks on a worker, until the provider's promise
@@ -92,6 +94,9 @@ public:
 
     void FootprintSave( const wxString& aLibraryPath, const FOOTPRINT* aFootprint,
                         const std::map<std::string, UTF8>* aProperties = nullptr ) override;
+
+    void FootprintDelete( const wxString& aLibraryPath, const wxString& aFootprintName,
+                          const std::map<std::string, UTF8>* aProperties = nullptr ) override;
 
     /// Every pcbjam lib is writable; save semantics are server-side policy.
     bool IsLibraryWritable( const wxString& aLibraryPath ) override

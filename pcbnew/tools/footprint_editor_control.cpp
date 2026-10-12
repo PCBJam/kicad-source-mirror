@@ -128,7 +128,10 @@ bool FOOTPRINT_EDITOR_CONTROL::Init()
 
 // clang-format off
     ctxMenu.AddItem( PCB_ACTIONS::newFootprint,       libSelectedCondition, 10 );
+#ifndef __EMSCRIPTEN__
+    // No footprint wizards in the wasm build (they are Python; libs 0020 P15).
     ctxMenu.AddItem( PCB_ACTIONS::createFootprint,    libSelectedCondition, 10 );
+#endif
 
     ctxMenu.AddSeparator( 10 );
     ctxMenu.AddItem( ACTIONS::save,                   SELECTION_CONDITIONS::ShowAlways, 10 );
