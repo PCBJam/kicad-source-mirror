@@ -51,6 +51,8 @@
  *                                      if the symbol does not exist
  *   request( "save", uri, json )    -> persist one symbol; json is
  *                                      {"name":..,"body":<kicad_symbol_lib>}
+ *   request( "delete", uri, name )  -> remove one symbol (a rename is
+ *                                      delete-old + save-new upstream)
  *
  * The call suspends via the JSPI token wait on the main thread, or proxies
  * to the main thread and futex-blocks on a worker, until the provider's
@@ -82,6 +84,9 @@ public:
 
     void SaveSymbol( const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol,
                      const std::map<std::string, UTF8>* aProperties = nullptr ) override;
+
+    void DeleteSymbol( const wxString& aLibraryPath, const wxString& aSymbolName,
+                       const std::map<std::string, UTF8>* aProperties = nullptr ) override;
 
     /// Per-item plugin: SaveSymbol persists immediately, so this is a no-op.
     /// (Override so the base class's NOT_IMPLEMENTED throw doesn't fail saves.)
