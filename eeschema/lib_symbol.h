@@ -32,6 +32,7 @@
 #include <sch_field.h>
 #include <sch_pin.h>
 #include <lib_tree_item.h>
+#include <set>
 #include <vector>
 #include <core/multivector.h>
 #include <default_values.h>
@@ -70,6 +71,39 @@ struct LIB_SYMBOL_UNIT
     int m_unit;                       ///< The unit number.
     int m_bodyStyle;                  ///< The alternate body style of the unit.
     std::vector<SCH_ITEM*> m_items;   ///< The items unique to this unit and alternate body style.
+};
+
+
+/**
+ * Options controlling how a derived symbol's fields are reconciled with its parent.
+ *
+ * @see LIB_SYMBOL::SyncFieldsFromParent
+ */
+struct LIB_FIELD_SYNC_OPTIONS
+{
+    /// Reconcile every field.  When false only the names in m_updateFields are touched.
+    bool m_updateAllFields = true;
+
+    /// Field names to reconcile when m_updateAllFields is false.
+    std::set<wxString> m_updateFields;
+
+    /// Drop fields not present in the parent.
+    bool m_removeExtraFields = false;
+
+    /// Copy parent visibility and name-shown flags.
+    bool m_resetVisibility = false;
+
+    /// Copy parent text effects (font, justification, etc.) but keep local visibility/position.
+    bool m_resetEffects = false;
+
+    /// Copy parent field positions.
+    bool m_resetPositions = false;
+
+    /// Copy parent text when the parent value is non-empty.
+    bool m_resetText = false;
+
+    /// Copy parent text even when the parent value is empty.
+    bool m_resetEmptyText = false;
 };
 
 
@@ -304,6 +338,22 @@ public:
      * Create a copy of the SCH_FIELDs, sorted in ordinal order.
      */
     void CopyFields( std::vector<SCH_FIELD>& aList );
+
+    /**
+     * Reconcile this derived symbol's fields with those of its (flattened) parent.
+     *
+     * Existing fields are updated in place according to \a aOptions, fields the parent
+     * has but this symbol lacks are added, and (optionally) fields not present in the
+     * parent are dropped.  Does nothing when the symbol has no parent.
+     */
+    void SyncFieldsFromParent( const LIB_FIELD_SYNC_OPTIONS& aOptions );
+
+    /**
+     * @return true when SyncFieldsFromParent() can do something, i.e. the symbol is derived
+     * from a resolvable parent.  Shared by the "Update Symbol Fields" action's enable
+     * condition and its tool handler so the two never disagree.
+     */
+    bool CanUpdateFieldsFromParent() const { return IsDerived(); }
 
     /**
      * Add a field.  Takes ownership of the pointer.
@@ -641,6 +691,13 @@ public:
     std::vector<SCH_PIN*> GetPinsByNumber( const wxString& aNumber, int aUnit = 0, int aBodyStyle = 0 );
 
     /**
+     * Return true if \a aNumber names a pin of this symbol, in any unit or body style.
+     *
+     * @param aNumber - Pin number to look for.
+     */
+    bool HasPinNumber( const wxString& aNumber ) const;
+
+    /**
      * Return true if this symbol's pins do not match another symbol's pins. This is used to
      * detect whether the project cache is out of sync with the system libs.
      *
@@ -789,17 +846,24 @@ public:
     void SetBodyStyleNames( const std::vector<wxString>& aBodyStyleNames ) { m_bodyStyleNames = aBodyStyleNames; }
 
     /**
-     * Set or clear the alternate body style (DeMorgan) for the symbol.
+     * Set the number of body styles for the symbol.
      *
-     * If the symbol already has an alternate body style set and aHasAlternate is false, all
-     * of the existing draw items for the alternate body style are remove.  If the alternate
-     * body style is not set and aHasAlternate is true, than the base draw items are duplicated
-     * and added to the symbol.
+     * Draw items belonging to body styles beyond \a aCount are always deleted.  Draw items for
+     * the new body styles are duplicated from the standard body style when the symbol gains
+     * body styles and the caller asks for it.
      *
-     * @param aHasAlternate - Set or clear the symbol alternate body style.
-     * @param aDuplicatePins - Duplicate all pins from original body style if true.
+     * @param aCount - Number of body styles, at least 1.
+     * @param aDuplicateDrawItems - Duplicate all graphics from the standard body style if true.
+     * @param aDuplicatePins - Duplicate all pins from the standard body style if true.
      */
     void SetBodyStyleCount( int aCount, bool aDuplicateDrawItems, bool aDuplicatePins );
+
+    /**
+     * Delete the draw items belonging to a body style beyond \a aBodyStyleCount.
+     *
+     * @param aBodyStyleCount - Number of body styles to keep.
+     */
+    void PruneBodyStyleDrawItems( int aBodyStyleCount );
 
     /**
      * Comparison test that can be used for operators.

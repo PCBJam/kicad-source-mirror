@@ -29,6 +29,13 @@ include_directories(
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/pcbnew
+    # symbol_edit_frame.h includes <symbol_tree_pane.h>, which lives under eeschema/widgets.
+    ${CMAKE_SOURCE_DIR}/eeschema/widgets
+    # sch_tool_base.h (pulled in by tools/sch_editor_control.h) includes the bare
+    # <symbol_edit_frame.h>, which lives under eeschema/symbol_editor.
+    ${CMAKE_SOURCE_DIR}/eeschema/symbol_editor
+    # dialog_sim_model.h (white-box tested for issue 23687) includes <dialog_sim_model_base.h>.
+    ${CMAKE_SOURCE_DIR}/eeschema/dialogs
     ${CMAKE_SOURCE_DIR}/qa/mocks/include
     ${CMAKE_SOURCE_DIR}/qa/qa_utils
     ${CMAKE_SOURCE_DIR}/qa
@@ -50,9 +57,12 @@ set( QA_EESCHEMA_SRCS
     ${CMAKE_SOURCE_DIR}/qa/tests/common/test_array_options.cpp
 
     sch_io/altium/test_altium_parser_sch.cpp
+    sch_io/altium/test_altium_sch_import.cpp
+    sch_io/database/test_sch_io_database_cycle.cpp
     sch_io/pads/test_pads_sch_parser.cpp
     sch_io/pads/test_pads_sch_import.cpp
     sch_io/geda/test_geda_sch_import.cpp
+    sch_io/cadstar/test_issue14447_arc_connection.cpp
 
     erc/test_erc_four_way.cpp
 	erc/test_erc_label_not_connected.cpp
@@ -64,6 +74,7 @@ set( QA_EESCHEMA_SRCS
 	erc/test_erc_no_connect.cpp
     erc/test_erc_hierarchical_schematics.cpp
     erc/test_erc_label_multiple_wires.cpp
+    erc/test_erc_marker_counts.cpp
     erc/test_erc_shared_pin_multiunit.cpp
     erc/test_erc_unconnected_wire_endpoints.cpp
     erc/test_erc_wire_bus_entry.cpp
@@ -72,6 +83,9 @@ set( QA_EESCHEMA_SRCS
     erc/test_erc_marker_deduplication.cpp
     erc/test_erc_power_pin_marker_location.cpp
     erc/test_erc_lib_symbol_mismatch.cpp
+    erc/test_erc_lib_symbol_field_position.cpp
+    erc/test_erc_footprint_filters.cpp
+    erc/test_erc_text_var_issue24442.cpp
 
     test_annotation_refdes_tracker_units.cpp
     test_annotation_units_conflicts.cpp
@@ -81,7 +95,10 @@ set( QA_EESCHEMA_SRCS
     test_issue18119_bus_hierarchy.cpp
     test_issue18299_bus_member_rename.cpp
     test_issue23840_bus_group_to_vector.cpp
+    test_issue19951_directive_label_coincident.cpp
     test_issue20173_paste_subsheet.cpp
+    test_issue21401_paste_pin_numbers.cpp
+    test_issue21798_bus_sheet_copy.cpp
     test_issue22286_pin_alternate.cpp
     test_issue22620_group_annotation.cpp
     test_sch_item_swap_group.cpp
@@ -92,23 +109,41 @@ set( QA_EESCHEMA_SRCS
     test_issue23058_jumper_pin_groups.cpp
     test_issue23143_junction_midpoint.cpp
     test_issue23403_shared_subsheet_screen.cpp
+    test_issue24870_top_level_sheet_delete.cpp
     test_issue22576_subsheet_standalone.cpp
     test_issue22694_global_hier_label.cpp
     test_issue24044_expression_net_names.cpp
+    test_issue24134_bus_fork_at_entry.cpp
     test_issue23719_global_label_chain.cpp
     test_issue24107_multiunit_grouping.cpp
     test_issue24072_symbol_arc_edit_mode.cpp
     test_issue24290_local_labels_across_top_sheets.cpp
     test_issue24409_cli_hierarchical_instances.cpp
+    test_issue24760_plot_page_numbers.cpp
+    test_issue24961_group_promotion.cpp
+    test_issue24943_variant_unit_sync.cpp
+    test_issue24858_variant_persistence.cpp
+    test_issue24915_job_variant_fields.cpp
+    test_variant_field_text_vars.cpp
+    test_issue24663_sheet_dnp_fields.cpp
+    test_issue25112_shared_sheet_field_scope.cpp
+    test_issue25280_pin_sync_units.cpp
     test_issue24360_root_sheetname.cpp
     test_issue24217_cli_variant_export.cpp
+    test_unique_sheet_name.cpp
+    test_unique_group_name.cpp
     test_issue16915_bus_netclass.cpp
     test_issue24220_hierarchical_bus_netclass.cpp
+    test_issue24477_http_network_loss.cpp
+    test_issue23023_http_fields.cpp
     test_issue24403_directive_label_i18n.cpp
     test_issue24297_http_migrate.cpp
+    test_issue24606_derived_symbol_fields.cpp
+    test_issue23687_sim_value_field.cpp
     test_nc_pin_connectivity.cpp
     test_crossing_label.cpp
     test_eagle_plugin.cpp
+    test_sch_footprint_field_reconciler.cpp
     test_junction_helpers.cpp
     test_junction_place.cpp
     test_bus_alias_whitespace.cpp
@@ -118,6 +153,7 @@ set( QA_EESCHEMA_SRCS
     test_label_bus_connectivity.cpp
     test_label_bounding_box.cpp
     test_lib_part.cpp
+    test_issue23743_sync_derived_fields.cpp
     test_ee_grid_helper.cpp
     test_netlist_exporter_kicad.cpp
     test_issue24330_netlist_pin_truncation.cpp
@@ -154,11 +190,13 @@ set( QA_EESCHEMA_SRCS
     test_stacked_pin_conversion.cpp
     test_pin_stacked_layout.cpp
     test_pin_text_overlap.cpp
+    test_pin_number_default_style_clearance.cpp
     test_remote_symbol_download_security.cpp
     test_remote_symbol_import.cpp
     test_remote_symbol_load_from_payload.cpp
     test_backannotate_unit_swap.cpp
     test_netlist_exporter_xml_stacked.cpp
+    test_netlist_exporter_xml_nested_groups.cpp
     test_resolve_drivers.cpp
     test_saveas_copy_subsheets.cpp
     test_update_items_connectivity.cpp
@@ -170,6 +208,16 @@ set( QA_EESCHEMA_SRCS
     test_schematic_clipboard_export.cpp
     test_autoplace_fields.cpp
 )
+
+# Database library tests need a live ODBC driver, so gate them the same way the common suite does.
+if( KICAD_TEST_DATABASE_LIBRARIES )
+    list( APPEND QA_EESCHEMA_SRCS sch_io/database/test_sch_io_database.cpp )
+
+    set_source_files_properties( sch_io/database/test_sch_io_database.cpp PROPERTIES
+            COMPILE_DEFINITIONS
+            "QA_DBLIB_SETTINGS_PATH=(\"${CMAKE_SOURCE_DIR}/qa/data/dblib/qa_dblib.kicad_dbl\")"
+            )
+endif()
 
 if( WIN32 )
     # We want to declare a resource manifest on Windows to enable UTF8 mode

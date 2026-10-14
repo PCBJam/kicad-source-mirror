@@ -123,7 +123,7 @@ PAD::PAD( const PAD& aOther ) :
 {
     PAD::operator=( aOther );
 
-    const_cast<KIID&>( m_Uuid ) = aOther.m_Uuid;
+    SetUuidDirect( aOther.m_Uuid );
 }
 
 
@@ -211,6 +211,9 @@ void PAD::Serialize( google::protobuf::Any &aContainer ) const
         pad.mutable_symbol_pin()->set_no_connect( pt->second );
     }
 
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        pad.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+
     aContainer.PackFrom( pad );
 }
 
@@ -222,7 +225,7 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &pad ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( pad.id().value() );
+    SetUuidDirect( KIID( pad.id().value() ) );
     SetPosition( kiapi::common::UnpackVector2( pad.position() ) );
     UnpackNet( pad.net() );
     SetLocked( pad.locked() == kiapi::common::types::LockedState::LS_LOCKED );
@@ -234,6 +237,7 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
     google::protobuf::Any padStackWrapper;
     padStackWrapper.PackFrom( pad.pad_stack() );
     m_padStack.Deserialize( padStackWrapper );
+    SetOrientation( m_padStack.GetOrientation() );
 
     SetLayer( m_padStack.StartLayer() );
 
@@ -2377,6 +2381,14 @@ std::vector<int> PAD::ViewGetLayers() const
             layers.push_back( LAYER_PAD_NETNAMES );
         else
             layers.push_back( LAYER_PAD_BK_NETNAMES );
+    }
+    else if( cuLayers.count() == 1 )
+    {
+        PCB_LAYER_ID layer = cuLayers.Seq().front();
+
+        layers.push_back( LAYER_PAD_COPPER_START + layer );
+        layers.push_back( LAYER_CLEARANCE_START + layer );
+        layers.push_back( LAYER_PAD_NETNAMES );
     }
 
     // Check non-copper layers. This list should include all the layers that the

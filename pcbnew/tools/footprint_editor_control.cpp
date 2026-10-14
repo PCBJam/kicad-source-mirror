@@ -58,6 +58,11 @@
 
 #include <memory>
 
+#ifdef __EMSCRIPTEN__
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <wx/clipbrd.h>
+#endif
+
 #include "footprint_editor_control.h"
 
 
@@ -128,7 +133,10 @@ bool FOOTPRINT_EDITOR_CONTROL::Init()
 
 // clang-format off
     ctxMenu.AddItem( PCB_ACTIONS::newFootprint,       libSelectedCondition, 10 );
+#ifndef __EMSCRIPTEN__
+    // No footprint wizards in the wasm build (they are Python; libs 0020 P15).
     ctxMenu.AddItem( PCB_ACTIONS::createFootprint,    libSelectedCondition, 10 );
+#endif
 
     ctxMenu.AddSeparator( 10 );
     ctxMenu.AddItem( ACTIONS::save,                   SELECTION_CONDITIONS::ShowAlways, 10 );
@@ -398,6 +406,33 @@ int FOOTPRINT_EDITOR_CONTROL::CutCopyFootprint( const TOOL_EVENT& aEvent )
         m_copiedFootprint.reset( m_frame->LoadFootprint( fpID ) );
     }
 
+#ifdef __EMSCRIPTEN__
+    // pcbjam: every browser tab is its own KiCad, so m_copiedFootprint never
+    // reaches another tab. Also put the footprint on the system clipboard as
+    // .kicad_mod text; PasteFootprint (in any tab) takes it from there.
+    if( m_copiedFootprint )
+    {
+        try
+        {
+            PCB_IO_KICAD_SEXPR io( CTL_FOR_LIBRARY );
+            io.Format( m_copiedFootprint.get() );
+
+            wxLogNull         doNotLog;
+            wxClipboardLocker lock( wxTheClipboard );
+
+            if( !!lock && wxTheClipboard->IsOpened() )
+            {
+                wxTheClipboard->SetData( new wxTextDataObject( wxString::FromUTF8( io.GetStringOutput( false ) ) ) );
+                wxTheClipboard->Flush();
+            }
+        }
+        catch( const IO_ERROR& )
+        {
+            // The in-tab copy still works.
+        }
+    }
+#endif
+
     if( aEvent.IsAction( &PCB_ACTIONS::cutFootprint ) )
         DeleteFootprint( aEvent );
 
@@ -407,6 +442,46 @@ int FOOTPRINT_EDITOR_CONTROL::CutCopyFootprint( const TOOL_EVENT& aEvent )
 
 int FOOTPRINT_EDITOR_CONTROL::PasteFootprint( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // pcbjam: a footprint copied in another tab arrives on the clipboard (see
+    // CutCopyFootprint); it wins over this tab's own copy, since it is newer
+    // or the same one.
+    {
+        wxString text;
+        {
+            wxLogNull         doNotLog;
+            wxClipboardLocker lock( wxTheClipboard );
+
+            if( !!lock && ( wxTheClipboard->IsSupported( wxDF_TEXT )
+                          || wxTheClipboard->IsSupported( wxDF_UNICODETEXT ) ) )
+            {
+                wxTextDataObject data;
+
+                if( wxTheClipboard->GetData( data ) )
+                    text = data.GetText();
+            }
+        }
+
+        if( text.Trim( false ).StartsWith( wxT( "(footprint" ) ) )
+        {
+            try
+            {
+                PCB_IO_KICAD_SEXPR io( CTL_FOR_LIBRARY );
+                BOARD_ITEM*        item = io.Parse( text );
+
+                if( FOOTPRINT* fp = dynamic_cast<FOOTPRINT*>( item ) )
+                    m_copiedFootprint.reset( fp );
+                else
+                    delete item;
+            }
+            catch( ... )
+            {
+                // Not a footprint we can read: fall back to this tab's copy.
+            }
+        }
+    }
+#endif
+
     if( m_copiedFootprint && !m_frame->GetLibTree()->GetSelectedLibId().GetLibNickname().empty() )
     {
         wxString newLib = m_frame->GetLibTree()->GetSelectedLibId().GetLibNickname();
@@ -922,7 +997,8 @@ int FOOTPRINT_EDITOR_CONTROL::RepairFootprint( const TOOL_EVENT& aEvent )
                 if( ids.count( aItem->m_Uuid ) )
                 {
                     duplicates++;
-                    const_cast<KIID&>( aItem->m_Uuid ) = KIID();
+                    if( BOARD_ITEM* boardItem = dynamic_cast<BOARD_ITEM*>( aItem ) )
+                        boardItem->ResetUuid();
                 }
 
                 ids.insert( aItem->m_Uuid );

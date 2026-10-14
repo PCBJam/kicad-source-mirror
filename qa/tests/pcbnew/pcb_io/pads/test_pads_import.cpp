@@ -26,6 +26,7 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include <pcb_io/pads/pcb_io_pads.h>
+#include <pcb_io/pads/pads_parser.h>
 #include <layer_ids.h>
 #include <padstack.h>
 #include <board.h>
@@ -40,6 +41,7 @@
 #include <pcb_dimension.h>
 #include <project/net_settings.h>
 #include <board_stackup_manager/board_stackup.h>
+#include <map>
 #include <set>
 
 
@@ -1413,13 +1415,16 @@ BOOST_AUTO_TEST_CASE( Issue23393_NetClassImport )
 
 
 /**
- * Verify that route arcs (CW/CCW) from PADS are imported as proper semicircles.
+ * Verify that a PADS route arc (CW/CCW) is imported as one arc spanning the two
+ * neighbouring corners, with no straight remnant.
  *
- * Issue #23540: route arcs specified with only CW/CCW direction (no explicit
- * center/radius) were imported with degenerate geometry because the arc
- * midpoint was computed from zero center and zero radius.
+ * Issues #23540 / #23612: a route arc is stored as three corners where the middle
+ * corner is the arc center. The arc begins on the preceding corner and ends on the
+ * following one. Treating the center corner as an ordinary vertex produced a
+ * half-length arc to the center plus a straight track from the center to the pad,
+ * so the curved track rendered as two straight lines to the pad.
  */
-BOOST_AUTO_TEST_CASE( Issue23540_RouteArcSemicircle )
+BOOST_AUTO_TEST_CASE( Issue23612_RouteArcSpansNeighbours )
 {
     PCB_IO_PADS plugin;
 
@@ -1430,7 +1435,8 @@ BOOST_AUTO_TEST_CASE( Issue23540_RouteArcSemicircle )
 
     BOOST_REQUIRE( board != nullptr );
 
-    int arcCount = 0;
+    int      arcCount = 0;
+    PCB_ARC* routeArc = nullptr;
 
     for( PCB_TRACK* trk : board->Tracks() )
     {
@@ -1439,6 +1445,7 @@ BOOST_AUTO_TEST_CASE( Issue23540_RouteArcSemicircle )
 
         PCB_ARC* arc = static_cast<PCB_ARC*>( trk );
         arcCount++;
+        routeArc = arc;
 
         EDA_ANGLE angle = arc->GetAngle();
         double absDeg = std::abs( angle.AsDegrees() );
@@ -1452,7 +1459,6 @@ BOOST_AUTO_TEST_CASE( Issue23540_RouteArcSemicircle )
 
         // In PADS the CW arc from left to right goes upward. After the Y-axis
         // flip to KiCad coordinates, "upward on screen" means smaller Y values.
-        // The arc midpoint Y must be less than both endpoint Y values.
         int chordY = ( start.y + end.y ) / 2;
 
         BOOST_CHECK_MESSAGE( mid.y < chordY,
@@ -1460,8 +1466,22 @@ BOOST_AUTO_TEST_CASE( Issue23540_RouteArcSemicircle )
                 "chord center Y=" << chordY );
     }
 
-    BOOST_CHECK_MESSAGE( arcCount >= 1,
-            "expected at least 1 PCB_ARC from route CW/CCW arc, got " << arcCount );
+    BOOST_REQUIRE_MESSAGE( arcCount == 1,
+            "expected exactly 1 PCB_ARC from route CW/CCW arc, got " << arcCount );
+
+    // The arc's net carries only the arc: treating the center corner as a vertex
+    // leaves a straight track from the center to the pad on the same net.
+    int straightOnArcNet = 0;
+
+    for( PCB_TRACK* trk : board->Tracks() )
+    {
+        if( trk->Type() == PCB_TRACE_T && trk->GetNetCode() == routeArc->GetNetCode() )
+            straightOnArcNet++;
+    }
+
+    BOOST_CHECK_MESSAGE( straightOnArcNet == 0,
+            "route arc net should contain no straight track remnant, got "
+            << straightOnArcNet );
 }
 
 
@@ -1743,6 +1763,324 @@ BOOST_AUTO_TEST_CASE( ImportIssue23391 )
     BOOST_CHECK_MESSAGE(
             conn_bot_pin1->GetShape( B_Cu ) == PAD_SHAPE::RECTANGLE,
             "Bottom connector pin-1 must have RECTANGLE shape on B_Cu after flip" );
+}
+
+
+/**
+ * Issue #23856: PADS PCB import got text and pad details wrong.
+ *
+ *   1. Free text containing non-ASCII bytes (e.g. the copyright sign) was
+ *      dropped entirely because the raw ISO-8859-1 content was treated as UTF-8.
+ *   2. Finger pad orientation (PADS FINORI) was reset to zero by a later round
+ *      pad-stack layer entry, so oval/rectangular fingers were not rotated.
+ *   3. Free text on the back of the board ignored the PADS mirror flag, so it
+ *      read left-to-right instead of mirrored.
+ */
+BOOST_AUTO_TEST_CASE( Issue23856_TextAndPadOrientation )
+{
+    PCB_IO_PADS plugin;
+    wxString filename = KI_TEST::GetPcbnewTestDataDir() + "plugins/pads/issue23856.asc";
+
+    std::unique_ptr<BOARD> board;
+    board.reset( plugin.LoadBoard( filename, nullptr, nullptr, nullptr ) );
+    BOOST_REQUIRE( board != nullptr );
+
+    // Issue 1 + 3: free text with the copyright character must survive import,
+    // and back-side text must be mirrored.
+    int copyrightCount = 0;
+    bool frontCopyrightNotMirrored = false;
+    bool backCopyrightMirrored = false;
+
+    for( BOARD_ITEM* item : board->Drawings() )
+    {
+        PCB_TEXT* t = dynamic_cast<PCB_TEXT*>( item );
+
+        if( !t )
+            continue;
+
+        // No imported free text should be empty (empty == dropped on decode).
+        BOOST_CHECK_MESSAGE( !t->GetText().IsEmpty(),
+                "imported free text should not be empty" );
+
+        if( t->GetText().Contains( wxT( "TEXMATE" ) ) )
+        {
+            copyrightCount++;
+
+            // Copyright sign previously broke the UTF-8 decode.
+            BOOST_CHECK_MESSAGE( t->GetText().Contains( wxString::FromUTF8( "©" ) ),
+                    "copyright text should retain the (c) character" );
+
+            if( t->GetLayer() == F_SilkS )
+            {
+                BOOST_CHECK_MESSAGE( !t->IsMirrored(),
+                        "front silkscreen text should not be mirrored" );
+                frontCopyrightNotMirrored = true;
+            }
+            else if( IsBackLayer( t->GetLayer() ) )
+            {
+                BOOST_CHECK_MESSAGE( t->IsMirrored(),
+                        "back-side text should be mirrored" );
+                backCopyrightMirrored = true;
+            }
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( copyrightCount >= 2,
+            "expected the copyright text on both front and back, got " << copyrightCount );
+    BOOST_CHECK( frontCopyrightNotMirrored );
+    BOOST_CHECK( backCopyrightMirrored );
+
+    // Issue 2: CN1 finger pads use FINORI 90, which must not be reset to zero by
+    // the back-side round entry of the through-hole stack.
+    bool foundCN1 = false;
+
+    for( FOOTPRINT* fp : board->Footprints() )
+    {
+        if( fp->GetReference() != wxT( "CN1" ) )
+            continue;
+
+        foundCN1 = true;
+
+        BOOST_CHECK_MESSAGE( fp->Pads().size() >= 10,
+                "CN1 should have at least 10 pads, got " << fp->Pads().size() );
+
+        for( PAD* pad : fp->Pads() )
+        {
+            // Oval/rectangle finger pads must carry the 90 degree finger rotation.
+            if( pad->GetShape( F_Cu ) == PAD_SHAPE::OVAL
+                || pad->GetShape( F_Cu ) == PAD_SHAPE::RECTANGLE )
+            {
+                BOOST_CHECK_MESSAGE(
+                        pad->GetOrientation() == EDA_ANGLE( 90, DEGREES_T ),
+                        "CN1 finger pad " << pad->GetNumber().ToStdString()
+                            << " should be oriented 90 degrees, got "
+                            << pad->GetOrientation().AsDegrees() );
+            }
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( foundCN1, "CN1 footprint should be imported" );
+}
+
+
+/**
+ * Verify that RT/ST thermal relief pad-stack entries map the PADS thermal-relief
+ * geometry onto KiCad pad overrides (issue #23392): a THERMAL zone connection, a
+ * spoke-width override, and, when the relief outer diameter exceeds the pad size, a
+ * thermal-gap override derived as (outer - pad_size) / 2. Reliefs whose outer diameter
+ * equals the pad size carry no gap and must leave the gap override unset.
+ */
+BOOST_AUTO_TEST_CASE( Issue23392_ThermalReliefGap )
+{
+    PCB_IO_PADS plugin;
+    wxString filename = KI_TEST::GetPcbnewTestDataDir() + "plugins/pads/issue23393/demo.asc";
+
+    std::unique_ptr<BOARD> board( plugin.LoadBoard( filename, nullptr, nullptr, nullptr ) );
+    BOOST_REQUIRE( board != nullptr );
+
+    auto findFP = [&]( const wxString& aRef ) -> FOOTPRINT*
+    {
+        for( FOOTPRINT* fp : board->Footprints() )
+        {
+            if( fp->GetReference() == aRef )
+                return fp;
+        }
+
+        return nullptr;
+    };
+
+    const int tolerance = 5000;  // 5 um
+
+    // L1 carries an RT relief whose outer diameter (4110000) exceeds the pad size
+    // (3750000), so every pad gets a THERMAL connection, a spoke-width override, and a
+    // gap override of (4110000 - 3750000) / 2 scaled to internal units.
+    {
+        FOOTPRINT* l1 = findFP( "L1" );
+        BOOST_REQUIRE_MESSAGE( l1, "L1 footprint should be imported" );
+        BOOST_REQUIRE( !l1->Pads().empty() );
+
+        for( PAD* pad : l1->Pads() )
+        {
+            BOOST_CHECK_MESSAGE( pad->GetLocalZoneConnection() == ZONE_CONNECTION::THERMAL,
+                    "L1 pad " << pad->GetNumber().ToStdString()
+                        << " should have THERMAL zone connection" );
+
+            std::optional<int> spoke = pad->GetLocalThermalSpokeWidthOverride();
+            BOOST_REQUIRE_MESSAGE( spoke.has_value(),
+                    "L1 pad " << pad->GetNumber().ToStdString()
+                        << " should have a spoke-width override" );
+            BOOST_CHECK_MESSAGE( std::abs( spoke.value() - 1000000 ) < tolerance,
+                    "L1 pad " << pad->GetNumber().ToStdString() << " spoke width "
+                        << spoke.value() << " should be ~1000000 nm" );
+
+            std::optional<int> gap = pad->GetLocalThermalGapOverride();
+            BOOST_REQUIRE_MESSAGE( gap.has_value(),
+                    "L1 pad " << pad->GetNumber().ToStdString()
+                        << " should have a thermal gap override" );
+            BOOST_CHECK_MESSAGE( std::abs( gap.value() - 120000 ) < tolerance,
+                    "L1 pad " << pad->GetNumber().ToStdString() << " thermal gap "
+                        << gap.value() << " should be ~120000 nm" );
+        }
+    }
+
+    // E1 carries an RT relief whose outer diameter equals the pad size, so it must have a
+    // THERMAL connection but NO gap override.
+    {
+        FOOTPRINT* e1 = findFP( "E1" );
+        BOOST_REQUIRE_MESSAGE( e1, "E1 footprint should be imported" );
+        BOOST_REQUIRE( !e1->Pads().empty() );
+
+        PAD* pad = e1->Pads().front();
+        BOOST_CHECK_MESSAGE( pad->GetLocalZoneConnection() == ZONE_CONNECTION::THERMAL,
+                "E1 pad should have THERMAL zone connection" );
+        BOOST_CHECK_MESSAGE( !pad->GetLocalThermalGapOverride().has_value(),
+                "E1 pad should NOT have a thermal gap override (outer == pad size)" );
+    }
+}
+
+
+/**
+ * Issue 23241: PADS V5.0 part import drops every other part.
+ *
+ * V5.0 text/label entries use 2 lines (value + name) while V9+ uses 3 lines
+ * (value + font + name). Reading 3 lines per label in V5.0 format consumes
+ * the next part's header line, causing alternating parts to be dropped.
+ */
+BOOST_AUTO_TEST_CASE( Issue23241_V5Parts )
+{
+    PCB_IO_PADS plugin;
+
+    wxString filename =
+            KI_TEST::GetPcbnewTestDataDir() + "plugins/pads/issue23241/partsandattr.asc";
+
+    std::unique_ptr<BOARD> board( plugin.LoadBoard( filename, nullptr, nullptr, nullptr ) );
+
+    BOOST_REQUIRE( board != nullptr );
+
+    // The file contains parts on both layers. Verify the specific parts mentioned
+    // in the bug report are present.
+    std::set<wxString> refDes;
+
+    for( FOOTPRINT* fp : board->Footprints() )
+        refDes.insert( fp->GetReference() );
+
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "J1" ) ), "J1 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "J2" ) ), "J2 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "J3" ) ), "J3 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "J4" ) ), "J4 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "J5" ) ), "J5 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "U1" ) ), "U1 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "U2" ) ), "U2 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "U3" ) ), "U3 should be present" );
+    BOOST_CHECK_MESSAGE( refDes.count( wxT( "U4" ) ), "U4 should be present" );
+}
+
+
+/**
+ * Issue 23241: verify the V5.0 parser reads decal terminals correctly.
+ *
+ * V5.0 terminal lines have no pin number (4 tokens), while V9+ has
+ * a pin number (5 tokens). Both formats must produce valid terminals.
+ */
+BOOST_AUTO_TEST_CASE( Issue23241_V5DecalTerminals )
+{
+    PADS_IO::PARSER parser;
+
+    wxString filename =
+            KI_TEST::GetPcbnewTestDataDir() + "plugins/pads/issue23241/partsandattr.asc";
+
+    parser.Parse( filename );
+
+    const auto& decals = parser.GetPartDecals();
+
+    auto it = decals.find( "104130-6" );
+    BOOST_REQUIRE_MESSAGE( it != decals.end(), "104130-6 decal should exist" );
+    BOOST_REQUIRE_EQUAL( it->second.terminals.size(), 34u );
+
+    auto sop_it = decals.find( "SOP16" );
+    BOOST_REQUIRE_MESSAGE( sop_it != decals.end(), "SOP16 decal should exist" );
+    BOOST_REQUIRE_EQUAL( sop_it->second.terminals.size(), 16u );
+
+    // V5.0 terminals carry no pin number, so the parser synthesizes sequential
+    // names 1..N. Empty or duplicate names would break pad-to-net mapping, which
+    // a bare count check cannot catch.
+    BOOST_CHECK_EQUAL( it->second.terminals.front().name, "1" );
+    BOOST_CHECK_EQUAL( it->second.terminals.back().name, "34" );
+    BOOST_CHECK_EQUAL( sop_it->second.terminals.front().name, "1" );
+    BOOST_CHECK_EQUAL( sop_it->second.terminals.back().name, "16" );
+}
+
+
+/**
+ * Verify RF (rectangular finger) pads carrying a PADS corner radius import as
+ * roundrect rather than plain rectangle (issue 23297).
+ *
+ * R1 (RESC1005X40N) uses "RF 0.000 900000 0 105000": 900000-unit finger, so the
+ * roundrect ratio is 105000 / 900000 = 0.1167.  D1 (SOT95P280X100-6N) uses
+ * "RF 0.000 1650000 0 225000" over an 825000 height, so the ratio is the radius
+ * over the shorter side, 225000 / 825000 = 0.2727.  Scaling is linear so the
+ * ratios are unit-independent.
+ */
+BOOST_AUTO_TEST_CASE( Issue23297_RfPadCornerRadius )
+{
+    PCB_IO_PADS plugin;
+
+    wxString filename = KI_TEST::GetPcbnewTestDataDir() + "plugins/pads/issue23297.asc";
+
+    std::unique_ptr<BOARD> board( plugin.LoadBoard( filename, nullptr, nullptr, nullptr ) );
+
+    BOOST_REQUIRE( board != nullptr );
+
+    const double tolerance = 0.005;
+
+    struct EXPECTED
+    {
+        int    padCount;
+        double ratio;
+    };
+
+    const std::map<wxString, EXPECTED> expected = {
+        { wxT( "R1" ), { 2, 105000.0 / 900000.0 } },
+        { wxT( "D1" ), { 6, 225000.0 / 825000.0 } },
+    };
+
+    int checkedRefs = 0;
+
+    for( FOOTPRINT* fp : board->Footprints() )
+    {
+        auto it = expected.find( fp->GetReference() );
+
+        if( it == expected.end() )
+            continue;
+
+        checkedRefs++;
+
+        int roundRectCount = 0;
+
+        for( PAD* pad : fp->Pads() )
+        {
+            BOOST_CHECK_MESSAGE( pad->GetShape( F_Cu ) == PAD_SHAPE::ROUNDRECT,
+                    fp->GetReference() << " pad " << pad->GetNumber()
+                        << " should import as roundrect" );
+
+            if( pad->GetShape( F_Cu ) != PAD_SHAPE::ROUNDRECT )
+                continue;
+
+            BOOST_CHECK_MESSAGE(
+                    std::abs( pad->GetRoundRectRadiusRatio( F_Cu ) - it->second.ratio ) < tolerance,
+                    fp->GetReference() << " pad " << pad->GetNumber() << " ratio "
+                        << pad->GetRoundRectRadiusRatio( F_Cu ) << " should be ~" << it->second.ratio );
+
+            roundRectCount++;
+        }
+
+        BOOST_CHECK_MESSAGE( roundRectCount == it->second.padCount,
+                fp->GetReference() << " should have " << it->second.padCount
+                    << " roundrect pads, got " << roundRectCount );
+    }
+
+    BOOST_CHECK_MESSAGE( checkedRefs == (int) expected.size(),
+            "expected R1 and D1 footprints to be imported, found " << checkedRefs );
 }
 
 

@@ -26,6 +26,7 @@
 // Common
 #include <api/api_enums.h>
 #include <api/common/types/enums.pb.h>
+#include <core/mirror.h>
 #include <core/typeinfo.h>
 #include <font/text_attributes.h>
 #include <layer_ids.h>
@@ -184,9 +185,19 @@ BOOST_AUTO_TEST_CASE( RatsnestDisplayMode )
     testEnums<RATSNEST_MODE, kiapi::board::commands::RatsnestDisplayMode>();
 }
 
+BOOST_AUTO_TEST_CASE( BoardFlipDirection )
+{
+    testEnums<FLIP_DIRECTION, kiapi::board::commands::BoardFlipDirection>();
+}
+
 BOOST_AUTO_TEST_CASE( BoardStackupLayerType )
 {
     testEnums<BOARD_STACKUP_ITEM_TYPE, kiapi::board::BoardStackupLayerType>();
+}
+
+BOOST_AUTO_TEST_CASE( BoardEdgeConnectorType )
+{
+    testEnums<BS_EDGE_CONNECTOR_CONSTRAINTS, kiapi::board::BoardEdgeConnectorType>();
 }
 
 BOOST_AUTO_TEST_CASE( DrcSeverity )

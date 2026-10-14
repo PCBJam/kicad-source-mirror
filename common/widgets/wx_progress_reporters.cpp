@@ -43,7 +43,9 @@ WX_PROGRESS_REPORTER::WX_PROGRESS_REPORTER( wxWindow* aParent, const wxString& a
                                                          // causes all sorts of grief
                                    aCanAbort | wxPD_ELAPSED_TIME ),
         m_appProgressIndicator( aParent ),
-        m_messageWidth( 0 )
+        m_messageWidth( 0 ),
+        m_updateThrottle( std::chrono::milliseconds( 100 ) ),
+        m_lastUpdateResult( true )
 {
     // wxAppProgressIndicator doesn't like value > max, ever. However there are some risks
     // with multithreaded setting of those values making a mess
@@ -59,6 +61,20 @@ WX_PROGRESS_REPORTER::~WX_PROGRESS_REPORTER()
 
 bool WX_PROGRESS_REPORTER::updateUI()
 {
+#ifdef __EMSCRIPTEN__
+    // KiCad-WASM: wxProgressDialog::Update() pumps a nested event loop (wxYield).
+    // Mid-way through a long-running operation such as loading a schematic that
+    // hands the browser arbitrary events (and a suspension point) while the op is
+    // half-done. Skip the UI pump entirely and report "not cancelled" so the
+    // work runs straight through synchronously. No progress dialog updates in wasm.
+    return true;
+#else
+    if( !shouldRefresh( m_progress.load(), m_maxProgress.load(), m_phase.load(), m_numPhases.load(),
+                        m_updateThrottle ) )
+    {
+        return !m_cancelled.load() && m_lastUpdateResult.load();
+    }
+
     int cur = CurrentProgress();
 
     if( cur < 0 || cur > 1000 )
@@ -67,27 +83,27 @@ bool WX_PROGRESS_REPORTER::updateUI()
     SetRange( 1000 );
 
     wxString message;
+    bool     messageChanged;
 
     {
         std::lock_guard<std::mutex> guard( m_mutex );
         message = m_rptMessage;
+        messageChanged = m_messageChanged.exchange( false );
     }
 
     // Perhaps the window size is too small if the new message to display is bigger
     // than the previous message. in this case, resize the WX_PROGRESS_REPORTER window
     // GetTextExtent has probably bugs in wxWidgets < 3.1.6, so calling it only when
     // the message has changed is mandatory
-    if( m_messageChanged )
+    if( messageChanged )
     {
-        int  newWidth = GetTextExtent( m_rptMessage ).x;
+        int newWidth = GetTextExtent( message ).x;
 
         if( newWidth > m_messageWidth )
         {
             m_messageWidth = newWidth;
             Fit();
         }
-
-        m_messageChanged = false;
     }
 
     // Allowing interaction with other windows has unintended consequences
@@ -98,7 +114,10 @@ bool WX_PROGRESS_REPORTER::updateUI()
 
     DrainPendingEvents();
 
+    m_lastUpdateResult.store( diag );
+
     return diag;
+#endif
 }
 
 

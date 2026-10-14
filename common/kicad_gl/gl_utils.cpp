@@ -24,7 +24,10 @@
 #include <wx/platform.h>
 #include <wx/version.h>
 
-#if ( defined( __unix__ ) and not defined( __APPLE__ ) )
+// __EMSCRIPTEN__ also defines __unix__, but has no GLAD platform loader (GL comes from
+// kiglad.h -> kiglew.h / Emscripten GLES); pulling glad/egl|glx here would re-introduce
+// glad/gl.h, whose glad_* macros collide with <GLES2/gl2.h>.
+#if ( defined( __unix__ ) and not defined( __APPLE__ ) and not defined( __EMSCRIPTEN__ ) )
     #if wxHAS_EGL or wxHAS_GLX
         #if wxHAS_EGL
             #include <glad/egl.h>

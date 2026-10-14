@@ -28,6 +28,7 @@
 #include <math/vector2d.h>
 #include <eda_text.h>
 #include <bitmap_base.h>
+#include <kiid.h>
 #include "drawing_sheet/ds_draw_item.h"
 
 class DS_DRAW_ITEM_TEXT;            // Forward declaration
@@ -58,6 +59,13 @@ enum PAGE_OPTION
     FIRST_PAGE_ONLY,
     SUBSEQUENT_PAGES
 };
+
+/**
+ * Upper bound on DS_DATA_ITEM::m_RepeatCount.
+ *
+ * Every repeat is a real draw item, so an unbounded count stalls the editor.
+ */
+constexpr int DS_MAX_REPEAT_COUNT = 100;
 
 /**
  * A coordinate point.
@@ -195,6 +203,9 @@ public:
 
     const wxString GetClassName() const;
 
+    KIID           m_Uuid;               // Stable per-item identity, shared with eeschema/pcbnew.
+                                         // Default-constructed -> random, so uuid-less legacy
+                                         // items are auto-backfilled in memory (collab bridge).
     wxString       m_Name;               // a name used in drawing sheet editor to identify items
     wxString       m_Info;               // a comment, only useful in drawing sheet editor
     POINT_COORD    m_Pos;
@@ -304,13 +315,11 @@ public:
     virtual int GetPenSizeIU() override;
 
     /**
-     * Try to build text which is an increment of m_TextBase
-     * has meaning only if m_TextBase is a basic text (one char)
-     * If the basic char is a digit, build a number
-     * If the basic char is a letter, use the letter with ASCII code
-     * aIncr + (basic char ascc code)
+     * Build an incremented copy of m_TextBase into m_FullText.
+     * The rightmost letter or number is stepped by aIncr, carrying within its
+     * own type (a letter rolls z -> aa, a number counts up). If nothing can be
+     * stepped, m_FullText is left equal to m_TextBase.
      * @param aIncr = the increment value
-     * return the incremented label in m_FullText
      */
     void IncrementLabel( int aIncr );
 

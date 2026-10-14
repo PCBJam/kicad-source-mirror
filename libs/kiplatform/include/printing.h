@@ -23,6 +23,8 @@
 #include <string>
 #include <wx/translation.h>
 
+class wxPrintData;
+
 #define PRINTING_TRACE "KICAD_PRINT"
 namespace KIPLATFORM
 {
@@ -54,6 +56,19 @@ namespace PRINTING
     }
 
     PRINT_RESULT PrintPDF( const std::string& aFile );
+
+    /**
+     * Discard a "print to file" destination in @a aData that the platform print backend
+     * generated for its own spooling, leaving a destination the user chose untouched.
+     *
+     * Print settings are carried from one print to the next so that the dialog reopens the way
+     * the user left it. Under the GTK portal backend (Flatpak, snap, GTK_USE_PORTAL) that also
+     * carries a gtkprintXXXXXX scratch path, because the portal overwrites the output URI with
+     * its own temporary file before handing the settings back, and the scratch path then shows
+     * up as the suggested output file. It lives in the native GtkPrintSettings output URI,
+     * which the wx-level filename does not track, so it has to be inspected there.
+     */
+    void ResetPrintToFilePath( wxPrintData& aData );
 }
 } // namespace KIPLATFORM
 

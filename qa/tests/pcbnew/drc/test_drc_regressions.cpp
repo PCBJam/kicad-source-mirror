@@ -69,7 +69,8 @@ BOOST_FIXTURE_TEST_CASE( DRCFalsePositiveRegressions, DRC_REGRESSION_TEST_FIXTUR
         "issue18839",            // False positive board edge clearance between concentric arcs
         "unconnected-netnames/unconnected-netnames", // Raised false schematic partity error
         "net_tie_drc",                               // Net tie bridging soldermask DRC test
-        "diff_pair_uncoupled_tuning_drc"             // Tuning pattern length wrongly counted as uncoupled
+        "issue24974",                    // Net-tie graphic copper on last pad, UUID-order-independent exemption
+        "diff_pair_uncoupled_tuning_drc" // Tuning pattern length wrongly counted as uncoupled
     };
 
     for( const wxString& relPath : tests )
@@ -286,5 +287,129 @@ BOOST_FIXTURE_TEST_CASE( DRCZoneFalsePositiveRegressions, DRC_REGRESSION_TEST_FI
                                            (int) violations.size(),
                                            report ) );
         }
+    }
+}
+
+
+BOOST_FIXTURE_TEST_CASE( DRCTeardropOverCopperField, DRC_REGRESSION_TEST_FIXTURE )
+{
+    // A knockout footprint reference designator on a copper layer fills as real copper, so a
+    // teardrop zone of another net overlapping it bridges the two nets.  Footprint fields live in
+    // their own list rather than the graphical-items list, so the copper clearance test must reach
+    // them.  The board also carries a hidden knockout field bridging the same two zones; hidden
+    // fields render no copper and must not produce a short.
+    // See https://gitlab.com/kicad/code/kicad/-/issues/24649
+
+    KI_TEST::LoadBoard( m_settingsManager, "issue24649", m_board );
+    KI_TEST::FillZones( m_board.get() );
+
+    std::vector<DRC_ITEM>  violations;
+    BOARD_DESIGN_SETTINGS& bds = m_board->GetDesignSettings();
+
+    // The bare test board has unconnected fills by design; suppress checks unrelated to the
+    // short under test.
+    bds.m_DRCSeverities[ DRCE_UNCONNECTED_ITEMS ] = SEVERITY::RPT_SEVERITY_IGNORE;
+    bds.m_DRCSeverities[ DRCE_ISOLATED_COPPER ] = SEVERITY::RPT_SEVERITY_IGNORE;
+    bds.m_DRCSeverities[ DRCE_COPPER_SLIVER ] = SEVERITY::RPT_SEVERITY_IGNORE;
+    bds.m_DRCSeverities[ DRCE_LIB_FOOTPRINT_ISSUES ] = SEVERITY::RPT_SEVERITY_IGNORE;
+    bds.m_DRCSeverities[ DRCE_LIB_FOOTPRINT_MISMATCH ] = SEVERITY::RPT_SEVERITY_IGNORE;
+
+    bds.m_DRCEngine->SetViolationHandler(
+            [&]( const std::shared_ptr<DRC_ITEM>& aItem, const VECTOR2I&, int,
+                 const std::function<void( PCB_MARKER* )>& )
+            {
+                violations.push_back( *aItem );
+            } );
+
+    bds.m_DRCEngine->RunTests( EDA_UNITS::MM, true, false );
+
+    std::map<KIID, EDA_ITEM*> itemMap;
+    m_board->FillItemMap( itemMap );
+
+    auto involvesCopperField =
+            [&]( const DRC_ITEM& aItem )
+            {
+                for( const KIID& id : { aItem.GetMainItemID(), aItem.GetAuxItemID() } )
+                {
+                    auto it = itemMap.find( id );
+
+                    if( it != itemMap.end() && it->second->Type() == PCB_FIELD_T )
+                        return true;
+                }
+
+                return false;
+            };
+
+    int fieldShorts = 0;
+
+    for( const DRC_ITEM& item : violations )
+    {
+        if( item.GetErrorCode() == DRCE_SHORTING_ITEMS && involvesCopperField( item ) )
+            fieldShorts++;
+    }
+
+    if( fieldShorts != 1 )
+    {
+        UNITS_PROVIDER unitsProvider( pcbIUScale, EDA_UNITS::MM );
+
+        for( const DRC_ITEM& item : violations )
+            BOOST_TEST_MESSAGE( item.ShowReport( &unitsProvider, RPT_SEVERITY_ERROR, itemMap ) );
+    }
+
+    // Exactly one short: the visible field bridges the two nets; the hidden field does not.
+    BOOST_CHECK_MESSAGE( fieldShorts == 1,
+                         "Expected exactly one shorting-items violation involving a visible "
+                         "knockout copper reference field; found "
+                                 << fieldShorts );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( DRCHoleToHoleReportsRuleValue, DRC_REGRESSION_TEST_FIXTURE )
+{
+    // The hole-to-hole test relaxes its comparison by the DRC epsilon, but it also reported that
+    // relaxed value as the rule minimum, so the violation quoted a different number than the one
+    // entered in Board Setup.
+    // See https://gitlab.com/kicad/code/kicad/-/issues/22267
+
+    KI_TEST::LoadBoard( m_settingsManager, "issue22267", m_board );
+
+    std::vector<DRC_ITEM>  violations;
+    BOARD_DESIGN_SETTINGS& bds = m_board->GetDesignSettings();
+
+    bds.m_DRCSeverities[ DRCE_UNCONNECTED_ITEMS ] = SEVERITY::RPT_SEVERITY_IGNORE;
+    bds.m_DRCSeverities[ DRCE_LIB_FOOTPRINT_ISSUES ] = SEVERITY::RPT_SEVERITY_IGNORE;
+    bds.m_DRCSeverities[ DRCE_LIB_FOOTPRINT_MISMATCH ] = SEVERITY::RPT_SEVERITY_IGNORE;
+
+    bds.m_DRCEngine->SetViolationHandler(
+            [&]( const std::shared_ptr<DRC_ITEM>& aItem, const VECTOR2I&, int,
+                 const std::function<void( PCB_MARKER* )>& )
+            {
+                if( aItem->GetErrorCode() == DRCE_DRILLED_HOLES_TOO_CLOSE )
+                    violations.push_back( *aItem );
+            } );
+
+    bds.m_DRCEngine->RunTests( EDA_UNITS::MM, true, false );
+
+    BOOST_REQUIRE_MESSAGE( !violations.empty(), "Expected at least one hole-to-hole violation" );
+
+    UNITS_PROVIDER unitsProvider( pcbIUScale, EDA_UNITS::MM );
+    wxString       ruleValue = unitsProvider.MessageTextFromValue( bds.m_HoleToHoleMin );
+    wxString       relaxedValue = unitsProvider.MessageTextFromValue( bds.m_HoleToHoleMin
+                                                                     - bds.GetDRCEpsilon() );
+
+    BOOST_REQUIRE( ruleValue != relaxedValue );
+
+    // Match on the values alone; the surrounding detail text is translated at format time
+    for( const DRC_ITEM& item : violations )
+    {
+        wxString msg = item.GetErrorMessage( false );
+
+        BOOST_CHECK_MESSAGE( msg.Contains( ruleValue ),
+                             wxString::Format( "Expected the configured minimum '%s' but got: %s",
+                                               ruleValue, msg ) );
+
+        BOOST_CHECK_MESSAGE( !msg.Contains( relaxedValue ),
+                             wxString::Format( "Reported the epsilon-relaxed minimum '%s': %s",
+                                               relaxedValue, msg ) );
     }
 }

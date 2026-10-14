@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <ee_grid_helper.h>
+#include <pcbjam_read_only.h>
 #include <tool/tool_manager.h>
 #include <sch_commit.h>
 #include <view/view_controls.h>
@@ -948,7 +949,7 @@ void SCH_POINT_EDITOR::makePointsAndBehavior( EDA_ITEM* aItem )
             }
 
             m_editBehavior = std::make_unique<EDA_ARC_POINT_EDIT_BEHAVIOR>(
-                    *shape, m_arcEditMode, *getViewControls() );
+                    *shape, m_arcEditMode, *getViewControls(), schIUScale );
             break;
         case SHAPE_T::CIRCLE:
             m_editBehavior = std::make_unique<EDA_CIRCLE_POINT_EDIT_BEHAVIOR>( *shape );
@@ -1031,6 +1032,7 @@ void SCH_POINT_EDITOR::makePointsAndBehavior( EDA_ITEM* aItem )
 SCH_POINT_EDITOR::SCH_POINT_EDITOR() :
         SCH_TOOL_BASE<SCH_BASE_FRAME>( "eeschema.PointEditor" ),
         m_editedPoint( nullptr ),
+        m_inDrag( false ),
         m_arcEditMode( ARC_EDIT_MODE::KEEP_CENTER_ADJUST_ANGLE_RADIUS ),
         m_inPointEditor( false )
 {
@@ -1053,6 +1055,9 @@ void SCH_POINT_EDITOR::Reset( RESET_REASON aReason )
     m_angleItem.reset();
     m_editPoints.reset();
     m_editedPoint = nullptr;
+
+    // A reset can tear down the Main() loop mid-drag, so clear the drag flag here too.
+    m_inDrag = false;
 }
 
 
@@ -1127,6 +1132,12 @@ void SCH_POINT_EDITOR::updateEditedPoint( const TOOL_EVENT& aEvent )
 
 int SCH_POINT_EDITOR::Main( const TOOL_EVENT& aEvent )
 {
+    // pcbjam WASM addition (read-only-viewer): selection is live for viewers
+    // (inspection), but the point editor must never wake — its point drags
+    // mutate the model directly, without dispatching gated TOOL_ACTIONs.
+    if( PCBJAM_READ_ONLY::IsReadOnly() )
+        return 0;
+
     if( !m_selectionTool )
         return 0;
 
@@ -1268,9 +1279,15 @@ int SCH_POINT_EDITOR::Main( const TOOL_EVENT& aEvent )
             evt->SetPassEvent();
         }
 
+        // Mirror the drag state so IsDragging() lets the frame defer the autosave snapshot,
+        // which would otherwise serialize the whole schematic over a live point edit.
+        m_inDrag = inDrag;
+
         controls->SetAutoPan( inDrag );
         controls->CaptureCursor( inDrag );
     }
+
+    m_inDrag = false;
 
     if( SCH_SHAPE* shape = dynamic_cast<SCH_SHAPE*>( item ) )
     {

@@ -41,11 +41,22 @@ SCH_IO_HTTP_LIB::SCH_IO_HTTP_LIB() :
 void SCH_IO_HTTP_LIB::EnumerateSymbolLib( wxArrayString& aSymbolNameList, const wxString& aLibraryPath,
                                           const std::map<std::string, UTF8>* aProperties )
 {
-    std::vector<LIB_SYMBOL*> symbols;
-    EnumerateSymbolLib( symbols, aLibraryPath, aProperties );
+    wxCHECK_RET( m_adapter, "HTTP plugin missing library manager adapter handle!" );
+    ensureSettings( aLibraryPath );
+    ensureConnection();
 
-    for( LIB_SYMBOL* symbol : symbols )
-        aSymbolNameList.Add( symbol->GetName() );
+    if( !m_conn )
+        THROW_IO_ERROR( m_lastError );
+
+    // The name list drives the library tree and only needs part names, which the category
+    // listing already provides.  Avoid the per-part detail fetch done by the full enumeration.
+    for( const HTTP_LIB_CATEGORY& category : m_conn->getCategories() )
+    {
+        syncCacheIfStale( category );
+
+        for( const HTTP_LIB_PART& part : m_cachedCategories[category.id].cachedParts )
+            aSymbolNameList.Add( part.name );
+    }
 }
 
 
@@ -63,26 +74,26 @@ void SCH_IO_HTTP_LIB::EnumerateSymbolLib( std::vector<LIB_SYMBOL*>& aSymbolList,
 
     for( const HTTP_LIB_CATEGORY& category : m_conn->getCategories() )
     {
-        bool refresh_cache = true;
+        syncCacheIfStale( category );
 
-        // Check if there is already a part in our cache, if not fetch it
-        if( m_cachedCategories.find( category.id ) != m_cachedCategories.end() )
+        for( HTTP_LIB_PART& part : m_cachedCategories[category.id].cachedParts )
         {
-            // check if it's outdated, if so re-fetch
-            if( std::difftime( std::time( nullptr ), m_cachedCategories[category.id].lastCached )
-                < m_settings->m_Source.timeout_categories )
+            // The category listing may omit fields, so the chooser would show blank columns
+            // until each part is selected individually.  Back-fill from the per-part endpoint.
+            if( !part.detailsLoaded )
             {
-                refresh_cache = false;
+                HTTP_LIB_PART fullPart;
+
+                if( m_conn->SelectOne( part.id, fullPart ) )
+                {
+                    // The listing name keys m_cache for LoadSymbol; keep it even if the detail
+                    // record reports a different (or missing) name.
+                    fullPart.id = part.id;
+                    fullPart.name = part.name;
+                    part = std::move( fullPart );
+                }
             }
-        }
 
-        if( refresh_cache )
-        {
-            syncCache( category );
-        }
-
-        for( const HTTP_LIB_PART& part : m_cachedCategories[category.id].cachedParts )
-        {
             wxString libIDString( part.name );
 
             LIB_SYMBOL* symbol = loadSymbolFromPart( aLibraryPath, libIDString, category, part );
@@ -166,9 +177,15 @@ LIB_SYMBOL* SCH_IO_HTTP_LIB::LoadSymbol( const wxString& aLibraryPath, const wxS
 
 void SCH_IO_HTTP_LIB::GetSubLibraryNames( std::vector<wxString>& aNames )
 {
-    ensureSettings( wxEmptyString );
-
     aNames.clear();
+
+    ensureSettings( wxEmptyString );
+    connect();
+
+    // connect() leaves m_conn null when the endpoint is unreachable so a network loss
+    // degrades to an empty result instead of a null dereference while building the tree.
+    if( !m_conn )
+        return;
 
     std::set<wxString> categoryNames;
 
@@ -185,6 +202,12 @@ void SCH_IO_HTTP_LIB::GetSubLibraryNames( std::vector<wxString>& aNames )
 
 wxString SCH_IO_HTTP_LIB::GetSubLibraryDescription( const wxString& aName )
 {
+    ensureSettings( wxEmptyString );
+    connect();
+
+    if( !m_conn )
+        return wxEmptyString;
+
     return m_conn->getCategoryDescription( std::string( aName.mb_str() ) );
 }
 
@@ -312,6 +335,21 @@ void SCH_IO_HTTP_LIB::syncCache()
 {
     for( const HTTP_LIB_CATEGORY& category : m_conn->getCategories() )
         syncCache( category );
+}
+
+
+void SCH_IO_HTTP_LIB::syncCacheIfStale( const HTTP_LIB_CATEGORY& category )
+{
+    auto it = m_cachedCategories.find( category.id );
+
+    if( it != m_cachedCategories.end()
+        && std::difftime( std::time( nullptr ), it->second.lastCached )
+                   < m_settings->m_Source.timeout_categories )
+    {
+        return;
+    }
+
+    syncCache( category );
 }
 
 

@@ -77,7 +77,11 @@ const static std::vector<EXPR_TO_TEST> simpleExpressions = {
     // Parens affect precedence
     { "-(1 + (2 - 4)) * 20.8 / 2", false, VAL(10.4) },
     // Unary addition is a sign, not a leading operator
-    { "+2 - 1", false, VAL(1) }
+    { "+2 - 1", false, VAL(1) },
+    // A short-circuited || must yield a normalized 1, not the raw (nonzero) left operand, so a
+    // boolean feeding a further operator behaves the same as the non-short-circuited path.
+    { "(2 || 0) == 1", false, VAL(1) },
+    { "(7 || 0) + 5", false, VAL(6) }
 };
 
 
@@ -188,5 +192,26 @@ BOOST_AUTO_TEST_CASE( IntrospectedProperties )
         testEvalExpr( expr.expression, expr.expectedResult, expr.expectError, &trackA, &trackB );
     }
 }
+
+BOOST_AUTO_TEST_CASE( RenamedProperties )
+{
+    PROPERTY_MANAGER& propMgr = PROPERTY_MANAGER::Instance();
+    propMgr.Rebuild();
+
+    BOARD     brd;
+    PCB_TRACK track( &brd );
+
+    track.SetStart( VECTOR2I( pcbIUScale.mmToIU( 1.0 ), pcbIUScale.mmToIU( 2.0 ) ) );
+    track.SetEnd( VECTOR2I( pcbIUScale.mmToIU( 3.0 ), pcbIUScale.mmToIU( 4.0 ) ) );
+
+    testEvalExpr( wxT( "A.Origin_X == 1mm" ), VAL( 1.0 ), false, &track );
+    testEvalExpr( wxT( "A.Origin_Y == 2mm" ), VAL( 1.0 ), false, &track );
+    testEvalExpr( wxT( "A.Origin_X != A.End_X" ), VAL( 1.0 ), false, &track );
+    testEvalExpr( wxT( "A.origin_y != A.End_Y" ), VAL( 1.0 ), false, &track );
+
+    testEvalExpr( wxT( "A.Start_X == 1mm" ), VAL( 1.0 ), false, &track );
+    testEvalExpr( wxT( "A.Start_Y == 2mm" ), VAL( 1.0 ), false, &track );
+}
+
 
 BOOST_AUTO_TEST_SUITE_END()

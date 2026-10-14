@@ -22,6 +22,7 @@
 
 #include <settings/json_settings_internals.h>
 #include <settings/nested_settings.h>
+#include <settings/parameters.h>
 #include <locale_io.h>
 
 
@@ -134,14 +135,30 @@ bool NESTED_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
 
     try
     {
-        bool modified = Store();
-
+        // Diff our still-loaded internals against the parent's copy before Store() materializes
+        // params. Comparing here keeps default-fill of params absent from an older file from
+        // counting as a change and churning the parent on editor close (see #24402).
         auto jsonObjectInParent = m_parent->GetJson( m_path );
 
-        if( !jsonObjectInParent )
-            modified = true;
-        else if( !nlohmann::json::diff( *m_internals, jsonObjectInParent.value() ).empty() )
-            modified = true;
+        bool modified = !jsonObjectInParent
+                        || !nlohmann::json::diff( *m_internals, jsonObjectInParent.value() ).empty();
+
+        // Store() additionally reports user edits to registered params, not yet reflected above.
+        modified |= Store();
+
+        // Params that own their subtree need to be able to delete keys. The parent
+        // merge only adds and updates, so clear the old copy from the baseline first.
+        for( const PARAM_BASE* param : m_params )
+        {
+            if( !param->ClearUnknownKeys() )
+                continue;
+
+            nlohmann::json::json_pointer ptr =
+                    JSON_SETTINGS_INTERNALS::PointerFromString( m_path + "." + param->GetJsonPath() );
+
+            if( m_parent->m_internals->m_original.contains( ptr ) )
+                m_parent->m_internals->m_original[ptr] = nlohmann::json::object();
+        }
 
         if( modified || aForce )
         {

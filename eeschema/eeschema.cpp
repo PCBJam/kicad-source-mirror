@@ -204,6 +204,8 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         }
 
         case FRAME_SCH_SYMBOL_EDITOR:
+            // WASM: the symbol editor is now a ported target (symbol_editor.html);
+            // construct the frame like the native build. See features/symbol-editor/.
             return new SYMBOL_EDIT_FRAME( aKiway, aParent );
 
         case FRAME_SIMULATOR:
@@ -222,10 +224,19 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         }
 
         case FRAME_SCH_VIEWER:
+#ifdef __EMSCRIPTEN__
+            // WASM build: symbol viewer is not supported.
+            return nullptr;
+#else
             return new SYMBOL_VIEWER_FRAME( aKiway, aParent );
+#endif
 
         case FRAME_SYMBOL_CHOOSER:
         {
+#ifdef __EMSCRIPTEN__
+            // WASM build: symbol chooser is not supported (no bundled libs).
+            return nullptr;
+#else
             bool cancelled = false;
             SYMBOL_CHOOSER_FRAME* chooser = new SYMBOL_CHOOSER_FRAME( aKiway, aParent, cancelled );
 
@@ -236,6 +247,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             }
 
             return chooser;
+#endif
         }
 
         case DIALOG_SCH_LIBRARY_TABLE:
@@ -486,8 +498,8 @@ void IFACE::Reset()
 
 void IFACE::PreloadLibraries( KIWAY* aKiway )
 {
-    constexpr static int interval = 150;
-    constexpr static int timeLimit = 120000;
+    [[maybe_unused]] constexpr static int interval = 150;    // poll loop is native-only (WASM runs inline)
+    [[maybe_unused]] constexpr static int timeLimit = 120000;
 
     wxCHECK( aKiway, /* void */ );
 
@@ -512,12 +524,17 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
 
             SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &aKiway->Prj() );
 
-            int  elapsed = 0;
+            [[maybe_unused]] int elapsed = 0;    // poll loop is native-only (WASM runs inline)
             bool aborted = false;
 
             reporter->Report( _( "Loading Symbol Libraries" ) );
             adapter->AsyncLoad();
 
+#ifndef __EMSCRIPTEN__
+            // Native: poll the background workers for progress. On WASM AsyncLoad()
+            // above ran inline+synchronously (the preload is dispatched inline on the
+            // main thread — see below), so the futures are already complete; skip the
+            // poll loop, whose sleep_for would otherwise just block the main thread.
             while( true )
             {
                 if( m_libraryPreloadAbort.load() )
@@ -548,6 +565,7 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
                 if( elapsed > timeLimit )
                     break;
             }
+#endif
 
             // AbortAsyncLoad() sets the adapter's worker abort flag and then blocks,
             // so workers exit at their next checkpoint. BlockUntilLoaded() alone just
@@ -601,8 +619,20 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
             }
         };
 
+#ifdef __EMSCRIPTEN__
+    // WASM: std::async( launch::async ) would run the preload on a real pthread
+    // worker; on it the pcbjam symbol-library bridge takes its proxy-to-main path
+    // and deadlocks, because the main thread is still inside OpenProjectFiles and
+    // never returns to the event loop to pump the proxying queue. Run the preload
+    // inline on the main thread so the bridge uses its suspending main-thread path.
+    preload();
+    std::promise<void> preloadDone;
+    preloadDone.set_value();
+    m_libraryPreloadReturn = preloadDone.get_future();
+#else
     std::future<void> preloadFuture = std::async( std::launch::async, preload );
     m_libraryPreloadReturn = std::move( preloadFuture );
+#endif
 }
 
 

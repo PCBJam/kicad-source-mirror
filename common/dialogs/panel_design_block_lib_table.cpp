@@ -217,10 +217,7 @@ public:
         SetTooltipEnable( COL_STATUS );
     }
 
-    static bool SupportsVisibilityColumn()
-    {
-        return false;
-    }
+    static bool SupportsVisibilityColumn() { return true; }
 
 protected:
     void optionsEditor( int aRow ) override
@@ -383,6 +380,8 @@ PANEL_DESIGN_BLOCK_LIB_TABLE::PANEL_DESIGN_BLOCK_LIB_TABLE( DIALOG_EDIT_LIBRARY_
         m_parent( aParent ),
         m_suppressNotebookPageEvents( false )
 {
+    m_notebook->SetArtProvider( new WX_AUI_TAB_ART() );
+
     m_lastProjectLibDir = m_project->GetProjectPath();
 
     populatePluginList();
@@ -401,8 +400,6 @@ PANEL_DESIGN_BLOCK_LIB_TABLE::PANEL_DESIGN_BLOCK_LIB_TABLE( DIALOG_EDIT_LIBRARY_
 
     if( projectTable.has_value() )
         AddTable( projectTable.value(), _( "Project Specific Libraries" ), false /* closable */ );
-
-    m_notebook->SetArtProvider( new WX_AUI_TAB_ART() );
 
     // There aren't (yet) any legacy DesignBlock libraries to migrate
     m_migrate_libs_button->Hide();
@@ -605,11 +602,15 @@ void PANEL_DESIGN_BLOCK_LIB_TABLE::onMigrateLibraries( wxCommandEvent& event )
 
     wxArrayInt rowsToMigrate;
     wxString   kicadType = DESIGN_BLOCK_IO_MGR::ShowType( DESIGN_BLOCK_IO_MGR::KICAD_SEXP );
+    wxString   nestedTableType = LIBRARY_TABLE_ROW::TABLE_TYPE_NAME;
     wxString   msg;
 
     for( int row : selectedRows )
     {
-        if( cur_grid()->GetCellValue( row, COL_TYPE ) != kicadType )
+        const wxString& type = cur_grid()->GetCellValue( row, COL_TYPE );
+
+        // Nested library tables are not design block libraries and cannot be migrated.
+        if( type != kicadType && type != nestedTableType )
             rowsToMigrate.push_back( row );
     }
 

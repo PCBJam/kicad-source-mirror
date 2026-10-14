@@ -106,6 +106,7 @@ EDA_DRAW_FRAME::EDA_DRAW_FRAME( KIWAY* aKiway, wxWindow* aParent, FRAME_T aFrame
 {
     m_gridSelectBox       = nullptr;
     m_zoomSelectBox       = nullptr;
+    m_zoomCustomEntry     = wxNOT_FOUND;
     m_overrideLocksCb     = nullptr;
     m_searchPane          = nullptr;
     m_undoRedoCountMax    = DEFAULT_MAX_UNDO_ITEMS;
@@ -235,7 +236,19 @@ void EDA_DRAW_FRAME::configureToolbars()
             [this]( ACTION_TOOLBAR* aToolbar )
             {
                 if( !m_overrideLocksCb )
+                {
                     m_overrideLocksCb = new wxCheckBox( aToolbar, ID_ON_OVERRIDE_LOCKS, _( "Override locks" ) );
+
+                    // Clicking the checkbox takes focus off the canvas, so return it
+                    m_overrideLocksCb->Bind( wxEVT_CHECKBOX,
+                                             [this]( wxCommandEvent& aEvent )
+                                             {
+                                                 if( m_canvas )
+                                                     m_canvas->SetFocus();
+
+                                                 aEvent.Skip();
+                                             } );
+                }
 
                 aToolbar->Add( m_overrideLocksCb );
             };
@@ -474,8 +487,6 @@ void EDA_DRAW_FRAME::OnUpdateSelectGrid( wxUpdateUIEvent& aEvent )
 
 void EDA_DRAW_FRAME::OnUpdateSelectZoom( wxUpdateUIEvent& aEvent )
 {
-    // No need to update the grid select box if it doesn't exist or the grid setting change
-    // was made using the select box.
     if( m_zoomSelectBox == nullptr )
         return;
 
@@ -484,26 +495,42 @@ void EDA_DRAW_FRAME::OnUpdateSelectZoom( wxUpdateUIEvent& aEvent )
     wxCHECK( config(), /* void */ );
 
     const std::vector<double>& zoomList = GetWindowSettings( config() )->zoom_factors;
-    int                        curr_selection = m_zoomSelectBox->GetSelection();
-    int                        new_selection = 0;      // select zoom auto
-    double                     last_approx = 1e9;      // large value to start calculation
+    int                        preset = wxNOT_FOUND;
 
-    // Search for the nearest available value to the current zoom setting, and select it
     for( size_t jj = 0; jj < zoomList.size(); ++jj )
     {
-        double rel_error = std::fabs( zoomList[jj] - zoom ) / zoom;
-
-        if( rel_error < last_approx )
+        if( zoomList[jj] == zoom )
         {
-            last_approx = rel_error;
-
-            // zoom IDs in m_zoomSelectBox start with 1 (leaving 0 for auto-zoom choice)
-            new_selection = (int) jj + 1;
+            preset = (int) jj + 1; // index 0 is Zoom Auto
+            break;
         }
     }
 
-    if( curr_selection != new_selection )
-        m_zoomSelectBox->SetSelection( new_selection );
+    if( preset != wxNOT_FOUND )
+    {
+        // Zoom is on a preset, so drop the custom entry and select the preset.
+        if( m_zoomCustomEntry != wxNOT_FOUND )
+        {
+            m_zoomSelectBox->Delete( m_zoomCustomEntry );
+            m_zoomCustomEntry = wxNOT_FOUND;
+        }
+
+        if( m_zoomSelectBox->GetSelection() != preset )
+            m_zoomSelectBox->SetSelection( preset );
+    }
+    else
+    {
+        // Off-preset zoom, show the exact value in its own entry just below Zoom Auto.
+        wxString text = wxString::Format( _( "Zoom %.2f" ), zoom );
+
+        if( m_zoomCustomEntry == wxNOT_FOUND )
+            m_zoomCustomEntry = m_zoomSelectBox->Insert( text, 1 );
+        else if( m_zoomSelectBox->GetString( m_zoomCustomEntry ) != text )
+            m_zoomSelectBox->SetString( m_zoomCustomEntry, text );
+
+        if( m_zoomSelectBox->GetSelection() != m_zoomCustomEntry )
+            m_zoomSelectBox->SetSelection( m_zoomCustomEntry );
+    }
 }
 
 
@@ -618,6 +645,7 @@ void EDA_DRAW_FRAME::UpdateZoomSelectBox()
     m_zoomSelectBox->Clear();
     m_zoomSelectBox->Append( _( "Zoom Auto" ) );
     m_zoomSelectBox->SetSelection( 0 );
+    m_zoomCustomEntry = wxNOT_FOUND;
 
     wxCHECK( config(), /* void */ );
 
@@ -639,10 +667,20 @@ void EDA_DRAW_FRAME::OnSelectZoom( wxCommandEvent& event )
 
     int id = m_zoomSelectBox->GetCurrentSelection();
 
-    if( id < 0 || !( id < (int)m_zoomSelectBox->GetCount() ) )
+    if( id < 0 || id >= (int) m_zoomSelectBox->GetCount() )
         return;
 
-    m_toolManager->RunAction( ACTIONS::zoomPreset, id );
+    // Picking the custom entry means keep the current zoom, so nothing to do.
+    if( id == m_zoomCustomEntry )
+        return;
+
+    // The custom entry pushes the presets down by one, so shift back to the real preset id.
+    int preset = id;
+
+    if( m_zoomCustomEntry != wxNOT_FOUND && id > m_zoomCustomEntry )
+        preset = id - 1;
+
+    m_toolManager->RunAction( ACTIONS::zoomPreset, preset );
     UpdateStatusBar();
     m_canvas->Refresh();
 
@@ -659,9 +697,11 @@ void EDA_DRAW_FRAME::OnMove( wxMoveEvent& aEvent )
 
     if( oldFactor != m_galDisplayOptions.m_scaleFactor && m_canvas )
     {
-        wxSize clientSize = GetClientSize();
-        GetCanvas()->GetGAL()->ResizeScreen( clientSize.x, clientSize.y );
-        GetCanvas()->GetView()->MarkDirty();
+        // wx has not laid the frame out for the new DPI yet, so defer until the canvas has
+        // reached its final size
+        EDA_DRAW_PANEL_GAL* canvas = GetCanvas();
+
+        canvas->CallAfter( [canvas]() { canvas->ResizeGal( true ); } );
     }
 
     aEvent.Skip();
@@ -713,8 +753,8 @@ void EDA_DRAW_FRAME::DisplayGridMsg()
 
     wxString msg;
 
-    GRID_SETTINGS& gridSettings = m_toolManager->GetSettings()->m_Window.grid;
-    int            currentIdx = m_toolManager->GetSettings()->m_Window.grid.last_size_idx;
+    GRID_SETTINGS& gridSettings = GetWindowSettings( config() )->grid;
+    int            currentIdx = gridSettings.last_size_idx;
 
     msg.Printf( _( "grid %s" ), gridSettings.grids[currentIdx].UserUnitsMessageText( this, false ) );
 
@@ -763,38 +803,32 @@ void EDA_DRAW_FRAME::updateStatusBarWidths()
 
     std::vector<int> dims = {
         // remainder of status bar on far left is set to a default or whatever is left over.
-        -3,
+        -2,
 
         // When using GetTextSize() remember the width of character '1' is not the same
         // as the width of '0' unless the font is fixed width, and it usually won't be.
 
         // zoom:
-        KIUI::GetTextSize( wxT( "Z 762000" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "Z 762000" ), stsbar ).x + spacer,
 
         // cursor coords
-        KIUI::GetTextSize( wxT( "X 1234.1234  Y 1234.1234" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "X 00000.0000  Y 00000.0000" ), stsbar ).x + spacer,
 
         // delta distances
-        KIUI::GetTextSize( wxT( "dx 1234.1234  dy 1234.1234  dist 1234.1234" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "dx 00000.0000  dy 00000.0000  dist 00000.0000" ), stsbar ).x + spacer,
 
         // grid size
-        KIUI::GetTextSize( wxT( "grid 1234.1234 x 1234.1234" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "grid 0000.0000 x 0000.0000" ), stsbar ).x + spacer,
 
         // units display, Inches is bigger than mm
-        KIUI::GetTextSize( _( "Inches" ), stsbar ).x,
+        KIUI::GetTextSize( _( "Inches" ), stsbar ).x + spacer,
 
         // Size for the "Current Tool" panel
-        -2,
+        -1,
 
         // constraint mode
-        -2
+        KIUI::GetTextSize(  _( "Constrain to H, V, 45" ), stsbar).x + spacer
     };
-
-    for( int& dim : dims )
-    {
-        if( dim >= 0 )
-            dim += spacer;
-    }
 
     for( int idx = numLocalFields; idx < totalFields; ++idx )
         dims.emplace_back( stsbar->GetStatusWidth( idx ) );

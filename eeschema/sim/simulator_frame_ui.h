@@ -44,7 +44,6 @@ class SPICE_SETTINGS;
 class EESCHEMA_SETTINGS;
 class SPICE_CIRCUIT_MODEL;
 
-class SIM_THREAD_REPORTER;
 class TUNER_SLIDER;
 
 
@@ -245,11 +244,33 @@ public:
         return m_plotNotebook->GetPageIndex( aPlot );
     }
 
+    /**
+     * Return true if a tab other than @p aExcept records @p aPlotName as its ngspice plot.
+     *
+     * Guards plot destruction so a rerun never frees a plot another tab still references (e.g. an
+     * FFT that consumes a TRAN plot, or a run that produced no new plot and reported a stale one).
+     */
+    bool IsPlotOwnedByOtherTab( const SIM_TAB* aExcept, const wxString& aPlotName ) const
+    {
+        if( aPlotName.IsEmpty() )
+            return false;
+
+        for( int ii = 0; ii < (int) m_plotNotebook->GetPageCount(); ++ii )
+        {
+            SIM_TAB* candidate = dynamic_cast<SIM_TAB*>( m_plotNotebook->GetPage( ii ) );
+
+            if( candidate && candidate != aExcept && candidate->GetSpicePlotName() == aPlotName )
+                return true;
+        }
+
+        return false;
+    }
+
     void OnPlotSettingsChanged();
 
     void OnSimUpdate();
-    void OnSimReport( const wxString& aMsg );
     void OnSimRefresh( bool aFinal );
+    void FlushSimConsole();
 
     void OnModify();
 

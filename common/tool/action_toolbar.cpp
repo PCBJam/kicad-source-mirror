@@ -54,7 +54,9 @@
 
 // Needed to handle adding the plugins to the toolbar
 // TODO (ISM): This should be better abstracted away from the toolbars
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <api/api_plugin_manager.h>
 
 
@@ -237,14 +239,24 @@ ACTION_TOOLBAR::ACTION_TOOLBAR( EDA_BASE_FRAME* parent, wxWindowID id, const wxP
           [&]( wxDPIChangedEvent& aEvent )
           {
 #ifdef __WXMSW__
-              // Update values which are normally only initialized in wxAuiToolBar::Create
-              // FromDIP is no-op on backends other than wxMSW
-              m_toolPacking = FromDIP( 2 );
-              m_toolBorderPadding = FromDIP( 3 );
+              // Update values which are normally only initialized in wxAuiToolBar::Create.
+              // FromDIP is no-op on backends other than wxMSW.
+              SetToolPacking( FromDIP( 2 ) );
+              SetToolBorderPadding( FromDIP( 3 ) );
 
               wxSize margin_lt = FromDIP( wxSize( 5, 5 ) );
               wxSize margin_rb = FromDIP( wxSize( 2, 2 ) );
               SetMargins( margin_lt.x, margin_lt.y, margin_rb.x, margin_rb.y );
+
+              // Re-realize the toolbar to recalculate all item sizes with the new DPI.
+              // This fixes excessive button padding when moving windows between displays
+              // with different DPI scaling factors.
+              if( GetToolCount() > 0 )
+              {
+                  UpdateControlWidths();
+                  InvalidateBestSize();
+                  KiRealize();
+              }
 #endif
 
               aEvent.Skip();
@@ -942,8 +954,13 @@ void ACTION_TOOLBAR::onPaletteEvent( wxCommandEvent& aEvent )
     if( !m_palette )
         return;
 
+    // Clear m_palette up front so a re-entrant dispatch (modal dialog pumping events)
+    // hits the null guard above instead of double-destroying.
+    ACTION_TOOLBAR_PALETTE* palette = m_palette;
+    m_palette = nullptr;
+
     OPT_TOOL_EVENT evt;
-    ACTION_GROUP*  group = m_palette->GetGroup();
+    ACTION_GROUP*  group = palette->GetGroup();
 
     // Find the action corresponding to the button press
     auto actionIt = std::find_if( group->GetActions().begin(), group->GetActions().end(),
@@ -967,9 +984,8 @@ void ACTION_TOOLBAR::onPaletteEvent( wxCommandEvent& aEvent )
     }
 
     // Hide the palette
-    m_palette->Hide();
-    m_palette->Destroy();
-    m_palette = nullptr;
+    palette->Hide();
+    palette->Destroy();
 }
 
 

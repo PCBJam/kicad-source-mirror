@@ -112,6 +112,15 @@ public:
         return wxString::FromUTF8( "☆ " );
     }
 
+    /// Upper bound for a persisted column width; larger values are treated as corrupt settings.
+    /// Set well above any plausible multi-monitor span so only true corruption is rejected.
+    static constexpr int MAX_COL_WIDTH = 100000;
+
+    /**
+     * @return true if @p aWidth is a plausible persisted column width, false if it is corrupt.
+     */
+    static bool IsValidColumnWidth( int aWidth );
+
 public:
     /**
      * Destructor. Do NOT delete this class manually; it is reference-counted
@@ -318,10 +327,50 @@ public:
     void Thaw() { m_freeze--; }
     bool IsFrozen() const { return m_freeze; }
 
+    /**
+     * RAII guard that detaches the tree view from the model during a rebuild, guarding against
+     * a deferred frame-clock tick validating rows the rebuild frees.
+     *
+     * Construct before freeing any node.
+     */
+    class ResetTreeView
+    {
+    public:
+        explicit ResetTreeView( LIB_TREE_MODEL_ADAPTER& aAdapter ) :
+                m_adapter( aAdapter )
+        {
+            m_adapter.Freeze();
+            m_adapter.BeforeReset();
+        }
+
+        ~ResetTreeView()
+        {
+            m_adapter.AfterReset();
+            m_adapter.Thaw();
+        }
+
+        ResetTreeView( const ResetTreeView& ) = delete;
+        ResetTreeView& operator=( const ResetTreeView& ) = delete;
+
+    private:
+        LIB_TREE_MODEL_ADAPTER& m_adapter;
+    };
+
     void RefreshTree();
 
     // Allows subclasses to nominate a context menu handler.
     virtual TOOL_INTERACTIVE* GetContextMenuTool() { return nullptr; }
+
+    /**
+     * Hook invoked just before a tree node is expanded (by LIB_TREE).
+     *
+     * Adapters that populate their contents lazily can override this to fill in
+     * the item's children on demand. The default does nothing (children are
+     * assumed to be already present). It runs synchronously before the control
+     * builds the node's child rows, so any children added here become visible
+     * as part of the same expand.
+     */
+    virtual void OnExpanding( const wxDataViewItem& aItem ) {}
 
     void PinLibrary( LIB_TREE_NODE* aTreeNode );
     void UnpinLibrary( LIB_TREE_NODE* aTreeNode );
@@ -370,13 +419,6 @@ protected:
      * @return parent of aItem, or an invalid wxDataViewItem if parent is root
      */
     wxDataViewItem GetParent( const wxDataViewItem& aItem ) const override;
-
-    unsigned int GetColumnCount() const override { return m_columns.size(); }
-
-    /**
-     * Return the type of data stored in the column as indicated by wxVariant::GetType()
-     */
-    wxString GetColumnType( unsigned int aCol ) const override { return "string"; }
 
     /**
      * Get the value of an item.

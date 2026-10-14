@@ -122,7 +122,8 @@ SYMBOL_EDIT_FRAME::SYMBOL_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                         LIB_EDIT_FRAME_NAME ),
         m_unitSelectBox( nullptr ),
         m_bodyStyleSelectBox( nullptr ),
-        m_isSymbolFromSchematic( false )
+        m_isSymbolFromSchematic( false ),
+        m_libTreeAutoHiddenForSchematicEdit( false )
 {
     m_SyncPinEdit = false;
 
@@ -343,7 +344,33 @@ void SYMBOL_EDIT_FRAME::SaveSettings( APP_SETTINGS_BASE* aCfg )
 
     GetGalDisplayOptions().m_axesEnabled = true;
 
+    // The library tree is hidden while editing a symbol from the schematic. Force it visible in the
+    // serialized AUI layout so the user's preference survives a restart, but only touch the pane
+    // metadata (not ToggleLibraryTree) to avoid a mid-session repaint/flicker and a spurious tree
+    // width capture below.
+    wxAuiPaneInfo& treePane = m_auimgr.GetPane( m_treePane );
+    wxAuiPaneInfo& filterPane = m_auimgr.GetPane( wxS( "SelectionFilter" ) );
+
+    const bool treeShown = treePane.IsShown();
+    const bool filterShown = filterPane.IsShown();
+
+    // Gate on the pending-restore flag alone, not the active-tab schematic state, which is cleared
+    // when a schematic tab closes while the tree stays auto-hidden.
+    const bool forceTreeShown = m_libTreeAutoHiddenForSchematicEdit && !treeShown;
+
+    if( forceTreeShown )
+    {
+        treePane.Show( true );
+        updateSelectionFilterVisbility();
+    }
+
     SCH_BASE_FRAME::SaveSettings( GetSettings() );
+
+    if( forceTreeShown )
+    {
+        treePane.Show( treeShown );
+        filterPane.Show( filterShown );
+    }
 
     m_settings->m_ShowPinElectricalType  = GetRenderSettings()->m_ShowPinsElectricalType;
     m_settings->m_ShowHiddenPins = GetRenderSettings()->m_ShowHiddenPins;
@@ -451,6 +478,12 @@ void SYMBOL_EDIT_FRAME::setupUIConditions()
                 // Symbols fields (root symbols and aliases) from the new s-expression libraries
                 // or in the schematic are editable.
                 return IsSymbolEditable();
+            };
+
+    auto canUpdateFieldsCond =
+            [this]( const SELECTION& )
+            {
+                return IsSymbolEditable() && m_symbol && m_symbol->CanUpdateFieldsFromParent();
             };
 
     auto symbolModifiedCondition =
@@ -601,7 +634,7 @@ void SYMBOL_EDIT_FRAME::setupUIConditions()
     mgr->SetConditions( SCH_ACTIONS::symbolProperties,     ENABLE( symbolSelectedInTreeCondition || ( canEditProperties && haveSymbolCond ) ) );
     mgr->SetConditions( SCH_ACTIONS::runERC,               ENABLE( haveSymbolCond ) );
     mgr->SetConditions( SCH_ACTIONS::pinTable,             ENABLE( isEditableCond && haveSymbolCond ) );
-    mgr->SetConditions( SCH_ACTIONS::updateSymbolFields,   ENABLE( isEditableCond && haveSymbolCond ) );
+    mgr->SetConditions( SCH_ACTIONS::updateSymbolFields,   ENABLE( canUpdateFieldsCond ) );
     mgr->SetConditions( SCH_ACTIONS::cycleBodyStyle,       ENABLE( multiBodyStyleModeCond ) );
 
     mgr->SetConditions( SCH_ACTIONS::toggleSyncedPinsMode, ACTION_CONDITIONS().Enable( multiUnitModeCond ).Check( syncedPinsModeCond ) );
@@ -782,6 +815,10 @@ void SYMBOL_EDIT_FRAME::ToggleProperties()
 
 void SYMBOL_EDIT_FRAME::ToggleLibraryTree()
 {
+    // An explicit toggle makes the live visibility authoritative, so drop any pending restore that
+    // LoadSymbolFromSchematic's auto-hide left behind.
+    m_libTreeAutoHiddenForSchematicEdit = false;
+
     wxAuiPaneInfo& treePane = m_auimgr.GetPane( m_treePane );
     treePane.Show( !IsLibraryTreeShown() );
     updateSelectionFilterVisbility();
@@ -1178,6 +1215,16 @@ wxString SYMBOL_EDIT_FRAME::AddLibraryFile( bool aCreateNew )
 
     if( aCreateNew )
     {
+        // The file browser already asked to overwrite, so drop the old file here.
+        // CreateLibrary fails on an existing path.
+        if( fn.FileExists() && !wxRemoveFile( fn.GetFullPath() ) )
+        {
+            DisplayError( this, wxString::Format( _( "Could not overwrite the library file '%s'.\n"
+                                                     "Make sure you have write permissions and try again." ),
+                                                  fn.GetFullPath() ) );
+            return wxEmptyString;
+        }
+
         if( !m_libMgr->CreateLibrary( fn.GetFullPath(), scope ) )
         {
             DisplayError( this, wxString::Format( _( "Could not create the library file '%s'.\n"
@@ -1348,10 +1395,14 @@ void SYMBOL_EDIT_FRAME::SyncLibraries( bool aShowProgress, bool aPreloadCancelle
 
     m_syncLibrariesInProgress = true;
 
-    LIB_ID selected;
+    LIB_ID              selected;
+    std::vector<LIB_ID> expanded;
 
     if( m_treePane )
+    {
         selected = GetLibTree()->GetSelectedLibId();
+        expanded = GetLibTree()->GetExpandedLibraries();
+    }
 
     // Ensure any in-progress background library preloading is complete before syncing the
     // tree. Without this, libraries still in LOADING state get skipped by Sync(), resulting
@@ -1403,6 +1454,10 @@ void SYMBOL_EDIT_FRAME::SyncLibraries( bool aShowProgress, bool aPreloadCancelle
         }
 
         GetLibTree()->Regenerate( true );
+
+        // Sync() collapsed the tree, so re-expand the libraries that were open before it.
+        for( const LIB_ID& libId : expanded )
+            GetLibTree()->ExpandLibId( libId );
 
         // Try to select the parent library, in case the symbol is not found
         if( !found && selected.IsValid() )
@@ -1758,9 +1813,21 @@ void SYMBOL_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
             emptyScreen();
         }
 
-        SyncLibraries( true );
+        // An optional payload names one library to force-refresh: its tree node
+        // is rebuilt even when the sync hash is unchanged (needed for external
+        // providers whose modify hash is a constant — e.g. a remote lib edited
+        // by a collaborator). Senders passing an empty payload keep the plain
+        // hash-gated sync.
+        wxString forceRefresh = wxString::FromUTF8( payload );
+
+        SyncLibraries( true, false, forceRefresh );
         ThawLibraryTree();
         RefreshLibraryTree();
+
+        // The force-refreshed node was deleted + recreated, which loses its
+        // expansion — re-expand it so the refreshed contents stay visible.
+        if( !forceRefresh.IsEmpty() && m_treePane )
+            GetLibTree()->ExpandLibId( LIB_ID( forceRefresh, wxEmptyString ) );
 
         break;
     }
@@ -1781,8 +1848,16 @@ void SYMBOL_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
         // watcher timer will retry the reload once the dialog has closed.
         if( !IsEnabled() )
         {
-            wxLogTrace( traceLibWatch,
-                        "Deferring symbol refresh; dialog is open on the symbol editor." );
+            wxLogTrace( traceLibWatch, "Deferring symbol refresh; dialog is open on the symbol editor." );
+            break;
+        }
+        // Defensive backstop for refresh mail that did not originate from this frame's debounce
+        // timer (which already defers while a tool is active).  An interactive tool holds
+        // references into the current symbol, so replacing it here would crash; drop this refresh
+        // and let the originating watcher retry.
+        else if( !ToolStackIsEmpty() )
+        {
+            wxLogTrace( traceLibWatch, "Deferring symbol refresh; an interactive tool is active." );
             break;
         }
 
@@ -1910,6 +1985,19 @@ SELECTION& SYMBOL_EDIT_FRAME::GetCurrentSelection()
 }
 
 
+bool SYMBOL_EDIT_FRAME::libTreeAutoHiddenForSchematicEdit( bool aWasFromSchematic,
+                                                           bool aRestorePending, bool aTreeShownNow )
+{
+    // Auto-hiding a visible tree schedules its restore. A chained schematic edit finds the tree
+    // already auto-hidden, so keep the pending restore rather than dropping it. An explicit user
+    // toggle clears the flag elsewhere, so a tree hidden without a pending restore stays that way.
+    if( aTreeShownNow )
+        return true;
+
+    return aWasFromSchematic && aRestorePending;
+}
+
+
 void SYMBOL_EDIT_FRAME::LoadSymbolFromSchematic( SCH_SYMBOL* aSymbol )
 {
     std::unique_ptr<LIB_SYMBOL> symbol = aSymbol->GetLibSymbolRef()->Flatten();
@@ -1989,8 +2077,19 @@ void SYMBOL_EDIT_FRAME::LoadSymbolFromSchematic( SCH_SYMBOL* aSymbol )
     ReCreateMenuBar();
     RecreateToolbars();
 
+    // Auto-hide the tree while editing a schematic symbol, remembering to restore it in SaveSettings
+    // so the user's preference survives a restart. Hide via the pane directly, not ToggleLibraryTree,
+    // which would treat this as a user toggle and drop the pending restore.
+    m_libTreeAutoHiddenForSchematicEdit = libTreeAutoHiddenForSchematicEdit(
+            m_isSymbolFromSchematic, m_libTreeAutoHiddenForSchematicEdit, IsLibraryTreeShown() );
+
     if( IsLibraryTreeShown() )
-        ToggleLibraryTree();
+    {
+        m_auimgr.GetPane( m_treePane ).Show( false );
+        updateSelectionFilterVisbility();
+        m_auimgr.Update();
+        Refresh();
+    }
 
     UpdateTitle();
     RebuildSymbolUnitAndBodyStyleLists();

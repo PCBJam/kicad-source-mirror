@@ -48,12 +48,15 @@
 #include <project_rescue.h>
 #include <project_sch.h>
 #include <dialog_HTML_reporter_base.h>
+#include <import_proj_properties.h>
 #include <io/common/plugin_common_choose_project.h>
 #include <reporter.h>
 #include <richio.h>
+#include <sch_footprint_field_reconciler.h>
 #include <sch_bus_entry.h>
 #include <sch_commit.h>
 #include <sch_edit_frame.h>
+#include <sch_draw_panel.h>
 #include <sch_io/kicad_legacy/sch_io_kicad_legacy.h>
 #include <sch_file_versions.h>
 #include <sch_line.h>
@@ -112,9 +115,6 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
     wxString   fullFileName( aFileSet[0] );
     wxFileName wx_filename( fullFileName );
-
-    if( !Prj().IsNullProject() )
-        Kiway().LocalHistory().Init( Prj().GetProjectPath() );
 
     // We insist on caller sending us an absolute path, if it does not, we say it's a bug.
     wxASSERT_MSG( wx_filename.IsAbsolute(), wxS( "Path is not absolute!" ) );
@@ -440,11 +440,19 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         // update some of the needed schematic settings such as drawing defaults
         LoadProjectSettings();
 
-        // It's possible the schematic parser fixed errors due to bugs so warn the user
-        // that the schematic has been fixed (modified).
         SCH_SHEET_LIST sheetList = Schematic().Hierarchy();
 
-        if( sheetList.IsModified() )
+        bool repairedPageNumbers = false;
+
+        if( sheetList.AllSheetPageNumbersEmpty() )
+            sheetList.SetInitialPageNumbers();
+        else
+            repairedPageNumbers = sheetList.RepairPageNumbers();
+
+        // It's possible the schematic parser fixed errors due to bugs, or that we reassigned
+        // duplicate or blank sheet page numbers, so warn the user that the schematic has been
+        // fixed (modified).
+        if( sheetList.IsModified() || repairedPageNumbers )
         {
             DisplayInfoMessage( this,
                                 _( "An error was found when loading the schematic that has "
@@ -452,9 +460,6 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                                    "repair the broken file or it may not be usable with other "
                                    "versions of KiCad." ) );
         }
-
-        if( sheetList.AllSheetPageNumbersEmpty() )
-            sheetList.SetInitialPageNumbers();
 
         UpdateFileHistory( fullFileName );
 
@@ -736,6 +741,11 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
         SetScreen( GetCurrentSheet().LastScreen() );
 
+        // Repaired page numbers changed in-memory sheet instances; flag the schematic so the
+        // fixed numbering can be saved instead of silently reverting on the next load.
+        if( repairedPageNumbers )
+            OnModify();
+
         wxLogTrace( traceSchCurrentSheet,
                    "After SetScreen: Current sheet path='%s', size=%zu",
                    GetCurrentSheet().Path().AsString(),
@@ -978,6 +988,14 @@ void SCH_EDIT_FRAME::OnImportProject()
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/eeschema_embind.cpp): notifies the
+// web app after a successful save so it can persist the MEMFS bytes. Same pattern
+// as the kicadCollabOnModify hook.
+extern "C" void kicadCollabOnSave( const char* aPath );
+#endif
+
+
 bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath )
 {
     wxString msg;
@@ -1067,6 +1085,17 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 
         msg.Printf( _( "File '%s' saved." ),  screen->GetFileName() );
         SetStatusText( msg, 0 );
+
+#ifdef __EMSCRIPTEN__
+        kicadCollabOnSave( schematicFileName.GetFullPath().utf8_str() );
+
+        // A root-sheet save also wrote the project file (ERC settings/exclusions)
+        // above — route it through the save hook too, or it stays MEMFS-only and
+        // is lost on reload (project-sync 0001). Subsheet stems have no project
+        // file, so this fires only for the root.
+        if( projectFile.FileExists() )
+            kicadCollabOnSave( projectFile.GetFullPath().utf8_str() );
+#endif
     }
 
     return success;
@@ -1463,18 +1492,36 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         Kiway().LocalHistory().RemoveAutosaveFiles( Prj().GetProjectPath(), savedSheetPaths );
     }
 
-    if( !Kiface().IsSingle() )
-    {
-        WX_STRING_REPORTER backupReporter;
+    WX_STRING_REPORTER backupReporter;
 
-        if( !GetSettingsManager()->TriggerBackupIfNeeded( backupReporter ) )
-            SetStatusText( backupReporter.GetMessages(), 0 );
+    if( !Kiface().IsSingle() )
+        GetSettingsManager()->TriggerBackupIfNeeded( backupReporter );
+
+    // Restore the virtual page numbers that were modified during save. When saving, screens are
+    // assigned page number 1 (single use) or 0 (multiple uses) for serialization purposes.
+    // We restore all screens here, not just the current one, because other code paths (e.g.
+    // ERC tree model, temporary sheet switches) may read any screen's virtual page number.
+    for( const SCH_SHEET_PATH& sheet : Schematic().Hierarchy() )
+        sheet.LastScreen()->SetVirtualPageNumber( sheet.GetVirtualPageNumber() );
+
+    SetSheetNumberAndCount();
+
+    if( GetCanvas() && GetCanvas()->GetView() )
+    {
+        GetCanvas()->GetView()->RefreshDrawingSheetPageInfo();
+        GetCanvas()->Refresh();
     }
 
     updateTitle();
 
     if( m_infoBar->GetMessageType() == WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE )
         m_infoBar->Dismiss();
+
+    if( backupReporter.HasMessage() )
+    {
+        wxString backupMsg = backupReporter.GetMessages();
+        m_infoBar->ShowMessageFor( backupMsg.Trim(), 10000, wxICON_WARNING );
+    }
 
     return success;
 }
@@ -1541,6 +1588,17 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
             if( loadedSheet )
             {
                 Schematic().SetTopLevelSheets( { loadedSheet } );
+
+                // re-link footprint fields to the project lib so update-from-schematic works
+                {
+                    wxString              cacheNick;
+                    std::vector<wxString> sourceFpLibs;
+                    IMPORT_PROJ_PROPS::ReadFootprintProps( aProperties, cacheNick, sourceFpLibs );
+
+                    SCH_FOOTPRINT_FIELD_RECONCILER fpReconciler( cacheNick, sourceFpLibs,
+                                                                 &loadReporter );
+                    fpReconciler.Reconcile( Schematic() );
+                }
 
                 if( errorReporter.m_Reporter->HasMessage() )
                 {

@@ -39,6 +39,10 @@
 
 #include <math/vector2wx.h>
 
+#ifdef __EMSCRIPTEN__
+#include <pcbjam_editor_events.h>
+#endif
+#include <pcbjam_read_only.h>
 #include <view/view.h>
 #include <view/view_controls.h>
 #include <eda_base_frame.h>
@@ -304,7 +308,11 @@ bool TOOL_MANAGER::doRunAction( const std::string& aActionName, bool aNow, const
 
     if( !action )
     {
-        wxASSERT_MSG( false, wxString::Format( "Could not find action %s.", aActionName ) );
+        // Names reaching this overload come from outside KiCad (the IPC API, plugins), so an
+        // unknown one is caller error to report, not an internal fault to assert on
+        wxLogTrace( kicadTraceToolStack, wxS( "TOOL_MANAGER::doRunAction - no action named %s" ),
+                    aActionName );
+
         return false;
     }
 
@@ -778,6 +786,21 @@ bool TOOL_MANAGER::dispatchInternal( TOOL_EVENT& aEvent )
         // the tool state handler is waiting for events (i.e. called Wait() method)
         if( st && st->cofunc && st->pendingWait && st->waitEvents.Matches( aEvent ) )
         {
+            if( !st->cofunc->CanResume() )
+            {
+                // The coroutine's context died while parked (destroyed
+                // mid-wait): resuming would be refused, but the branch below
+                // would still consume the event and tear down the wait —
+                // swallowing it for every live tool behind us. Skip the
+                // corpse; the event flows on.
+                wxLogTrace( kicadTraceToolStack,
+                            wxS( "TOOL_MANAGER::dispatchInternal - tool %s wait context is "
+                                 "dead; skipping" ),
+                            st->theTool->GetName() );
+                ++it;
+                continue;
+            }
+
             if( !aEvent.FirstResponder() )
                 aEvent.SetFirstResponder( st->theTool );
 
@@ -974,7 +997,10 @@ void TOOL_MANAGER::DispatchContextMenu( const TOOL_EVENT& aEvent )
         m_menuActive = true;
 
         if( wxWindow* frame = dynamic_cast<wxWindow*>( m_frame ) )
-            frame->PopupMenu( menu.get() );
+        {
+	    // By providing an explicit position, wx engages its screen clamp mechanism
+            frame->PopupMenu( menu.get(), frame->ScreenToClient( KIPLATFORM::UI::GetMousePosition() ) );
+        }
 
         // Warp the cursor if a menu item was selected
         if( menu->GetSelected() >= 0 )
@@ -1179,6 +1205,41 @@ void TOOL_MANAGER::applyViewControls( const TOOL_STATE* aState )
 bool TOOL_MANAGER::processEvent( const TOOL_EVENT& aEvent )
 {
     wxLogTrace( kicadTraceToolStack, wxS( "TOOL_MANAGER::processEvent - %s" ), aEvent.Format() );
+
+    // pcbjam WASM addition (read-only-viewer): every action execution funnels
+    // through here — hotkeys re-enter as TA_ACTION via DispatchHotKey/RunHotKey,
+    // menus dispatch through ACTION_MENU::OnMenuEvent → ProcessEvent, and direct
+    // RunAction calls (e.g. the selection tools' drag-to-move) land here via
+    // doRunAction. In read-only mode swallow everything but the view-only
+    // allowlist; raw key/mouse events (non-TC_COMMAND) pass through untouched.
+    if( PCBJAM_READ_ONLY::IsReadOnly()
+            && aEvent.Category() == TC_COMMAND
+            && ( aEvent.Action() == TA_ACTION || aEvent.Action() == TA_ACTIVATE
+                 || aEvent.Action() == TA_REACTIVATE )
+            && !PCBJAM_READ_ONLY::IsActionAllowed( aEvent.getCommandStr() ) )
+    {
+        return false;
+    }
+
+#ifdef __EMSCRIPTEN__
+    // pcbjam WASM addition (overlay-system): report every action to the page
+    // (window 'pcbjam:editor-event'), with the processEvent nesting depth so
+    // the page can tell user input (0) from actions a running tool issued.
+    static int s_pcbjamEventDepth = 0;
+
+    struct PCBJAM_EVENT_DEPTH
+    {
+        PCBJAM_EVENT_DEPTH() { ++s_pcbjamEventDepth; }
+        ~PCBJAM_EVENT_DEPTH() { --s_pcbjamEventDepth; }
+    } pcbjamDepthGuard;
+
+    if( aEvent.Category() == TC_COMMAND
+            && ( aEvent.Action() == TA_ACTION || aEvent.Action() == TA_ACTIVATE )
+            && !aEvent.getCommandStr().empty() )
+    {
+        PCBJAM_EDITOR_EVENTS::NotifyAction( aEvent.getCommandStr(), s_pcbjamEventDepth - 1 );
+    }
+#endif
 
     // First try to dispatch the action associated with the event if it is a key press event
     bool handled = DispatchHotKey( aEvent );

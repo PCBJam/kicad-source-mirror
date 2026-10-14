@@ -164,6 +164,7 @@ bool ROUTER::StartDragging( const VECTOR2I& aP, ITEM* aItem, int aDragMode )
 bool ROUTER::StartDragging( const VECTOR2I& aP, ITEM_SET aStartItems, int aDragMode )
 {
     m_leaderSegments.clear();
+    SetFailureReason( wxEmptyString );
 
     if( aStartItems.Empty() )
         return false;
@@ -658,8 +659,11 @@ void ROUTER::markViolations( NODE* aNode, ITEM_SET& aCurrent, NODE::ITEM_VECTOR&
 
                 clearance = aNode->GetClearance( currentItem, itemToMark );
 
-                if( itemToMark->Layers().IsMultilayer() && !currentItem->Layers().IsMultilayer() )
+                if( itemToMark->Layers().IsMultilayer() && !currentItem->Layers().IsMultilayer()
+                    && !itemToMark->HasUniqueShapeLayers() )
+                {
                     tmp->SetLayer( currentItem->Layer() );
+                }
 
                 if( itemToMark->IsCompoundShapePrimitive() )
                 {

@@ -34,6 +34,7 @@
 #include <advanced_config.h>
 #include <render_settings.h>
 #include <trigo.h>
+#include <math/util.h>
 #include <font/font.h>
 #include <font/stroke_font.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
@@ -287,7 +288,8 @@ BOOST_AUTO_TEST_CASE( GlyphBBoxIncludesOffsetAndStrokeWidth )
     const ADVANCED_CFG& cfg = ADVANCED_CFG::GetCfg();
     double unitsPerEm = 1000.0;
     double expectedXOffset = cfg.m_PDFStrokeFontXOffset * unitsPerEm;
-    double expectedHalfStroke = unitsPerEm * cfg.m_PDFStrokeFontWidthFactor / 2.0;
+    double widthFactor = 300.0 / 3000.0;
+    double expectedHalfStroke = unitsPerEm * widthFactor / 2.0;
 
     // Find all d1 operators (skip .notdef which has all-zero bbox)
     std::string::size_type pos = 0;
@@ -318,8 +320,8 @@ BOOST_AUTO_TEST_CASE( GlyphBBoxIncludesOffsetAndStrokeWidth )
             }
 
             // The bbox minX should be shifted by the X offset minus half stroke width.
-            // With default offset 0.1 and stroke factor 0.12, minX should be around
-            // 0.1*1000 - 0.12*1000/2 = 100 - 60 = 40, not 0.
+            // With default offset 0.1 and stroke width 300 at size 3000, minX should be around
+            // 0.1*1000 - 0.1*1000/2 = 100 - 50 = 50, not 0.
             BOOST_CHECK_MESSAGE( minX < -expectedHalfStroke + 1.0 || minX > 0.1,
                                  "Glyph bbox minX (" << minX
                                  << ") suggests X offset or stroke padding is missing" );
@@ -503,10 +505,59 @@ BOOST_AUTO_TEST_CASE( PlotOutlineFontEmbedding )
     MaybeRemoveFile( pdfPath );
 }
 
-// Test tab handling in PDF text output (issue #22606).
-// When text contains tab characters, each tab should advance to the next tab stop.
-// We verify that text with tabs produces different glyph positions than without tabs.
-BOOST_AUTO_TEST_CASE( PlotTextWithTabs )
+// Extract the device-space X translation of every stroke-font text block ("... cm BT") in a
+// decompressed PDF content stream, in stream order.  The stroke plotter emits each rendered word
+// as "q a b c d e f cm BT ...", where the 5th number (e) is the text-matrix X origin.
+static std::vector<double> ExtractStrokeTextOriginsX( const std::string& aBuffer )
+{
+    std::vector<double> origins;
+    size_t              pos = 0;
+
+    while( ( pos = aBuffer.find( "cm BT", pos ) ) != std::string::npos )
+    {
+        std::string head = aBuffer.substr( 0, pos );
+        std::vector<double> nums;
+
+        for( size_t end = head.size(); end > 0 && nums.size() < 6; )
+        {
+            size_t start = head.find_last_not_of( " \n\r\t", end - 1 );
+
+            if( start == std::string::npos )
+                break;
+
+            size_t tokStart = head.find_last_of( " \n\r\t", start );
+            tokStart = ( tokStart == std::string::npos ) ? 0 : tokStart + 1;
+
+            try
+            {
+                nums.push_back( std::stod( head.substr( tokStart, start - tokStart + 1 ) ) );
+            }
+            catch( ... )
+            {
+                break;
+            }
+
+            end = tokStart;
+        }
+
+        if( nums.size() == 6 )
+            origins.push_back( nums[1] ); // reversed order: e is second-from-last collected
+
+        pos += 5;
+    }
+
+    return origins;
+}
+
+
+// Issue #22606: PDF plotting of stroke-font text containing tab characters placed the following
+// text at the wrong tab stop.  The plotter hardcoded the outline font's tab rule (2.4 * size),
+// but the default schematic font is the stroke font, whose tab stops are column based and land
+// much further right.  The result was tabs that came out too short in the PDF versus on screen.
+//
+// This drives the plotter with the reporter's own text ("v07:\terstversion") and checks that the
+// text after the tab is placed exactly where the stroke font's own glyph model puts it.
+BOOST_AUTO_TEST_CASE( PlotStrokeTextTabStopMatchesFont )
 {
     wxString pdfPath = getTempPdfPath( "kicad_pdf_tabs" );
 
@@ -518,17 +569,20 @@ BOOST_AUTO_TEST_CASE( PlotTextWithTabs )
     plotter.SetViewport( VECTOR2I( 0, 0 ), 1.0, 1.0, false );
     BOOST_REQUIRE( plotter.StartPlot( wxT( "1" ), wxT( "TabTest" ) ) );
 
-    TEXT_ATTRIBUTES attrs = BuildTextAttributes( 3000, 300, false, false );
-    auto strokeFont = LoadStrokeFontUnique();
+    const int       sizeIu = 1270000; // 1.27 mm, the reporter's text size
+    TEXT_ATTRIBUTES attrs = BuildTextAttributes( sizeIu, sizeIu / 10, false, false );
+    auto            strokeFont = LoadStrokeFontUnique();
     KIFONT::METRICS metrics;
 
-    wxString textWithTab = wxT( "Before\tAfter" );
-    wxString textWithoutTab = wxT( "BeforeAfter" );
+    // Two reference words establish the linear user->device X scale of the viewport.
+    plotter.PlotText( VECTOR2I( 40000000, 60000000 ), COLOR4D( 0, 0, 0, 1 ), wxT( "M" ), attrs,
+                      strokeFont.get(), metrics );
+    plotter.PlotText( VECTOR2I( 80000000, 60000000 ), COLOR4D( 0, 0, 0, 1 ), wxT( "M" ), attrs,
+                      strokeFont.get(), metrics );
 
-    plotter.PlotText( VECTOR2I( 50000, 60000 ), COLOR4D( 0, 0, 0, 1 ), textWithTab, attrs,
-                      strokeFont.get(), metrics );
-    plotter.PlotText( VECTOR2I( 50000, 50000 ), COLOR4D( 0, 0, 0, 1 ), textWithoutTab, attrs,
-                      strokeFont.get(), metrics );
+    // The reporter's tabbed line: "v07:" then a tab then the rest of the line.
+    plotter.PlotText( VECTOR2I( 40000000, 40000000 ), COLOR4D( 0, 0, 0, 1 ), wxT( "v07:\terstversion" ),
+                      attrs, strokeFont.get(), metrics );
 
     plotter.EndPlot();
 
@@ -536,25 +590,52 @@ BOOST_AUTO_TEST_CASE( PlotTextWithTabs )
     BOOST_REQUIRE( ReadPdfWithDecompressedStreams( pdfPath, buffer ) );
     BOOST_CHECK( buffer.rfind( "%PDF", 0 ) == 0 );
 
-    // The PDF should contain text content. Tabs should not produce visible tab glyphs but should
-    // create proper spacing. We verify the PDF is valid and contains our text characters.
-    BOOST_CHECK_MESSAGE( PdfContains( buffer, "0041" ) || PdfContains( buffer, "A" ),
-                         "PDF should contain 'A' from 'After'" );
+    std::vector<double> origins = ExtractStrokeTextOriginsX( buffer );
+
+    // Two reference "M" blocks plus the two segments ("v07:" and "erstversion") of the tabbed line.
+    BOOST_REQUIRE_EQUAL( origins.size(), 4u );
+
+    const double scale = ( origins[1] - origins[0] ) / ( 80000000.0 - 40000000.0 );
+    BOOST_REQUIRE( std::abs( scale ) > 0.0 );
+
+    // Distance in user units from the "v07:" origin to the post-tab "erstversion" origin.
+    const double measuredOffsetIu = ( origins[3] - origins[2] ) / scale;
+
+    const VECTOR2I size( sizeIu, sizeIu );
+
+    // The stroke font's own glyph placement is the ground truth for the on-screen position.
+    const double expectedOffsetIu =
+            strokeFont->GetTextAsGlyphs( nullptr, nullptr, wxT( "v07:\t" ), size, VECTOR2I(),
+                                         ANGLE_0, false, VECTOR2I(), 0 )
+                    .x;
+
+    // The old (buggy) hardcoded rule would have placed it here; kept only to document the gap.
+    const double widthV07 =
+            strokeFont->GetTextAsGlyphs( nullptr, nullptr, wxT( "v07:" ), size, VECTOR2I(), ANGLE_0,
+                                         false, VECTOR2I(), 0 )
+                    .x;
+    const int    oldTabWidth = KiROUND( sizeIu * 4 * 0.6 );
+    const double oldOffsetIu = widthV07 + ( oldTabWidth - KiROUND( widthV07 ) % oldTabWidth );
+
+    const double tolerance = sizeIu * 0.02;
+
+    BOOST_CHECK_MESSAGE( std::abs( measuredOffsetIu - expectedOffsetIu ) < tolerance,
+                         "Post-tab text at " << measuredOffsetIu << " IU, font model expects "
+                                             << expectedOffsetIu << " IU (old buggy rule: "
+                                             << oldOffsetIu << " IU)" );
 
     MaybeRemoveFile( pdfPath );
 }
 
 // Regression test for GitLab issue 23740: stroke-font Type3 glyphs in the PDF output were
 // plotted above and to the left of where they should have been.  The old code derived the
-// vertical anchor from StringBoundaryLimits (which inflates by 3*thickness) and forgot to
-// cancel the m_PDFStrokeFontYOffset baked into every Type3 glyph, so character placement
-// varied with the caller's pen width and with the stroke-font Y offset.
+// vertical anchor from StringBoundaryLimits (which inflates by 3*thickness) and used
+// thickness-dependent CTM hacks.  Alignment now goes through FONT::GetAlignedDrawPosition
+// (GAL getLinePositions), with a constant cancel of the baked Type3 glyph Y offset.
 //
 // The test plots the same character with V_TOP, V_CENTER and V_BOTTOM alignments at the same
 // anchor, parses the text-matrix ctm_f value out of the content stream, then verifies that
-// ctm_f corresponds to the positions that FONT::getLinePositions would produce for GAL,
-// translated to PDF device coordinates (with the stroke-font yOffset applied so glyph ink
-// lands where screen rendering would).
+// ctm_f deltas match FONT::getLinePositions (the constant YOffset cancel drops out of deltas).
 BOOST_AUTO_TEST_CASE( StrokeFontVerticalAlignmentMatchesScreen )
 {
     wxString pdfPath = getTempPdfPath( "kicad_pdf_valign" );
@@ -617,13 +698,13 @@ BOOST_AUTO_TEST_CASE( StrokeFontVerticalAlignmentMatchesScreen )
     const double fontSize  = (double) sizeIU;
     const double thickness = (double) strokeW;
 
-    // GAL cursor offsets from FONT::getLinePositions (single line, height = 1.17 * size):
-    //     V_TOP    = size                (+ size.y below anchor)
-    //     V_CENTER = 0.415 * size        (size - height/2)
-    //     V_BOTTOM = -0.17  * size       (size - height)
-    // The PDF stroke path applies a constant yOffset on top of these, which drops out of the
-    // deltas between alignments, so we check those deltas directly.  PDF device Y decreases
-    // as IU Y increases, so ctm_f_TOP < ctm_f_CENTER < ctm_f_BOTTOM.
+    // GAL cursor Y offsets from FONT::getLinePositions (single line, height = 1.17 * size),
+    // ignoring the strokeWidth*0.052 fudge which is the same for every V-align and cancels
+    // in the deltas:
+    //     V_TOP    = 1.000 * size
+    //     V_CENTER = 0.415 * size
+    //     V_BOTTOM = -0.17 * size
+    // PDF device Y decreases as IU Y increases, so ctm_f_TOP < ctm_f_CENTER < ctm_f_BOTTOM.
     const double expected_delta_top_center = ( 1.000 - 0.415 ) * fontSize;
     const double expected_delta_center_bot = ( 0.415 - ( -0.17 ) ) * fontSize;
 
@@ -634,44 +715,34 @@ BOOST_AUTO_TEST_CASE( StrokeFontVerticalAlignmentMatchesScreen )
     BOOST_CHECK_CLOSE( observed_delta_center_bot, expected_delta_center_bot, 1.0 );
 
     BOOST_CHECK_MESSAGE( matrices[0].f < matrices[1].f && matrices[1].f < matrices[2].f,
-                         "Expected ctm_f to decrease from V_BOTTOM to V_CENTER to V_TOP, got "
+                         "Expected ctm_f_TOP < ctm_f_CENTER < ctm_f_BOTTOM, got "
                              << matrices[0].f << ", " << matrices[1].f << ", " << matrices[2].f );
 
-    // The uncorrected formula (pre-fix) would give 0.5 * (size + 3*thickness) for the V_TOP
-    // to V_CENTER delta.  Ensure the observed delta does not match that, which would mean
-    // the alignment fix is inactive.
+    // The uncorrected StringBoundaryLimits formula (pre-fix) would give
+    // 0.5 * (size + 3*thickness) for the V_TOP to V_CENTER delta.
     const double uncorrectedDelta = 0.5 * ( fontSize + 3.0 * thickness );
     BOOST_CHECK_MESSAGE( std::abs( observed_delta_top_center - uncorrectedDelta ) > 1.0,
                          "ctm_f delta for V_TOP vs V_CENTER matches the uncorrected formula; "
                          "the stroke-font alignment fix does not appear to be in effect." );
 
-    // For italic text the Y axis of the text matrix is sheared (adj_c != 0 for horizontal
-    // italic), so the baseline correction has to project onto (adj_c, adj_d) rather than
-    // sin/cos of aOrient.  With the buggy sin/cos formula, italic_delta_e between V_TOP and
-    // V_CENTER at angle 0 would be zero (same as the non-italic case); with the fix the
-    // shear transfers part of the correction into the X direction.
-    const double italic_delta_e = matrices[4].e - matrices[3].e;
-    const double nonitalic_delta_e = matrices[1].e - matrices[0].e;
-
+    // Italic shear must still be present on the text matrix.
     BOOST_CHECK_MESSAGE( std::abs( matrices[3].c ) > 0.01,
                          "Italic text matrix does not show the expected shear (adj_c == "
                              << matrices[3].c << ")" );
 
-    // Non-italic, horizontal text has adj_c == 0, so delta_e between V-alignments is 0.
-    BOOST_CHECK_SMALL( nonitalic_delta_e, 1.0 );
+    // Glyph YOffset cancel is constant across V-alignments.  With GAL-based start positions,
+    // only IU Y differs between V_TOP and V_CENTER for horizontal text, so ctm_e must not
+    // change (old per-V-align deltaDev hacks incorrectly introduced a shear * Y correction
+    // into e).  Same for italic and non-italic.
+    const double italic_delta_e = matrices[4].e - matrices[3].e;
+    const double nonitalic_delta_e = matrices[1].e - matrices[0].e;
 
-    // Italic text must show a non-zero delta_e from the shear projection.  The direction
-    // is determined by the sign of the shear: with tilt = -ITALIC_TILT and downward IU Y
-    // correction, italic_delta_e has the opposite sign of adj_c (i.e., negative when the
-    // italic shear leans right).
-    BOOST_CHECK_MESSAGE( std::abs( italic_delta_e ) > 1.0,
-                         "Italic baseline correction did not shear along the text-matrix Y "
-                         "axis; italic_delta_e = "
-                             << italic_delta_e
-                             << " (should be non-zero when adj_c is non-zero)" );
-    BOOST_CHECK_MESSAGE( italic_delta_e * matrices[3].c < 0,
-                         "italic_delta_e should have the opposite sign of adj_c; got "
-                             << italic_delta_e << " vs adj_c=" << matrices[3].c );
+    BOOST_CHECK_SMALL( nonitalic_delta_e, 1.0 );
+    BOOST_CHECK_SMALL( italic_delta_e, 1.0 );
+
+    // V-alignment deltas on f remain the same under italic shear (Y cancel is constant).
+    const double italic_delta_top_center = matrices[4].f - matrices[3].f;
+    BOOST_CHECK_CLOSE( italic_delta_top_center, expected_delta_top_center, 1.0 );
 
     MaybeRemoveFile( pdfPath );
 }
@@ -777,6 +848,110 @@ BOOST_AUTO_TEST_CASE( StrokeFontWordSpacingMatchesGlyphAdvance )
                                  << "); the renderWord cursor fix appears inactive." );
 
     MaybeRemoveFile( pdfPath );
+}
+
+// Regression test for https://gitlab.com/kicad/code/kicad/-/issues/23843
+// A border-less filled shape with a dashed/dotted stroke is plotted with a zero pen width.
+// PDF_PLOTTER::SetDash then computed every dash element from that zero width, emitting an
+// all-zero dash array "[0 0] 0 d". Such an array is illegal in PDF and makes strict viewers
+// (Adobe Acrobat, Evince) abort rendering of the rest of the page, dropping the shape fill,
+// the page background and any junction dots that follow. SetDash must fall back to a solid
+// line "[] 0 d" when the requested pattern degenerates to all zeros.
+BOOST_AUTO_TEST_CASE( SetDashZeroWidthNoIllegalDashArray )
+{
+    wxString pdfPath = getTempPdfPath( "kicad_pdf_zero_dash" );
+
+    PDF_PLOTTER plotter;
+    SIMPLE_RENDER_SETTINGS renderSettings;
+
+    plotter.SetRenderSettings( &renderSettings );
+    BOOST_REQUIRE( plotter.OpenFile( pdfPath ) );
+    plotter.SetViewport( VECTOR2I( 0, 0 ), 1.0, 1.0, false );
+    BOOST_REQUIRE( plotter.StartPlot( wxT( "1" ), wxT( "DashTest" ) ) );
+
+    // Reproduce the border-less dotted filled rectangle from the issue: a dotted dash style
+    // with a zero pen width, followed by the filled (no-outline) rectangle itself. Exercise
+    // every dashed style so a regression in any of them is caught.
+    plotter.SetColor( COLOR4D( 1.0, 0.0, 0.0, 1.0 ) );
+
+    for( LINE_STYLE style : { LINE_STYLE::DASH, LINE_STYLE::DOT, LINE_STYLE::DASHDOT,
+                              LINE_STYLE::DASHDOTDOT } )
+    {
+        plotter.SetDash( 0, style );
+    }
+
+    plotter.SetDash( 0, LINE_STYLE::DOT );
+    plotter.Rect( VECTOR2I( 50000, 50000 ), VECTOR2I( 70000, 60000 ), FILL_T::FILLED_SHAPE, 0 );
+
+    plotter.EndPlot();
+
+    std::string buffer;
+    BOOST_REQUIRE( ReadPdfWithDecompressedStreams( pdfPath, buffer ) );
+    BOOST_CHECK( buffer.rfind( "%PDF", 0 ) == 0 );
+
+    // No illegal all-zero dash array may be present anywhere in the content stream, for any
+    // of the dashed styles.
+    for( const char* illegalPattern : { "[0 0] 0 d", "[0 0 0 0] 0 d", "[0 0 0 0 0 0] 0 d" } )
+    {
+        BOOST_CHECK_MESSAGE( buffer.find( illegalPattern ) == std::string::npos,
+                             "PDF contains an illegal all-zero dash array (" << illegalPattern
+                             << "), which breaks strict viewers" );
+    }
+
+    // The zero-width dashed styles must have degenerated to a solid line.
+    BOOST_CHECK_MESSAGE( buffer.find( "[] 0 d" ) != std::string::npos,
+                         "Zero-width dashed style should fall back to a solid dash array" );
+
+    // The fill operator for the rectangle must still be emitted.
+    BOOST_CHECK_MESSAGE( buffer.find( " re f" ) != std::string::npos
+                                 || buffer.find( "re\nf" ) != std::string::npos,
+                         "Filled rectangle should still be plotted" );
+
+    MaybeRemoveFile( pdfPath );
+}
+
+
+// Companion to SetDashZeroWidthNoIllegalDashArray: the solid-line fallback must apply only to the
+// degenerate all-zero case. A normal non-zero pen width must still emit a real dashed array, so a
+// fix that collapsed every dashed style to solid would regress here.
+BOOST_AUTO_TEST_CASE( SetDashNonZeroWidthKeepsDashArray )
+{
+    wxString pdfPath = getTempPdfPath( "kicad_pdf_nonzero_dash" );
+
+    PDF_PLOTTER plotter;
+    SIMPLE_RENDER_SETTINGS renderSettings;
+
+    plotter.SetRenderSettings( &renderSettings );
+    BOOST_REQUIRE( plotter.OpenFile( pdfPath ) );
+    plotter.SetViewport( VECTOR2I( 0, 0 ), 1.0, 1.0, false );
+    BOOST_REQUIRE( plotter.StartPlot( wxT( "1" ), wxT( "DashTest" ) ) );
+
+    plotter.SetColor( COLOR4D( 1.0, 0.0, 0.0, 1.0 ) );
+    plotter.SetDash( 10000, LINE_STYLE::DASH );
+    plotter.MoveTo( VECTOR2I( 50000, 50000 ) );
+    plotter.FinishTo( VECTOR2I( 70000, 50000 ) );
+
+    plotter.EndPlot();
+
+    std::string buffer;
+    BOOST_REQUIRE( ReadPdfWithDecompressedStreams( pdfPath, buffer ) );
+
+    // The dash array elements scale with the pen width, so a non-zero width yields a real,
+    // non-zero pattern. Find the emitted array and confirm it is neither the solid fallback
+    // "[]" nor the all-zero degenerate form.
+    size_t dashPos = buffer.find( "] 0 d" );
+    BOOST_REQUIRE_MESSAGE( dashPos != std::string::npos, "No dash array was emitted" );
+
+    size_t openPos = buffer.rfind( '[', dashPos );
+    BOOST_REQUIRE( openPos != std::string::npos && openPos < dashPos );
+
+    std::string dashArray = buffer.substr( openPos, dashPos - openPos + 1 );
+
+    BOOST_CHECK_MESSAGE( dashArray.find_first_of( "123456789" ) != std::string::npos,
+                         "Non-zero dashed style should emit a real, non-zero dash array, got "
+                                 << dashArray );
+    BOOST_CHECK_MESSAGE( dashArray != "[]",
+                         "A non-zero pen width must not fall back to the solid line" );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

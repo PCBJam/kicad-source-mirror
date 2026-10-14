@@ -35,6 +35,7 @@
 
 #include <board.h>
 #include <board_design_settings.h>
+#include <footprint.h>
 #include <board_stackup_manager/board_stackup.h>
 #include <common.h>
 #include <core/utf8.h>
@@ -42,12 +43,17 @@
 #include <netinfo.h>
 #include <netclass.h>
 #include <pcb_track.h>
+#include <pcb_generator.h>
+#include <generators/pcb_tuning_pattern.h>
+#include <geometry/shape_line_chain.h>
 #include <project.h>
+#include <pcb_text.h>
 #include <project/net_settings.h>
 #include <settings/settings_manager.h>
 #include <zone.h>
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -82,6 +88,40 @@ BOOST_AUTO_TEST_CASE( BoardLoadNoAssertions )
     // Basic sanity checks
     BOOST_CHECK( board->GetNetCount() > 0 );
     BOOST_CHECK( board->Footprints().size() > 0 );
+}
+
+
+// GetImportedCachedLibraryFootprints() is caller-owns, so Altium must clone rather than alias
+// aliasing would let the reconciler (takes ownership) double-free the board
+BOOST_AUTO_TEST_CASE( CachedLibraryFootprintsAreOwnedCopies )
+{
+    std::string dataPath =
+            KI_TEST::GetPcbnewTestDataDir() + "plugins/altium/HiFive/HiFive1.B01.PcbDoc";
+
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+    m_altiumPlugin.LoadBoard( dataPath, board.get(), nullptr );
+
+    BOOST_REQUIRE( board );
+    BOOST_REQUIRE_GT( board->Footprints().size(), 0 );
+
+    std::vector<FOOTPRINT*> cached = m_altiumPlugin.GetImportedCachedLibraryFootprints();
+
+    // adopt ownership so the clones free with the test
+    std::vector<std::unique_ptr<FOOTPRINT>> owned;
+
+    for( FOOTPRINT* fp : cached )
+        owned.emplace_back( fp );
+
+    BOOST_CHECK_EQUAL( cached.size(), board->Footprints().size() );
+
+    std::set<FOOTPRINT*> boardFootprints( board->Footprints().begin(), board->Footprints().end() );
+
+    // no returned footprint may alias a board-owned one
+    for( FOOTPRINT* fp : cached )
+    {
+        BOOST_CHECK_MESSAGE( boardFootprints.count( fp ) == 0,
+                             "GetImportedCachedLibraryFootprints returned a board-owned footprint" );
+    }
 }
 
 
@@ -512,6 +552,277 @@ BOOST_AUTO_TEST_CASE( ProjectParametersPreserveExisting )
 
     // Other parameters are still imported.
     BOOST_CHECK_EQUAL( project.GetTextVars().at( wxS( "COMPANY_NAME" ) ), wxS( "ETH Zurich" ) );
+}
+
+
+/**
+ * Regression test for https://gitlab.com/kicad/code/kicad/-/issues/24504
+ *
+ * The Fastino board places several labels as a coincident pair of free strings, one on a copper
+ * layer and one on the matching soldermask layer.  Altium auto-sizes each string's bounding box
+ * from its own rasterizer and may store a different box width (and stroke width) for the two
+ * copies, so anchoring the imported KiCad text to that per-record box width pushed the copper and
+ * mask copies apart.  Verify that every copper-layer free string that has a matching soldermask
+ * free string (same text, mirroring and rotation) is imported to the same position.
+ */
+BOOST_AUTO_TEST_CASE( CopperAndMaskTextCoincide )
+{
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir()
+                           + "plugins/altium/issue24456/Fastino_Ground_Isolator.PcbDoc";
+
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+    m_altiumPlugin.LoadBoard( dataPath, board.get(), nullptr );
+    BOOST_REQUIRE( board );
+
+    std::vector<PCB_TEXT*> copperTexts;
+    std::vector<PCB_TEXT*> maskTexts;
+
+    for( BOARD_ITEM* item : board->Drawings() )
+    {
+        if( item->Type() != PCB_TEXT_T )
+            continue;
+
+        PCB_TEXT*    text = static_cast<PCB_TEXT*>( item );
+        PCB_LAYER_ID layer = text->GetLayer();
+
+        if( IsCopperLayer( layer ) )
+            copperTexts.push_back( text );
+        else if( layer == F_Mask || layer == B_Mask )
+            maskTexts.push_back( text );
+    }
+
+    BOOST_REQUIRE_MESSAGE( !copperTexts.empty(), "Board must contain copper-layer text" );
+    BOOST_REQUIRE_MESSAGE( !maskTexts.empty(), "Board must contain soldermask-layer text" );
+
+    // A copper string and a mask string are the same logical label when they share text, rotation
+    // and mirroring.  KiCad's IU tolerance for "coincident" is tight; before the fix the gap was
+    // 50000-75000 IU (0.05-0.075 mm).
+    const int tolerance = 1000; // 1 micron
+
+    int matchedPairs = 0;
+
+    for( PCB_TEXT* copper : copperTexts )
+    {
+        for( PCB_TEXT* mask : maskTexts )
+        {
+            if( copper->GetText() != mask->GetText()
+                || copper->GetTextAngle() != mask->GetTextAngle()
+                || copper->IsMirrored() != mask->IsMirrored() )
+            {
+                continue;
+            }
+
+            // Only treat them as the same label when they are already near each other; distinct
+            // labels that happen to share a glyph (e.g. several "+" pads) must not be cross-matched.
+            VECTOR2I delta = copper->GetTextPos() - mask->GetTextPos();
+
+            if( std::abs( delta.x ) > 500000 || std::abs( delta.y ) > 500000 )
+                continue;
+
+            matchedPairs++;
+
+            BOOST_CHECK_MESSAGE(
+                    std::abs( delta.x ) <= tolerance && std::abs( delta.y ) <= tolerance,
+                    wxString::Format( "Copper/mask copies of '%s' diverge by (%d, %d) IU",
+                                      copper->GetText(), delta.x, delta.y ) );
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( matchedPairs > 0,
+                         "Expected at least one coincident copper/soldermask text pair" );
+}
+
+
+/**
+ * Regression test for https://gitlab.com/kicad/code/kicad/-/issues/24654
+ *
+ * Altium stores interactive length-tuning meanders as committed tracks and arcs plus a parametric
+ * definition in the SmartUnions stream, referenced from each primitive by a union index.  The
+ * importer used to drop the SmartUnions stream, so a converted board kept the tuned copper but lost
+ * the editable length-tuning tool.  Verify that the Coil sample rebuilds its eight tuning patterns
+ * (four single-track, four differential-pair) as PCB_TUNING_PATTERN generators wrapping the
+ * imported copper.
+ */
+BOOST_AUTO_TEST_CASE( LengthTuningPatterns )
+{
+    std::string dataPath =
+            KI_TEST::GetPcbnewTestDataDir() + "plugins/altium/issue24654/PCB1.PcbDoc";
+
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+    m_altiumPlugin.LoadBoard( dataPath, board.get(), nullptr );
+
+    BOOST_REQUIRE( board );
+
+    int tuningCount = 0;
+    int singleCount = 0;
+    int diffPairCount = 0;
+
+    for( PCB_GENERATOR* generator : board->Generators() )
+    {
+        PCB_TUNING_PATTERN* pattern = dynamic_cast<PCB_TUNING_PATTERN*>( generator );
+
+        if( !pattern )
+            continue;
+
+        tuningCount++;
+
+        // Each pattern must wrap the real imported copper and carry Altium's meander parameters.
+        BOOST_CHECK_MESSAGE( !pattern->GetBoardItems().empty(),
+                             "Imported tuning pattern wraps no copper" );
+        BOOST_CHECK_GT( pattern->GetMaxAmplitude(), 0 );
+        BOOST_CHECK_GT( pattern->GetSpacing(), 0 );
+
+        // The members must be copper tracks/arcs that the importer placed on the board.
+        std::set<int> memberNets;
+
+        for( BOARD_ITEM* item : pattern->GetBoardItems() )
+        {
+            BOOST_CHECK( item->Type() == PCB_TRACE_T || item->Type() == PCB_ARC_T );
+            BOOST_CHECK( item->GetParentGroup() == pattern );
+
+            if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( item ) )
+                memberNets.insert( bci->GetNetCode() );
+        }
+
+        if( pattern->GetTuningMode() == DIFF_PAIR )
+        {
+            diffPairCount++;
+
+            // A differential-pair meander must keep both nets; collapsing them to one would
+            // corrupt half the routing.
+            BOOST_CHECK_EQUAL( memberNets.size(), 2 );
+        }
+        else if( pattern->GetTuningMode() == SINGLE )
+        {
+            singleCount++;
+            BOOST_CHECK_EQUAL( memberNets.size(), 1 );
+        }
+    }
+
+    BOOST_CHECK_EQUAL( tuningCount, 8 );
+    BOOST_CHECK_EQUAL( singleCount, 4 );
+    BOOST_CHECK_EQUAL( diffPairCount, 4 );
+}
+
+
+/**
+ * Follow-up to https://gitlab.com/kicad/code/kicad/-/issues/24654
+ *
+ * A generator's members are never selectable in their own right, so the tuning pattern itself has to
+ * be hittable.  Its outline -- and with it the bounding box and the point hit test -- is derived
+ * entirely from the baseline, which the importer left empty: the imported meanders became
+ * unselectable and un-editable.  Altium keeps the un-meandered route in the SmartUnions LINE/
+ * LINEOTHER properties, so verify every imported pattern carries it and can be picked on it.
+ */
+BOOST_AUTO_TEST_CASE( LengthTuningPatternsAreSelectable )
+{
+    std::string dataPath =
+            KI_TEST::GetPcbnewTestDataDir() + "plugins/altium/issue24654/PCB1.PcbDoc";
+
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+    m_altiumPlugin.LoadBoard( dataPath, board.get(), nullptr );
+
+    BOOST_REQUIRE( board );
+
+    int checked = 0;
+
+    for( PCB_GENERATOR* generator : board->Generators() )
+    {
+        PCB_TUNING_PATTERN* pattern = dynamic_cast<PCB_TUNING_PATTERN*>( generator );
+
+        if( !pattern )
+            continue;
+
+        checked++;
+
+        BOOST_REQUIRE_MESSAGE( pattern->GetBaseLine().has_value(),
+                               "Imported tuning pattern has no baseline" );
+        BOOST_REQUIRE_GT( pattern->GetBaseLine()->PointCount(), 1 );
+
+        const SHAPE_LINE_CHAIN& baseLine = *pattern->GetBaseLine();
+
+        // Editing snaps the origin onto copper, so the endpoints have to be the baseline's own
+        BOOST_CHECK( pattern->GetPosition() == baseLine.CPoint( 0 ) );
+        BOOST_CHECK( pattern->GetEnd() == baseLine.CLastPoint() );
+
+        if( pattern->GetTuningMode() == DIFF_PAIR )
+        {
+            BOOST_REQUIRE_MESSAGE( pattern->GetBaseLineCoupled().has_value(),
+                                   "Imported diff-pair tuning pattern has no coupled baseline" );
+            BOOST_CHECK_GT( pattern->GetBaseLineCoupled()->PointCount(), 1 );
+            BOOST_CHECK_GT( pattern->GetDiffPairGap(), 0 );
+        }
+
+        BOOST_CHECK_MESSAGE( !pattern->GetLastNetName().IsEmpty(),
+                             "Imported tuning pattern is not attributed to a net" );
+
+        // Clicking anywhere along the meander has to land on the generator
+        for( int i = 0; i < baseLine.PointCount(); ++i )
+        {
+            BOOST_CHECK_MESSAGE( pattern->HitTest( baseLine.CPoint( i ), 0 ),
+                                 "Tuning pattern is not hittable on its own baseline" );
+        }
+
+        BOX2I bbox = pattern->GetBoundingBox();
+
+        BOOST_CHECK_MESSAGE( bbox.Contains( baseLine.BBox() ),
+                             "Tuning pattern bounding box does not cover its baseline" );
+
+        for( BOARD_ITEM* item : pattern->GetBoardItems() )
+        {
+            BOOST_CHECK_MESSAGE( bbox.Contains( item->GetBoundingBox() ),
+                                 "Tuning pattern bounding box does not cover its member copper" );
+        }
+    }
+
+    BOOST_CHECK_EQUAL( checked, 8 );
+}
+
+
+// https://gitlab.com/kicad/code/kicad/-/issues/24847
+// Keepout regions defined inside an Altium footprint must be imported at the footprint's board
+// location. The importer keeps the Altium absolute coordinates instead of re-basing them to the
+// footprint origin, so the keepout zone lands far from the footprint that owns it.
+BOOST_AUTO_TEST_CASE( Issue24847_FootprintKeepoutPlacement )
+{
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir()
+                           + "plugins/altium/issue24847/PCB1.PcbDoc";
+
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+    m_altiumPlugin.LoadBoard( dataPath, board.get(), nullptr );
+
+    BOOST_REQUIRE( board );
+    BOOST_REQUIRE_GT( board->Footprints().size(), 0 );
+
+    int keepoutZoneCount = 0;
+
+    for( FOOTPRINT* footprint : board->Footprints() )
+    {
+        const VECTOR2I fpPos = footprint->GetPosition();
+
+        for( ZONE* zone : footprint->Zones() )
+        {
+            keepoutZoneCount++;
+
+            const VECTOR2I zoneCenter = zone->GetBoundingBox().GetCenter();
+            const double   distMm = ( zoneCenter - fpPos ).EuclideanNorm() / 1e6;
+
+            BOOST_TEST_MESSAGE( "footprint " << footprint->GetReference().ToStdString()
+                                             << " at (" << fpPos.x << "," << fpPos.y
+                                             << ") keepout center (" << zoneCenter.x << ","
+                                             << zoneCenter.y << ") dist " << distMm << " mm" );
+
+            // A footprint-local keepout sits on its footprint anchor; the pre-fix regression put
+            // it over 100mm away, so anything past a couple of mm is a placement failure.
+            BOOST_CHECK_MESSAGE( distMm < 2.0,
+                                 "Keepout in footprint " << footprint->GetReference().ToStdString()
+                                     << " is " << distMm << " mm from its footprint origin" );
+        }
+    }
+
+    // PCB1.PcbDoc carries exactly three footprint-local keepouts (Z1, Z2, R1); dropping any is a
+    // regression the placement check alone would not catch.
+    BOOST_CHECK_EQUAL( keepoutZoneCount, 3 );
 }
 
 

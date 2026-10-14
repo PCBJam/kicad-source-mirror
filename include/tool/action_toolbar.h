@@ -213,6 +213,19 @@ public:
     void SetToolManager( TOOL_MANAGER* aManager ) { m_toolManager = aManager; }
 
     /**
+     * pcbjam WASM addition (overlay-system): the action behind a tool id, or nullptr.
+     * For an action group this is the group's currently selected action.
+     */
+    const TOOL_ACTION* GetActionForToolId( int aToolId ) const
+    {
+        auto it = m_toolActions.find( aToolId );
+        return it == m_toolActions.end() ? nullptr : it->second;
+    }
+
+    /** pcbjam WASM addition (overlay-system): every tool id → action on this toolbar. */
+    const std::map<int, const TOOL_ACTION*>& GetToolActions() const { return m_toolActions; }
+
+    /**
      * Add a TOOL_ACTION-based button to the toolbar.
      *
      * The toggle/cancel attributes are set using the attributes in the action.

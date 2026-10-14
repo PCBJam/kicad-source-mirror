@@ -19,6 +19,9 @@
 
 #include <printing.h>
 
+#include <wx/print.h>
+#include <wx/cmndata.h>
+
 #import <AppKit/AppKit.h>
 #import <PDFKit/PDFKit.h>
 
@@ -90,6 +93,12 @@ PRINT_RESULT PrintPDF( const std::string& aFile, bool fit_to_page)
 PRINT_RESULT PrintPDF(const std::string& aFile)
 {
     return PrintPDF(aFile, true);
+}
+
+// macOS routes print-to-file through its own save panel and never parks a spool path in the
+// print data, so the only destination there is the one the user asked for
+void ResetPrintToFilePath( wxPrintData& )
+{
 }
 
 } // namespace PRINTING

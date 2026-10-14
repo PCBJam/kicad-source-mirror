@@ -41,6 +41,11 @@
 #include <pcb_textbox.h>
 #include <pcb_track.h>
 #include <pcb_barcode.h>
+#include <pcb_generator.h>
+#include <generators_mgr.h>
+#include <generators/pcb_tuning_pattern.h>
+#include <router/pns_meander.h>
+#include <geometry/shape_line_chain.h>
 #include <core/profile.h>
 #include <string_utils.h>
 #include <tools/pad_tool.h>
@@ -418,6 +423,11 @@ void ALTIUM_PCB::Parse( const ALTIUM_PCB_COMPOUND_FILE&                  altiumP
           {
               this->ParseTracks6Data( aFile, fileHeader );
           } },
+        { false, ALTIUM_PCB_DIR::SMARTUNIONS,
+          [this]( const ALTIUM_PCB_COMPOUND_FILE& aFile, auto fileHeader )
+          {
+              this->ParseSmartUnions6Data( aFile, fileHeader );
+          } },
         { false, ALTIUM_PCB_DIR::WIDESTRINGS6,
           [this]( const ALTIUM_PCB_COMPOUND_FILE& aFile, auto fileHeader )
           {
@@ -563,6 +573,10 @@ void ALTIUM_PCB::Parse( const ALTIUM_PCB_COMPOUND_FILE&                  altiumP
             }
         }
     }
+
+    // Rebuild interactive length-tuning meanders from the SmartUnions definitions now that all
+    // copper that the unions reference has been created and added to the board.
+    HelperCreateTuningPatterns();
 
     // fixup zone priorities since Altium stores them in the opposite order
     for( ZONE* zone : m_polygons )
@@ -2832,6 +2846,7 @@ void ALTIUM_PCB::ConvertShapeBasedRegions6ToFootprintItem( FOOTPRINT*      aFoot
         zone->SetPosition( aElem.outline.at( 0 ).position );
         zone->Outline()->AddOutline( linechain );
 
+
         HelperSetZoneLayers( *zone, aElem.layer );
 
         zone->SetBorderDisplayStyle( ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE,
@@ -3383,7 +3398,11 @@ void ALTIUM_PCB::ConvertArcs6ToBoardItemOnLayer( const AARC6& aElem, PCB_LAYER_I
             arc->SetLayer( aLayer );
             arc->SetNetCode( GetNetCode( aElem.net ) );
 
-            m_board->Add( arc.release(), ADD_MODE::APPEND );
+            PCB_ARC* added = arc.release();
+            m_board->Add( added, ADD_MODE::APPEND );
+
+            if( aElem.unionindex != 0 )
+                m_unionToBoardItems[static_cast<int>( aElem.unionindex )].push_back( added );
         }
     }
     else
@@ -4460,7 +4479,11 @@ void ALTIUM_PCB::ConvertTracks6ToBoardItemOnLayer( const ATRACK6& aElem, PCB_LAY
         track->SetLayer( aLayer );
         track->SetNetCode( GetNetCode( aElem.net ) );
 
-        m_board->Add( track.release(), ADD_MODE::APPEND );
+        PCB_TRACK* added = track.release();
+        m_board->Add( added, ADD_MODE::APPEND );
+
+        if( aElem.unionindex != 0 )
+            m_unionToBoardItems[static_cast<int>( aElem.unionindex )].push_back( added );
     }
     else
     {
@@ -4503,6 +4526,159 @@ void ALTIUM_PCB::ParseWideStrings6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAlt
     if( reader.GetRemainingBytes() != 0 )
         THROW_IO_ERROR( wxT( "WideStrings6 stream is not fully parsed" ) );
 }
+
+void ALTIUM_PCB::ParseSmartUnions6Data( const ALTIUM_PCB_COMPOUND_FILE&  aAltiumPcbFile,
+                                        const CFB::COMPOUND_FILE_ENTRY* aEntry )
+{
+    ALTIUM_BINARY_PARSER reader( aAltiumPcbFile, aEntry );
+
+    while( reader.GetRemainingBytes() >= 4 )
+    {
+        checkpoint();
+        ASMARTUNION6 elem( reader );
+
+        if( elem.is_tuning && elem.unionindex != 0 )
+            m_tuningUnions.emplace_back( std::move( elem ) );
+    }
+
+    if( reader.GetRemainingBytes() != 0 )
+        THROW_IO_ERROR( wxT( "SmartUnions6 stream is not fully parsed" ) );
+}
+
+
+void ALTIUM_PCB::HelperCreateTuningPatterns()
+{
+    int created = 0;
+
+    for( const ASMARTUNION6& tuning : m_tuningUnions )
+    {
+        auto itemsIt = m_unionToBoardItems.find( tuning.unionindex );
+
+        // Altium commits the tuned copper as ordinary tracks and arcs.  Without those primitives
+        // there is nothing to wrap, so drop the meander rather than fabricate geometry.
+        if( itemsIt == m_unionToBoardItems.end() || itemsIt->second.empty() )
+            continue;
+
+        // Without a baseline the pattern can be neither re-tuned nor reset, so wrapping the copper
+        // would only take it away from the user
+        if( tuning.baseline.size() < 2
+            || ( tuning.is_diffpair && tuning.baselinecoupled.size() < 2 ) )
+        {
+            continue;
+        }
+
+        const std::vector<BOARD_ITEM*>& items = itemsIt->second;
+
+        LENGTH_TUNING_MODE mode = tuning.is_diffpair ? LENGTH_TUNING_MODE::DIFF_PAIR
+                                                     : LENGTH_TUNING_MODE::SINGLE;
+
+        SHAPE_LINE_CHAIN baseLine( tuning.baseline );
+
+        PCB_LAYER_ID layer = items.front()->GetLayer();
+
+        PCB_GENERATOR* generator = GENERATORS_MGR::Instance().CreateFromType( wxS( "tuning_pattern" ) );
+
+        if( !generator )
+            continue;
+
+        std::unique_ptr<PCB_TUNING_PATTERN> pattern( static_cast<PCB_TUNING_PATTERN*>( generator ) );
+        pattern->SetParent( m_board );
+        pattern->SetLayer( layer );
+        pattern->SetTuningMode( mode );
+
+        pattern->SetMaxAmplitude( tuning.amplitude );
+        pattern->SetMinAmplitude( tuning.minamplitude );
+        pattern->SetSpacing( tuning.gap );
+        pattern->SetSingleSided( tuning.singleside );
+
+        // Altium "Style" selects mitered (chamfered) versus rounded corners.  The committed
+        // copper carries the real geometry; this only governs a later interactive re-tune.
+        pattern->SetRounded( tuning.style != 0 );
+
+        if( tuning.mitterradiusratio > 0.0 )
+        {
+            int percent = KiROUND( tuning.mitterradiusratio * 100.0 );
+            pattern->SetCornerRadiusPercentage( std::clamp( percent, 0, 100 ) );
+        }
+
+        int  netCode = -1;
+        bool singleNet = true;
+
+        for( BOARD_ITEM* item : items )
+        {
+            pattern->AddItem( item );
+
+            if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( item ) )
+            {
+                if( netCode < 0 )
+                    netCode = bci->GetNetCode();
+                else if( netCode != bci->GetNetCode() )
+                    singleNet = false;
+            }
+        }
+
+        // SetNetCode reassigns the net of every member, so only apply it when the union is on a
+        // single net.  Differential-pair meanders span two nets that must both be preserved.
+        if( netCode >= 0 && singleNet )
+        {
+            pattern->SetNetCode( netCode );
+        }
+        else
+        {
+            // Name the pattern after the net at the baseline start, the one an edit snaps to
+            const VECTOR2I& origin = baseLine.CPoint( 0 );
+            SEG::ecoord     bestDist = std::numeric_limits<SEG::ecoord>::max();
+            wxString        bestNet;
+
+            for( BOARD_ITEM* item : items )
+            {
+                PCB_TRACK* track = dynamic_cast<PCB_TRACK*>( item );
+
+                if( !track )
+                    continue;
+
+                SEG::ecoord dist = SEG( track->GetStart(), track->GetEnd() ).SquaredDistance( origin );
+
+                if( dist < bestDist )
+                {
+                    bestDist = dist;
+                    bestNet = track->GetNetname();
+                }
+            }
+
+            pattern->SetLastNetName( bestNet );
+        }
+
+        if( PCB_TRACK* track = dynamic_cast<PCB_TRACK*>( items.front() ) )
+            pattern->SetWidth( track->GetWidth() );
+
+        pattern->SetBaseLine( baseLine );
+        pattern->SetPosition( baseLine.CPoint( 0 ) );
+        pattern->SetEnd( baseLine.CLastPoint() );
+
+        if( mode == LENGTH_TUNING_MODE::DIFF_PAIR )
+        {
+            SHAPE_LINE_CHAIN baseLineCoupled( tuning.baselinecoupled );
+
+            pattern->SetBaseLineCoupled( baseLineCoupled );
+
+            int centreToCentre = baseLine.Distance( baseLineCoupled.CPoint( 0 ), false );
+
+            pattern->SetDiffPairGap( std::max( centreToCentre - pattern->GetWidth(), 0 ) );
+        }
+
+        m_board->Add( pattern.release(), ADD_MODE::INSERT );
+        created++;
+    }
+
+    if( m_reporter && created > 0 )
+    {
+        m_reporter->Report( wxString::Format( _( "Imported %d length-tuning pattern(s)." ),
+                                              created ),
+                            RPT_SEVERITY_INFO );
+    }
+}
+
 
 void ALTIUM_PCB::ParseTexts6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcbFile,
                                   const CFB::COMPOUND_FILE_ENTRY* aEntry )
@@ -4581,18 +4757,21 @@ void ALTIUM_PCB::ConvertTexts6ToBoardItemOnLayer( const ATEXT6& aElem, PCB_LAYER
     {
         item = pcbTextbox.get();
         text = pcbTextbox.get();
-
-        ConvertTexts6ToEdaTextSettings( aElem, *text );
-        HelperSetTextboxAlignmentAndPos( aElem, pcbTextbox.get() );
-    }
-    else
-    {
-        ConvertTexts6ToEdaTextSettings( aElem, *text );
-        HelperSetTextAlignmentAndPos( aElem, text );
     }
 
     text->SetText( kicadText );
+
+    // Set the layer before the alignment helpers run.  HelperSetTextAlignmentAndPos measures the
+    // text via GetTextBox(), which resolves layer-dependent special strings such as ${LAYER}.
     item->SetLayer( aLayer );
+
+    ConvertTexts6ToEdaTextSettings( aElem, *text );
+
+    if( isTextbox )
+        HelperSetTextboxAlignmentAndPos( aElem, pcbTextbox.get() );
+    else
+        HelperSetTextAlignmentAndPos( aElem, text );
+
     item->SetIsKnockout( aElem.isInverted );
 
     if( isTextbox )
@@ -4643,21 +4822,24 @@ void ALTIUM_PCB::ConvertTexts6ToFootprintItemOnLayer( FOOTPRINT* aFootprint, con
     {
         item = fpTextbox.get();
         text = fpTextbox.get();
-
-        ConvertTexts6ToEdaTextSettings( aElem, *text );
-        HelperSetTextboxAlignmentAndPos( aElem, fpTextbox.get() );
-    }
-    else
-    {
-        ConvertTexts6ToEdaTextSettings( aElem, *text );
-        HelperSetTextAlignmentAndPos( aElem, text );
     }
 
     wxString kicadText = AltiumPcbSpecialStringsToKiCadStrings( aElem.text, variableMap );
 
     text->SetText( kicadText );
-    text->SetKeepUpright( false );
+
+    // Set the layer before the alignment helpers run.  HelperSetTextAlignmentAndPos measures the
+    // text via GetTextBox(), which resolves layer-dependent special strings such as ${LAYER}.
     item->SetLayer( aLayer );
+
+    ConvertTexts6ToEdaTextSettings( aElem, *text );
+
+    if( isTextbox )
+        HelperSetTextboxAlignmentAndPos( aElem, fpTextbox.get() );
+    else
+        HelperSetTextAlignmentAndPos( aElem, text );
+
+    text->SetKeepUpright( false );
     item->SetIsKnockout( aElem.isInverted );
 
     if( toAdd )
@@ -4814,6 +4996,21 @@ void ALTIUM_PCB::HelperSetTextAlignmentAndPos( const ATEXT6& aElem, EDA_TEXT* aT
     int margin = aElem.isOffsetBorder ? aElem.text_offset_width : aElem.margin_border_width;
     int rectWidth = aElem.textbox_rect_width - margin * 2;
     int rectHeight = aElem.height;
+
+    // Altium auto-sizes the bounding box of a free string (non-frame text) from its own glyph
+    // rasterizer, and stores a slightly different width for otherwise identical strings placed on
+    // different layers (e.g. the copper and soldermask copies of the same label, which Altium may
+    // also give different stroke widths).  Anchoring the KiCad text to that per-record width drives
+    // the two copies apart.  Center the text on its bare glyph run instead, measured from the
+    // already-populated EDA_TEXT with the pen inflation removed, so copies that share a glyph run
+    // stay coincident regardless of stroke width.
+    if( !aElem.isFrame )
+    {
+        rectWidth = aText->GetTextBox( nullptr ).GetWidth();
+
+        if( KIFONT::FONT* font = aText->GetFont(); !font || font->IsStroke() )
+            rectWidth -= 3 * aText->GetEffectiveTextPenWidth();
+    }
 
     if( aElem.isMirrored )
         rectWidth = -rectWidth;
@@ -5214,10 +5411,10 @@ void ALTIUM_PCB::HelperPcpShapeAsFootprintKeepoutRegion( FOOTPRINT*         aFoo
 
     aShape.EDA_SHAPE::TransformShapeToPolygon( *zone->Outline(), 0, ARC_HIGH_DEF, ERROR_INSIDE );
 
+
     zone->SetBorderDisplayStyle( ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE,
                                  ZONE::GetDefaultHatchPitch(), true );
 
-    // TODO: zone->SetLocalCoord(); missing?
     aFootprint->Add( zone.release(), ADD_MODE::APPEND );
 }
 

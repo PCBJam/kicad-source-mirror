@@ -155,13 +155,32 @@ void DIALOG_SCH_FIND::OnCancel( wxCommandEvent& aEvent )
 }
 
 
+void DIALOG_SCH_FIND::OnCharHook( wxKeyEvent& aEvent )
+{
+    if( aEvent.GetKeyCode() == WXK_F3 )
+    {
+        updateFlags();
+        m_findReplaceData->findString = m_comboFind->GetValue();
+
+        if( aEvent.ShiftDown() )
+            m_findReplaceTool->FindNext( ACTIONS::findPrevious.MakeEvent() );
+        else
+            m_findReplaceTool->FindNext( ACTIONS::findNext.MakeEvent() );
+
+        return;
+    }
+
+    DIALOG_SCH_FIND_BASE::OnCharHook( aEvent );
+}
+
+
 void DIALOG_SCH_FIND::onShowSearchPanel( wxHyperlinkEvent& event )
 {
     wxCHECK2( m_frame->GetFrameType() == FRAME_SCH, /* void */ );
 
     m_frame->GetToolManager()->RunAction( ACTIONS::showSearch );
 
-    EndModal( wxID_CANCEL );
+    Show( false );
 
     CallAfter(
             []()

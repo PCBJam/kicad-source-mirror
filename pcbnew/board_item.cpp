@@ -23,7 +23,9 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#ifdef KICAD_SCRIPTING
 #include <pybind11/pybind11.h>
+#endif
 
 #include <wx/debug.h>
 #include <wx/msgdlg.h>
@@ -65,6 +67,7 @@ bool BOARD_ITEM::IsGroupableType() const
     case PCB_DIM_ORTHOGONAL_T:
     case PCB_ZONE_T:
     case PCB_BARCODE_T:
+    case PCB_POINT_T:
         return true;
     default:
         return false;
@@ -97,9 +100,39 @@ BOARD* BOARD_ITEM::GetBoard()
 }
 
 
+BOARD_ITEM::~BOARD_ITEM()
+{
+    // Backup for code paths that skip ::Remove(). Do not use the parent chain, it may be freed.
+    if( m_boardCacheOwner )
+        m_boardCacheOwner->UncacheItemByPtr( this );
+}
+
+
 FOOTPRINT* BOARD_ITEM::GetParentFootprint() const
 {
     return static_cast<FOOTPRINT*>( findParent( PCB_FOOTPRINT_T ) );
+}
+
+
+void BOARD_ITEM::SetUuid( const KIID& aUuid )
+{
+    if( m_Uuid == aUuid )
+        return;
+
+    // Use the owner, not GetBoard(). The parent chain may name a wrong or dead board.
+    if( BOARD* board = m_boardCacheOwner )
+    {
+        board->RebindItemUuid( this, aUuid );
+        return;
+    }
+
+    SetUuidDirect( aUuid );
+}
+
+
+void BOARD_ITEM::SetUuidDirect( const KIID& aUuid )
+{
+    const_cast<KIID&>( m_Uuid ) = aUuid;
 }
 
 
@@ -275,18 +308,37 @@ void BOARD_ITEM::SwapItemData( BOARD_ITEM* aImage )
     if( aImage == nullptr )
         return;
 
-    EDA_ITEM* parent = GetParent();
+    EDA_ITEM*  parent = GetParent();
+    EDA_GROUP* group = GetParentGroup();
+    EDA_GROUP* imageGroup = aImage->GetParentGroup();
+    BOARD*     board = GetBoard();
+
+    // Evict children from the item-by-id cache before the swap moves them to the
+    // image.  The image is typically deleted after the swap (undo/redo, commit revert),
+    // which would leave the cache holding dangling pointers to the destroyed children.
+    if( board )
+    {
+        board->UncacheChildrenById( this );
+    }
 
     swapData( aImage );
-
     SetParent( parent );
+
+    // Group membership is a back-reference, not item data, so keep each side's own.
+    SetParentGroup( group );
+    aImage->SetParentGroup( imageGroup );
+
+    if( board )
+    {
+        board->CacheChildrenById( this );
+    }
 }
 
 
 BOARD_ITEM* BOARD_ITEM::Duplicate( bool addToParentGroup, BOARD_COMMIT* aCommit ) const
 {
     BOARD_ITEM* dupe = static_cast<BOARD_ITEM*>( Clone() );
-    const_cast<KIID&>( dupe->m_Uuid ) = KIID();
+    dupe->ResetUuid();
 
     if( addToParentGroup )
     {

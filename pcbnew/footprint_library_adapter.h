@@ -22,6 +22,9 @@
 #ifndef FOOTPRINT_LIBRARY_ADAPTER_H
 #define FOOTPRINT_LIBRARY_ADAPTER_H
 
+#include <map>
+#include <memory>
+
 #include <lib_id.h>
 #include <core/leak_at_exit.h>
 #include <libraries/library_manager.h>
@@ -85,6 +88,17 @@ public:
      * @param aNickname is the library to check and potentially refresh.
      */
     void RefreshLibraryIfChanged( const wxString& aNickname );
+
+    void RefreshChangedLibraries();
+
+    /**
+     * Drop the parsed copies of one library from PreloadedFootprints (and its recorded
+     * timestamp) so the next tree access / LoadFootprint re-reads the plugin. For
+     * providers whose GetLibraryTimestamp() is a constant (network-backed libraries)
+     * RefreshLibraryIfChanged() can never notice a change; the host calls this when it
+     * knows the library moved (pcbjam wasm port: a collaborator's remote edit).
+     */
+    void InvalidatePreloaded( const wxString& aNickname );
 
     bool FootprintExists( const wxString& aNickname, const wxString& aName );
 
@@ -180,6 +194,15 @@ protected:
 
     void enumerateLibrary( LIB_DATA* aLib, const wxString& aUri ) override;
 
+    /**
+     * Parse every footprint in one library into PreloadedFootprints.  This is the eager work
+     * that enumerateLibrary() used to do for the bulk async preload; it is now invoked lazily
+     * (GetFootprints() on first access, RefreshLibraryIfChanged() on a disk change) so the
+     * WASM port doesn't enumerate all ~222 network-backed libraries on the main thread at
+     * startup.  Idempotent: skips libraries already present in PreloadedFootprints.
+     */
+    void preloadLibrary( const LIB_DATA* aLib, const wxString& aUri );
+
     LIBRARY_RESULT<IO_BASE*> createPlugin( const LIBRARY_TABLE_ROW* row ) override;
 
     IO_BASE* plugin( const LIB_DATA* aRow ) override { return pcbplugin( aRow ); }
@@ -195,9 +218,9 @@ private:
     static LEAK_AT_EXIT<std::map<wxString, std::vector<std::unique_ptr<FOOTPRINT>>>> PreloadedFootprints;
     static std::shared_mutex PreloadedFootprintsMutex;
 
-    /// Per-library filesystem timestamps recorded when PreloadedFootprints was last populated.
-    /// Used by RefreshLibraryIfChanged() to detect external modifications.
-    std::map<wxString, long long> m_preloadedTimestamps;
+    /// Filesystem timestamps from when PreloadedFootprints was last populated, guarded by
+    /// PreloadedFootprintsMutex.  Static so it shares the lifetime of the cache it describes.
+    static LEAK_AT_EXIT<std::map<wxString, long long>> PreloadedTimestamps;
 };
 
 #endif //FOOTPRINT_LIBRARY_ADAPTER_H

@@ -276,7 +276,7 @@ public:
      *
      * @return true if a variant was created, false if cancelled or invalid input
      */
-    bool ShowAddVariantDialog();
+    bool ShowAddVariantDialog( wxWindow* aParent = nullptr );
 
     void onVariantSelected( wxCommandEvent& aEvent );
 
@@ -928,6 +928,8 @@ protected:
      * @return true if the auto save was successful otherwise false.
      */
     bool doAutoSave() override;
+
+    bool canRunAutoSave() const override;
 
     void configureToolbars() override;
 

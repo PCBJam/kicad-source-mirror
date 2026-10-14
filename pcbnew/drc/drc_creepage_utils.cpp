@@ -23,6 +23,7 @@
 #include "drc/drc_creepage_utils.h"
 
 #include <geometry/intersection.h>
+#include <geometry/shape_simple.h>
 #include <pcb_track.h>
 #include <thread_pool.h>
 
@@ -35,9 +36,6 @@ bool segmentIntersectsArc( const VECTOR2I& p1, const VECTOR2I& p2, const VECTOR2
     VECTOR2I  startPoint( radius * cos( startAngle.AsRadians() ), radius * sin( startAngle.AsRadians() ) );
     SHAPE_ARC arc( center, startPoint + center, endAngle - startAngle );
 
-    VECTOR2I arcStart = arc.GetP0();
-    VECTOR2I arcEnd = arc.GetP1();
-
     INTERSECTABLE_GEOM geom1 = segment;
     INTERSECTABLE_GEOM geom2 = arc;
 
@@ -45,17 +43,10 @@ bool segmentIntersectsArc( const VECTOR2I& p1, const VECTOR2I& p2, const VECTOR2
     INTERSECTION_VISITOR  visitor( geom2, rawPoints );
     std::visit( visitor, geom1 );
 
-    // Filter out intersections where a segment endpoint coincides with an
-    // arc endpoint, matching the endpoint exclusion in segments_intersect.
+    // A path is allowed to end on the arc, so an intersection at either endpoint is a touch,
+    // not a crossing. Only interior crossings count. Tolerance absorbs solver rounding.
     std::vector<VECTOR2I> filtered;
 
-    // arcStart and arcEnd are reconstructed from the arc angles via cos/sin and
-    // truncated to integer, so they land a couple of IU away from the stored
-    // corner coordinates of an adjoining edge. The intersection solver rounds
-    // similarly. An exact equality test therefore misses the shared corner where
-    // a segment endpoint meets the arc endpoint and reports a phantom crossing,
-    // which rejects legitimate creepage paths threading the gap between two
-    // adjacent slot end caps. Compare with a small rounding-scale tolerance.
     const VECTOR2I::extended_type tolerance = 50;
     const VECTOR2I::extended_type toleranceSq = tolerance * tolerance;
 
@@ -66,10 +57,7 @@ bool segmentIntersectsArc( const VECTOR2I& p1, const VECTOR2I& p2, const VECTOR2
 
     for( const VECTOR2I& ip : rawPoints )
     {
-        bool atSharedEndpoint = ( coincident( ip, arcStart ) || coincident( ip, arcEnd ) )
-                                && ( coincident( ip, p1 ) || coincident( ip, p2 ) );
-
-        if( !atSharedEndpoint )
+        if( !coincident( ip, p1 ) && !coincident( ip, p2 ) )
             filtered.push_back( ip );
     }
 
@@ -344,7 +332,7 @@ std::vector<PATH_CONNECTION> BE_SHAPE_CIRCLE::Paths( const BE_SHAPE_ARC& aS2, do
 
     for( const PATH_CONNECTION& pc : this->Paths( csc, aMaxWeight, aMaxSquaredWeight ) )
     {
-        EDA_ANGLE pointAngle = aS2.AngleBetweenStartAndEnd( pc.a2 - arcCenter );
+        EDA_ANGLE pointAngle = aS2.AngleBetweenStartAndEnd( pc.a2 );
 
         if( pointAngle <= aS2.GetEndAngle() )
             result.push_back( pc );
@@ -394,7 +382,7 @@ std::vector<PATH_CONNECTION> BE_SHAPE_ARC::Paths( const BE_SHAPE_ARC& aS2, doubl
     for( const PATH_CONNECTION& pc : this->Paths( BE_SHAPE_CIRCLE( aS2.GetPos(), aS2.GetRadius() ),
                                                   aMaxWeight, aMaxSquaredWeight ) )
     {
-        EDA_ANGLE pointAngle = aS2.AngleBetweenStartAndEnd( pc.a2 - arcCenter );
+        EDA_ANGLE pointAngle = aS2.AngleBetweenStartAndEnd( pc.a2 );
 
         if( pointAngle <= aS2.GetEndAngle() )
             result.push_back( pc );
@@ -403,7 +391,7 @@ std::vector<PATH_CONNECTION> BE_SHAPE_ARC::Paths( const BE_SHAPE_ARC& aS2, doubl
     for( const PATH_CONNECTION& pc : BE_SHAPE_CIRCLE( this->GetPos(), this->GetRadius() )
                                           .Paths( aS2, aMaxWeight, aMaxSquaredWeight ) )
     {
-        EDA_ANGLE pointAngle = this->AngleBetweenStartAndEnd( pc.a2 - arcCenter );
+        EDA_ANGLE pointAngle = this->AngleBetweenStartAndEnd( pc.a1 );
 
         if( pointAngle <= this->GetEndAngle() )
             result.push_back( pc );
@@ -537,6 +525,34 @@ void CREEPAGE_GRAPH::RemoveDuplicatedShapes()
 
 void CREEPAGE_GRAPH::TransformEdgeToCreepShapes()
 {
+    // Flag overlapping cutouts so the arc void check below only runs when needed.
+    std::vector<BOX2I> cutouts;
+
+    for( BOARD_ITEM* be : m_boardEdge )
+    {
+        PCB_SHAPE* s = static_cast<PCB_SHAPE*>( be );
+
+        if( s
+            && ( s->GetShape() == SHAPE_T::RECTANGLE || s->GetShape() == SHAPE_T::CIRCLE
+                 || s->GetShape() == SHAPE_T::POLY ) )
+        {
+            cutouts.push_back( s->GetBoundingBox() );
+        }
+    }
+
+    for( size_t i = 0; i < cutouts.size() && !m_hasOverlappingCutouts; ++i )
+    {
+        for( size_t j = i + 1; j < cutouts.size(); ++j )
+        {
+            if( cutouts[i].Intersects( cutouts[j] ) && !cutouts[i].Contains( cutouts[j] )
+                && !cutouts[j].Contains( cutouts[i] ) )
+            {
+                m_hasOverlappingCutouts = true;
+                break;
+            }
+        }
+    }
+
     for( BOARD_ITEM* drawing : m_boardEdge )
     {
         PCB_SHAPE* d = dynamic_cast<PCB_SHAPE*>( drawing );
@@ -590,9 +606,11 @@ void CREEPAGE_GRAPH::TransformEdgeToCreepShapes()
 
                 if( h == 2 * r )
                 {
-                    // Horizontal stadium: left and right semicircles
-                    addArc( { x1 + r, y1 + r }, { x1 + r, y1 }, { x1 + r, y2 } );
-                    addArc( { x2 - r, y1 + r }, { x2 - r, y2 }, { x2 - r, y1 } );
+                    // Horizontal stadium: left and right semicircles. The endpoint order
+                    // makes addArc sweep the outer half of each circle so the caps bulge
+                    // away from the slot.
+                    addArc( { x1 + r, y1 + r }, { x1 + r, y2 }, { x1 + r, y1 } );
+                    addArc( { x2 - r, y1 + r }, { x2 - r, y1 }, { x2 - r, y2 } );
                 }
                 else if( w == 2 * r )
                 {
@@ -823,6 +841,30 @@ void BE_SHAPE_CIRCLE::ConnectChildren( std::shared_ptr<GRAPH_NODE>& a1, std::sha
     if( m_radius == 0 )
         return;
 
+    // When cutouts overlap, part of this wall runs inside the merged void and is not
+    // a real edge to hug. Check the shorter arc, the one the solver measures and draws.
+    if( aG.m_hasOverlappingCutouts && aG.m_boardOutline )
+    {
+        int    tol = aG.m_board.GetDesignSettings().m_MaxError + 1000;
+        double a1r = EDA_ANGLE( a1->m_pos - m_pos ).AsRadians();
+        double a2r = EDA_ANGLE( a2->m_pos - m_pos ).AsRadians();
+        double delta = a2r - a1r;
+
+        while( delta > M_PI )
+            delta -= 2 * M_PI;
+        while( delta < -M_PI )
+            delta += 2 * M_PI;
+
+        for( int i = 0; i <= 8; ++i )
+        {
+            double   a = a1r + delta * i / 8.0;
+            VECTOR2I p( m_pos.x + m_radius * cos( a ), m_pos.y + m_radius * sin( a ) );
+
+            if( !aG.m_boardOutline->Contains( p, -1, tol ) && !aG.m_boardOutline->PointOnEdge( p, tol ) )
+                return;
+        }
+    }
+
     VECTOR2D distI( a1->m_pos - a2->m_pos );
     VECTOR2D distD( double( distI.x ), double( distI.y ) );
 
@@ -853,6 +895,23 @@ void BE_SHAPE_ARC::ConnectChildren( std::shared_ptr<GRAPH_NODE>& a1, std::shared
 {
     if( !a1 || !a2 )
         return;
+
+    // Drop an arc that bulges into an overlapping cutout, it is not a real edge to hug.
+    if( aG.m_hasOverlappingCutouts && aG.m_boardOutline )
+    {
+        VECTOR2D center( GetPos().x, GetPos().y );
+        VECTOR2D mid = ( VECTOR2D( a1->m_pos.x, a1->m_pos.y ) + VECTOR2D( a2->m_pos.x, a2->m_pos.y ) ) / 2.0 - center;
+
+        if( mid.EuclideanNorm() > 0 )
+        {
+            VECTOR2I arcMid( center + mid.Resize( m_radius ) );
+
+            if( !aG.m_boardOutline->Contains( arcMid, -1, 100 ) && !aG.m_boardOutline->PointOnEdge( arcMid, 100 ) )
+            {
+                return;
+            }
+        }
+    }
 
     EDA_ANGLE angle1 = AngleBetweenStartAndEnd( a1->m_pos );
     EDA_ANGLE angle2 = AngleBetweenStartAndEnd( a2->m_pos );
@@ -1767,13 +1826,30 @@ bool segmentIntersectsCircle( const VECTOR2I& p1, const VECTOR2I& p2, const VECT
     INTERSECTION_VISITOR visitor( geom2, intersectionPoints );
     std::visit( visitor, geom1 );
 
+    // A path is allowed to end on the circle, so an intersection at either endpoint is a
+    // touch, not a crossing. Only interior crossings count.
+    const VECTOR2I::extended_type toleranceSq = 50 * 50;
+
+    auto coincident = [&]( const VECTOR2I& a, const VECTOR2I& b )
+    {
+        return ( a - b ).SquaredEuclideanNorm() <= toleranceSq;
+    };
+
+    std::vector<VECTOR2I> filtered;
+
+    for( const VECTOR2I& ip : intersectionPoints )
+    {
+        if( !coincident( ip, p1 ) && !coincident( ip, p2 ) )
+            filtered.push_back( ip );
+    }
+
     if( aIntersectPoints )
     {
-        for( VECTOR2I& point : intersectionPoints )
+        for( VECTOR2I& point : filtered )
             aIntersectPoints->push_back( point );
     }
 
-    return intersectionPoints.size() > 0;
+    return filtered.size() > 0;
 }
 
 bool SegmentIntersectsBoard( const VECTOR2I& aP1, const VECTOR2I& aP2,
@@ -1856,13 +1932,15 @@ bool SegmentIntersectsBoard( const VECTOR2I& aP1, const VECTOR2I& aP2,
 
                 if( h == 2 * r )
                 {
-                    // Horizontal stadium: left and right semicircles
+                    // Horizontal stadium: left and right semicircles. Each cap spans
+                    // the outer half of its circle so the modeled boundary matches the
+                    // decomposition in TransformEdgeToCreepShapes.
                     arcs.push_back( { { x1 + r, y1 + r },
-                                      EDA_ANGLE( -90.0, DEGREES_T ),
-                                      EDA_ANGLE( 90.0, DEGREES_T ) } );
-                    arcs.push_back( { { x2 - r, y1 + r },
                                       EDA_ANGLE( 90.0, DEGREES_T ),
                                       EDA_ANGLE( 270.0, DEGREES_T ) } );
+                    arcs.push_back( { { x2 - r, y1 + r },
+                                      EDA_ANGLE( -90.0, DEGREES_T ),
+                                      EDA_ANGLE( 90.0, DEGREES_T ) } );
                 }
                 else if( w == 2 * r )
                 {
@@ -2335,6 +2413,32 @@ void CREEPAGE_GRAPH::Addshape( const SHAPE& aShape, std::shared_ptr<GRAPH_NODE>&
         break;
     }
 
+    case SH_SIMPLE:
+    {
+        // SHAPE_SIMPLE is the arbitrary-polygon form used for rectangular, trapezoidal and
+        // chamfered pads when they are not axis-aligned (orthogonal rotations collapse to
+        // SH_RECT instead). Decompose its closed outline into segments so the copper edge
+        // is added to the graph, otherwise the pad contributes no creepage anchor and the
+        // path snaps to the pad hole instead of the copper (issue #24543).
+        const SHAPE_SIMPLE&     simple = dynamic_cast<const SHAPE_SIMPLE&>( aShape );
+        const SHAPE_LINE_CHAIN& vertices = simple.Vertices();
+
+        if( vertices.PointCount() < 3 )
+            break;
+
+        VECTOR2I prevPoint = vertices.CLastPoint();
+
+        for( const VECTOR2I& point : vertices.CPoints() )
+        {
+            if( point != prevPoint )
+                Addshape( SHAPE_SEGMENT( prevPoint, point ), aConnectTo, aParent );
+
+            prevPoint = point;
+        }
+
+        break;
+    }
+
     case SH_RECT:
     {
         const SHAPE_RECT& rect = dynamic_cast<const SHAPE_RECT&>( aShape );
@@ -2663,29 +2767,19 @@ void CREEPAGE_GRAPH::GeneratePaths( double aMaxWeight, PCB_LAYER_ID aLayer )
                 {
                     std::vector<const BOARD_ITEM*> IgnoreForTest;
 
-                    // For CIRCLE and ARC shapes the candidate path ends ON the shape's
-                    // boundary at a tangent point. segmentIntersectsCircle has no
-                    // endpoint exclusion, and segmentIntersectsArc only excludes when
-                    // the shared point is also an arc endpoint, so a tangent point
-                    // lying mid-arc registers as an intersection. Without suppressing
-                    // the parent here, the tangent path is wrongly rejected and
-                    // Dijkstra is forced onto a longer route around the obstacle
-                    // (issue #24286).
-                    //
-                    // POINT shapes don't need suppression because segments_intersect
-                    // excludes shared segment endpoints, so paths ending at a POINT
-                    // already get correct exclusion from its parent's other edges.
-                    if( shape1->GetType() == CREEP_SHAPE::TYPE::CIRCLE
-                        || shape1->GetType() == CREEP_SHAPE::TYPE::ARC )
-                    {
-                        IgnoreForTest.push_back( shape1->GetParent() );
-                    }
+                    // Don't ignore the whole parent board item for arc/circle ends. The
+                    // tangent touch is already handled by the endpoint exclusion in
+                    // segmentIntersectsArc/Circle (issue #24286). A rounded slot is a single
+                    // PCB_SHAPE, so ignoring the parent would exempt every other edge of the
+                    // same slot and let a path cut across it.
 
-                    if( shape2->GetType() == CREEP_SHAPE::TYPE::CIRCLE
-                        || shape2->GetType() == CREEP_SHAPE::TYPE::ARC )
-                    {
+                    // Ignore each CU shape's own parent for the endpoint-inside-track
+                    // test so we don't reject paths that touch the track's own edge.
+                    if( shape1->IsConductive() )
+                        IgnoreForTest.push_back( shape1->GetParent() );
+
+                    if( shape2->IsConductive() )
                         IgnoreForTest.push_back( shape2->GetParent() );
-                    }
 
                     bool valid = pc.isValid( m_board, aLayer, m_boardEdge, IgnoreForTest, m_boardOutline,
                                      { false, true }, m_minGrooveWidth, &trackIndex );

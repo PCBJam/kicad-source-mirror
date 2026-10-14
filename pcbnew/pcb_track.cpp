@@ -135,7 +135,7 @@ PCB_VIA::PCB_VIA( const PCB_VIA& aOther ) :
 {
     PCB_VIA::operator=( aOther );
 
-    const_cast<KIID&>( m_Uuid ) = aOther.m_Uuid;
+    SetUuidDirect( aOther.m_Uuid );
     m_zoneLayerOverrides = aOther.m_zoneLayerOverrides;
 }
 
@@ -414,6 +414,10 @@ void PCB_TRACK::Serialize( google::protobuf::Any &aContainer ) const
     track.set_locked( IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
                                  : kiapi::common::types::LockedState::LS_UNLOCKED );
     PackNet( track.mutable_net() );
+
+    if( const BOARD* board = GetBoard() )
+        track.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
     // TODO m_hasSolderMask and m_solderMaskMargin
 
     aContainer.PackFrom( track );
@@ -427,7 +431,7 @@ bool PCB_TRACK::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &track ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( track.id().value() );
+    SetUuidDirect( KIID( track.id().value() ) );
     SetStart( VECTOR2I( track.start().x_nm(), track.start().y_nm() ) );
     SetEnd( VECTOR2I( track.end().x_nm(), track.end().y_nm() ) );
     SetWidth( track.width().value_nm() );
@@ -456,6 +460,10 @@ void PCB_ARC::Serialize( google::protobuf::Any &aContainer ) const
     arc.set_locked( IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
                                : kiapi::common::types::LockedState::LS_UNLOCKED );
     PackNet( arc.mutable_net() );
+
+    if( const BOARD* board = GetBoard() )
+        arc.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
     // TODO m_hasSolderMask and m_solderMaskMargin
 
     aContainer.PackFrom( arc );
@@ -469,7 +477,7 @@ bool PCB_ARC::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &arc ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( arc.id().value() );
+    SetUuidDirect( KIID( arc.id().value() ) );
     SetStart( VECTOR2I( arc.start().x_nm(), arc.start().y_nm() ) );
     SetMid( VECTOR2I( arc.mid().x_nm(), arc.mid().y_nm() ) );
     SetEnd( VECTOR2I( arc.end().x_nm(), arc.end().y_nm() ) );
@@ -506,6 +514,9 @@ void PCB_VIA::Serialize( google::protobuf::Any &aContainer ) const
                                : kiapi::common::types::LockedState::LS_UNLOCKED );
     PackNet( via.mutable_net() );
 
+    if( const BOARD* board = GetBoard() )
+        via.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
     aContainer.PackFrom( via );
 }
 
@@ -517,7 +528,7 @@ bool PCB_VIA::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &via ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( via.id().value() );
+    SetUuidDirect( KIID( via.id().value() ) );
     SetStart( VECTOR2I( via.position().x_nm(), via.position().y_nm() ) );
     SetEnd( GetStart() );
 
@@ -815,31 +826,25 @@ bool PCB_VIA::IsBackdrilledOrPostMachined( PCB_LAYER_ID aLayer ) const
     // Check secondary drill (backdrill from top)
     const PADSTACK::DRILL_PROPS& secondaryDrill = m_padStack.SecondaryDrill();
 
-    if( secondaryDrill.size.x > 0 && secondaryDrill.start != UNDEFINED_LAYER
+    if( secondaryDrill.size.x > 0
+            && secondaryDrill.start != UNDEFINED_LAYER
             && secondaryDrill.end != UNDEFINED_LAYER )
     {
-        // Check if aLayer is between start and end of secondary drill
-        for( PCB_LAYER_ID layer : LAYER_RANGE( secondaryDrill.start, secondaryDrill.end,
-                                                board->GetCopperLayerCount() ) )
-        {
-            if( layer == aLayer )
-                return true;
-        }
+        // Contains honours copper Z-order; the range iterator instead walks PCB_LAYER_ID enum
+        // order, which for a bottom-anchored span spans the wrong (top inner) layers.
+        if( LAYER_RANGE::Contains( secondaryDrill.start, secondaryDrill.end, aLayer ) )
+            return true;
     }
 
     // Check tertiary drill (backdrill from bottom)
     const PADSTACK::DRILL_PROPS& tertiaryDrill = m_padStack.TertiaryDrill();
 
-    if( tertiaryDrill.size.x > 0 && tertiaryDrill.start != UNDEFINED_LAYER
+    if( tertiaryDrill.size.x > 0
+            && tertiaryDrill.start != UNDEFINED_LAYER
             && tertiaryDrill.end != UNDEFINED_LAYER )
     {
-        // Check if aLayer is between start and end of tertiary drill
-        for( PCB_LAYER_ID layer : LAYER_RANGE( tertiaryDrill.start, tertiaryDrill.end,
-                                                board->GetCopperLayerCount() ) )
-        {
-            if( layer == aLayer )
-                return true;
-        }
+        if( LAYER_RANGE::Contains( tertiaryDrill.start, tertiaryDrill.end, aLayer ) )
+            return true;
     }
 
     // Check if the layer is affected by post-machining
@@ -865,13 +870,16 @@ int PCB_VIA::GetPostMachiningKnockout( PCB_LAYER_ID aLayer ) const
     // Check front post-machining (counterbore/countersink from top)
     const PADSTACK::POST_MACHINING_PROPS& frontPM = m_padStack.FrontPostMachining();
 
-    if( frontPM.mode.has_value() && *frontPM.mode != PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED
-            && *frontPM.mode != PAD_DRILL_POST_MACHINING_MODE::UNKNOWN && frontPM.size > 0 )
+    if( frontPM.mode.has_value()
+            && *frontPM.mode != PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED
+            && *frontPM.mode != PAD_DRILL_POST_MACHINING_MODE::UNKNOWN
+            && frontPM.size > 0 )
     {
         int pmDepth = frontPM.depth;
 
         // For countersink without explicit depth, calculate from diameter and angle
-        if( pmDepth <= 0 && *frontPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK
+        if( pmDepth <= 0
+                && *frontPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK
                 && frontPM.angle > 0 )
         {
             double halfAngleRad = ( frontPM.angle / 10.0 ) * M_PI / 180.0 / 2.0;
@@ -904,13 +912,16 @@ int PCB_VIA::GetPostMachiningKnockout( PCB_LAYER_ID aLayer ) const
     // Check back post-machining (counterbore/countersink from bottom)
     const PADSTACK::POST_MACHINING_PROPS& backPM = m_padStack.BackPostMachining();
 
-    if( backPM.mode.has_value() && *backPM.mode != PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED
-            && *backPM.mode != PAD_DRILL_POST_MACHINING_MODE::UNKNOWN && backPM.size > 0 )
+    if( backPM.mode.has_value()
+            && *backPM.mode != PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED
+            && *backPM.mode != PAD_DRILL_POST_MACHINING_MODE::UNKNOWN
+            && backPM.size > 0 )
     {
         int pmDepth = backPM.depth;
 
         // For countersink without explicit depth, calculate from diameter and angle
-        if( pmDepth <= 0 && *backPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK
+        if( pmDepth <= 0
+                && *backPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK
                 && backPM.angle > 0 )
         {
             double halfAngleRad = ( backPM.angle / 10.0 ) * M_PI / 180.0 / 2.0;
@@ -1026,10 +1037,10 @@ const BOX2I PCB_VIA::GetBoundingBox() const
     int radius = 0;
 
     Padstack().ForEachUniqueLayer(
-        [&]( PCB_LAYER_ID aLayer )
-        {
-            radius = std::max( radius, GetWidth( aLayer ) );
-        } );
+            [&]( PCB_LAYER_ID aLayer )
+            {
+                radius = std::max( radius, GetWidth( aLayer ) );
+            } );
 
     // via is round, this is its radius, rounded up
     radius = ( radius + 1 ) / 2;
@@ -1191,8 +1202,7 @@ void PCB_VIA::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 }
 
 
-INSPECT_RESULT PCB_TRACK::Visit( INSPECTOR inspector, void* testData,
-                                 const std::vector<KICAD_T>& aScanTypes )
+INSPECT_RESULT PCB_TRACK::Visit( INSPECTOR inspector, void* testData, const std::vector<KICAD_T>& aScanTypes )
 {
     for( KICAD_T scanType : aScanTypes )
     {
@@ -1399,8 +1409,7 @@ FILLING_MODE PCB_VIA::GetFillingMode() const
 
 bool PCB_VIA::IsTented( PCB_LAYER_ID aLayer ) const
 {
-    wxCHECK_MSG( IsFrontLayer( aLayer ) || IsBackLayer( aLayer ), true,
-                 "Invalid layer passed to IsTented" );
+    wxCHECK_MSG( IsFrontLayer( aLayer ) || IsBackLayer( aLayer ), true, "Invalid layer passed to IsTented" );
 
     bool front = IsFrontLayer( aLayer );
 
@@ -1434,8 +1443,7 @@ int PCB_TRACK::GetSolderMaskExpansion() const
     int margin = 0;
 
     if( GetBoard() && GetBoard()->GetDesignSettings().m_DRCEngine
-        && GetBoard()->GetDesignSettings().m_DRCEngine->HasRulesForConstraintType(
-                   SOLDER_MASK_EXPANSION_CONSTRAINT ) )
+        && GetBoard()->GetDesignSettings().m_DRCEngine->HasRulesForConstraintType( SOLDER_MASK_EXPANSION_CONSTRAINT ) )
     {
         DRC_CONSTRAINT              constraint;
         std::shared_ptr<DRC_ENGINE> drcEngine = GetBoard()->GetDesignSettings().m_DRCEngine;
@@ -1736,32 +1744,35 @@ void PCB_VIA::SanitizeLayers()
     if( !IsCopperLayerLowerThan( Padstack().Drill().end, Padstack().Drill().start) )
         std::swap( Padstack().Drill().end, Padstack().Drill().start );
 
-    PADSTACK::DRILL_PROPS& secondary = Padstack().SecondaryDrill();
-
-    if( secondary.start != UNDEFINED_LAYER && !IsCopperLayer( secondary.start ) )
-        secondary.start = UNDEFINED_LAYER;
-
-    if( secondary.end != UNDEFINED_LAYER && !IsCopperLayer( secondary.end ) )
-        secondary.end = UNDEFINED_LAYER;
-
     int copperCount = BoardCopperLayerCount();
 
-    if( copperCount > 0 )
-    {
-        LSET cuMask = LSET::AllCuMask( copperCount );
+    auto sanitizeBackdrill =
+            [copperCount]( PADSTACK::DRILL_PROPS& aDrill )
+            {
+                if( aDrill.start != UNDEFINED_LAYER && !IsCopperLayer( aDrill.start ) )
+                    aDrill.start = UNDEFINED_LAYER;
 
-        if( secondary.start != UNDEFINED_LAYER && !cuMask.Contains( secondary.start ) )
-            secondary.start = UNDEFINED_LAYER;
+                if( aDrill.end != UNDEFINED_LAYER && !IsCopperLayer( aDrill.end ) )
+                    aDrill.end = UNDEFINED_LAYER;
 
-        if( secondary.end != UNDEFINED_LAYER && !cuMask.Contains( secondary.end ) )
-            secondary.end = UNDEFINED_LAYER;
-    }
+                if( copperCount > 0 )
+                {
+                    LSET cuMask = LSET::AllCuMask( copperCount );
 
-    if( secondary.start != UNDEFINED_LAYER && secondary.end != UNDEFINED_LAYER
-            && secondary.start == secondary.end )
-    {
-        secondary.end = UNDEFINED_LAYER;
-    }
+                    if( aDrill.start != UNDEFINED_LAYER && !cuMask.Contains( aDrill.start ) )
+                        aDrill.start = UNDEFINED_LAYER;
+
+                    if( aDrill.end != UNDEFINED_LAYER && !cuMask.Contains( aDrill.end ) )
+                        aDrill.end = UNDEFINED_LAYER;
+                }
+
+                // A backdrill side with no must-cut layer does not exist.
+                if( aDrill.end == UNDEFINED_LAYER )
+                    aDrill.size = { 0, 0 };
+            };
+
+    sanitizeBackdrill( Padstack().SecondaryDrill() );
+    sanitizeBackdrill( Padstack().TertiaryDrill() );
 }
 
 
@@ -3387,4 +3398,3 @@ ENUM_TO_WXANY( COVERING_MODE );
 ENUM_TO_WXANY( PLUGGING_MODE );
 ENUM_TO_WXANY( CAPPING_MODE );
 ENUM_TO_WXANY( FILLING_MODE );
-

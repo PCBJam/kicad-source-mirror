@@ -30,6 +30,7 @@
 #include <base_units.h>
 #include <convert_basic_shapes_to_polygon.h>
 #include <font/font.h>
+#include <footprint.h>
 #include <board.h>
 #include <pcb_dimension.h>
 #include <pcb_text.h>
@@ -303,6 +304,11 @@ void PCB_DIMENSION_BASE::Serialize( google::protobuf::Any &aContainer ) const
     dimension.set_precision( ToProtoEnum<DIM_PRECISION, DimensionPrecision>( m_precision ) );
     dimension.set_suppress_trailing_zeroes( m_suppressZeroes );
 
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        dimension.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+    else if( const BOARD* board = GetBoard() )
+        dimension.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
     dimension.mutable_line_thickness()->set_value_nm( m_lineThickness );
     dimension.mutable_arrow_length()->set_value_nm( m_arrowLength );
     dimension.mutable_extension_offset()->set_value_nm( m_extensionOffset );
@@ -323,7 +329,7 @@ bool PCB_DIMENSION_BASE::Deserialize( const google::protobuf::Any &aContainer )
         return false;
 
     SetLayer( FromProtoEnum<PCB_LAYER_ID, kiapi::board::types::BoardLayer>( dimension.layer() ) );
-    const_cast<KIID&>( m_Uuid ) = KIID( dimension.id().value() );
+    SetUuidDirect( KIID( dimension.id().value() ) );
     SetLocked( dimension.locked() == types::LockedState::LS_LOCKED );
 
     google::protobuf::Any any;

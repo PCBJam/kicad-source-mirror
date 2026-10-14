@@ -53,10 +53,10 @@ public:
     std::vector<DRC_RE_FIELD_POSITION> GetFieldPositions() const override
     {
         // Positions measured from constraint_routing_width.png bitmap
-        // Format: { xStart, xEnd, yTop, tabOrder }
+        // Format: { xStart, xEnd, yCenter, tabOrder }
         return {
-            { 30 + DRC_RE_OVERLAY_XO, 70 + DRC_RE_OVERLAY_XO, 15 + DRC_RE_OVERLAY_YO, 1, wxS( "mm" ), LABEL_POSITION::RIGHT }, // opt_width
-            { 110 + DRC_RE_OVERLAY_XO, 150 + DRC_RE_OVERLAY_XO, 15 + DRC_RE_OVERLAY_YO, 2, wxS( "mm" ), LABEL_POSITION::RIGHT }, // width_tolerance (±)
+            { 30, 85, 27, 1, wxS( "mm" ), LABEL_POSITION::RIGHT },                    // opt_width
+            { 135, 190, 27, 2, wxS( "mm" ), LABEL_POSITION::RIGHT, wxS( "\u00B1" ) }, // width_tolerance (±)
         };
     }
 

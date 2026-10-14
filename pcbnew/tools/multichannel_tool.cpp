@@ -34,6 +34,8 @@
 #include <pcbexpr_evaluator.h>
 
 #include <zone.h>
+#include <board.h>
+#include <netinfo.h>
 #include <board_design_settings.h>
 #include <geometry/convex_hull.h>
 #include <geometry/shape_utils.h>
@@ -412,6 +414,31 @@ MULTICHANNEL_TOOL::queryComponentsInComponentClass( const wxString& aComponentCl
 }
 
 
+static void collectGroupFootprints( EDA_GROUP* aGroup, std::set<FOOTPRINT*>& aOut )
+{
+    for( EDA_ITEM* item : aGroup->GetItems() )
+    {
+        if( item->Type() == PCB_FOOTPRINT_T )
+            aOut.insert( static_cast<FOOTPRINT*>( item ) );
+        else if( item->Type() == PCB_GROUP_T )
+            collectGroupFootprints( static_cast<PCB_GROUP*>( item ), aOut );
+    }
+}
+
+
+static void collectGroupBoardItems( EDA_GROUP* aGroup, std::set<BOARD_ITEM*>& aOut )
+{
+    for( EDA_ITEM* item : aGroup->GetItems() )
+    {
+        // A generator's own bounding box already covers its children (meander arcs).
+        if( item->Type() == PCB_GROUP_T )
+            collectGroupBoardItems( static_cast<PCB_GROUP*>( item ), aOut );
+        else if( item->IsBOARD_ITEM() )
+            aOut.insert( static_cast<BOARD_ITEM*>( item ) );
+    }
+}
+
+
 std::set<FOOTPRINT*> MULTICHANNEL_TOOL::queryComponentsInGroup( const wxString& aGroupName ) const
 {
     std::set<FOOTPRINT*> rv;
@@ -419,13 +446,7 @@ std::set<FOOTPRINT*> MULTICHANNEL_TOOL::queryComponentsInGroup( const wxString& 
     for( PCB_GROUP* group : board()->Groups() )
     {
         if( group->GetName() == aGroupName )
-        {
-            for( EDA_ITEM* item : group->GetItems() )
-            {
-                if( item->Type() == PCB_FOOTPRINT_T )
-                    rv.insert( static_cast<FOOTPRINT*>( item ) );
-            }
-        }
+            collectGroupFootprints( group, rv );
     }
 
     return rv;
@@ -497,36 +518,84 @@ const SHAPE_LINE_CHAIN MULTICHANNEL_TOOL::buildRAOutline( const std::set<BOARD_I
 }
 
 
+// Returns each parent sheet path above aSheetName, e.g. "/A/B/C/" -> { "/A/", "/A/B/" }.
+// The root and the sheet itself are left out.
+static std::vector<wxString> getParentSheetPaths( const wxString& aSheetName )
+{
+    std::vector<wxString> segments;
+    wxString              cur;
+
+    for( wxUniChar ch : aSheetName )
+    {
+        if( ch == '/' )
+        {
+            if( !cur.IsEmpty() )
+                segments.push_back( cur );
+
+            cur.clear();
+        }
+        else
+        {
+            cur += ch;
+        }
+    }
+
+    if( !cur.IsEmpty() )
+        segments.push_back( cur );
+
+    std::vector<wxString> rv;
+    wxString              prefix = wxT( "/" );
+
+    for( size_t i = 0; i + 1 < segments.size(); ++i )
+    {
+        prefix += segments[i] + wxT( "/" );
+        rv.push_back( prefix );
+    }
+
+    return rv;
+}
+
+
 void MULTICHANNEL_TOOL::GeneratePotentialRuleAreas()
 {
-    using PathAndName = std::pair<wxString, wxString>;
-    std::set<PathAndName> uniqueSheets;
-    std::set<wxString>    uniqueComponentClasses;
-    std::set<wxString>    uniqueGroups;
+    // Sheet path -> sheet file. Container sheets that only hold subsheets have no file of
+    // their own, so they map to an empty string.
+    std::map<wxString, wxString> uniqueSheets;
+    std::set<wxString>           uniqueComponentClasses;
+    std::set<wxString>           uniqueGroups;
 
     m_areas.m_areas.clear();
 
     for( const FOOTPRINT* fp : board()->Footprints() )
     {
-        uniqueSheets.insert( PathAndName( fp->GetSheetname(), fp->GetSheetfile() ) );
+        uniqueSheets[fp->GetSheetname()] = fp->GetSheetfile();
+
+        // Offer the parent sheets as channels too, not just the deepest one.
+        for( const wxString& parent : getParentSheetPaths( fp->GetSheetname() ) )
+            uniqueSheets.emplace( parent, wxString() );
 
         const COMPONENT_CLASS* compClass = fp->GetComponentClass();
 
         for( const COMPONENT_CLASS* singleClass : compClass->GetConstituentClasses() )
             uniqueComponentClasses.insert( singleClass->GetName() );
 
-        if( fp->GetParentGroup() && !fp->GetParentGroup()->GetName().IsEmpty() )
-            uniqueGroups.insert( fp->GetParentGroup()->GetName() );
+        // Offer every named group up the chain, not just the immediate parent, so a
+        // channel group wrapping several sub-groups can be picked too.
+        for( EDA_GROUP* grp = fp->GetParentGroup(); grp; grp = grp->AsEdaItem()->GetParentGroup() )
+        {
+            if( !grp->GetName().IsEmpty() )
+                uniqueGroups.insert( grp->GetName() );
+        }
     }
 
-    for( const PathAndName& sheet : uniqueSheets )
+    for( const auto& [sheetPath, sheetFile] : uniqueSheets )
     {
         RULE_AREA ent;
 
         ent.m_sourceType = PLACEMENT_SOURCE_T::SHEETNAME;
         ent.m_generateEnabled = false;
-        ent.m_sheetPath = sheet.first;
-        ent.m_sheetName = sheet.second;
+        ent.m_sheetPath = sheetPath;
+        ent.m_sheetName = sheetFile;
         ent.m_components = queryComponentsInSheet( ent.m_sheetPath );
         m_areas.m_areas.push_back( ent );
 
@@ -1145,6 +1214,13 @@ int MULTICHANNEL_TOOL::findRoutingInRuleArea( RULE_AREA* aRuleArea, std::set<BOA
                 if( aOutput.contains( aItem ) )
                     return;
 
+                // Tracks inside a generator (meander) are copied with the generator.
+                if( EDA_GROUP* parent = aItem->GetParentGroup() )
+                {
+                    if( parent->AsEdaItem()->Type() == PCB_GENERATOR_T )
+                        return;
+                }
+
                 ctx.SetItems( aItem, aItem );
                 LIBEVAL::VALUE* val = ucode.Run( &ctx );
 
@@ -1164,27 +1240,6 @@ int MULTICHANNEL_TOOL::findRoutingInRuleArea( RULE_AREA* aRuleArea, std::set<BOA
         {
             if( drawing->IsConnected() )
                 testAndAdd( static_cast<BOARD_CONNECTED_ITEM*>( drawing ) );
-        }
-
-        for( PCB_GENERATOR* generator : board()->Generators() )
-        {
-            if( generator->GetGeneratorType() != wxT( "tuning_pattern" ) )
-                continue;
-
-            if( !generator->HitTest( aRAPoly.Outline( 0 ), false ) )
-                continue;
-
-            for( EDA_ITEM* member : generator->GetItems() )
-            {
-                if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( member ) )
-                {
-                    if( !aOutput.contains( bci ) )
-                    {
-                        aOutput.insert( bci );
-                        count++;
-                    }
-                }
-            }
         }
     }
 
@@ -1242,39 +1297,33 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
     targetPoly.CacheTriangulation( false );
 
     std::shared_ptr<CONNECTIVITY_DATA> connectivity = board()->GetConnectivity();
-    std::map<EDA_GROUP*, EDA_GROUP*>   groupMap;
 
-    // For Apply Design Block Layout, grouping is handled later by RepeatLayout() using the
-    // existing target group. Do not clone groups here or we end up with duplicates.
-    const bool preserveGroups = aTargetArea->m_sourceType != PLACEMENT_SOURCE_T::GROUP_PLACEMENT;
+    // Group placement targets let RepeatLayout() reuse the existing target group, and m_groupItems
+    // flat-groups every copy into one rule-area group. Reconstructing source groups here in either
+    // case strands their members and leaves empty phantom clones behind (issue 22316).
+    const bool preserveGroups = aTargetArea->m_sourceType != PLACEMENT_SOURCE_T::GROUP_PLACEMENT
+                                && !aOpts.m_groupItems;
+
+    // Defer reconstruction until every copy is made. Cloning a source group the moment one member
+    // is copied would duplicate user groups that merely overlap the source area (issue 22316); a
+    // group is rebuilt only once all of its members have been reproduced.
+    std::vector<std::pair<BOARD_ITEM*, BOARD_ITEM*>> groupFixupPairs;
+    std::set<BOARD_ITEM*>                            reproducedSourceItems;
 
     auto fixupParentGroup =
             [&]( BOARD_ITEM* sourceItem, BOARD_ITEM* destItem )
             {
+                // The copy inherits the source's parent-group pointer but is not a member of that
+                // group; clear the dangling reference.
+                destItem->SetParentGroup( nullptr );
+
                 if( !preserveGroups )
                     return;
 
-                if( EDA_GROUP* parentGroup = sourceItem->GetParentGroup() )
-                {
-                    if( !groupMap.contains( parentGroup ) )
-                    {
-                        PCB_GROUP* newGroup = static_cast<PCB_GROUP*>(
-                                static_cast<PCB_GROUP*>( parentGroup->AsEdaItem() )->Duplicate( false ) );
-                        newGroup->GetItems().clear();
-                        newGroup->SetParentGroup( nullptr );
+                if( sourceItem->GetParentGroup() )
+                    groupFixupPairs.emplace_back( sourceItem, destItem );
 
-                        if( newGroup->Type() == PCB_GENERATOR_T )
-                        {
-                            newGroup->Rotate( VECTOR2( 0, 0 ), rot );
-                            newGroup->Move( disp );
-                        }
-
-                        groupMap[parentGroup] = newGroup;
-                        aCommit->Add( newGroup );
-                    }
-
-                    groupMap[parentGroup]->AddItem( destItem );
-                }
+                reproducedSourceItems.insert( sourceItem );
             };
 
     // Only stage changes for a target Rule Area zone if it actually belongs to the board.
@@ -1299,6 +1348,16 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
         aCommit->Modify( aTargetArea->m_zone );
         aCompatData.m_affectedItems.insert( aTargetArea->m_zone );
         aCompatData.m_groupableItems.insert( aTargetArea->m_zone );
+
+        // The source rule-area zone maps to the target zone; treat it as reproduced so a group
+        // containing it can still be rebuilt.
+        if( preserveGroups )
+        {
+            if( aRefArea->m_zone->GetParentGroup() )
+                groupFixupPairs.emplace_back( aRefArea->m_zone, aTargetArea->m_zone );
+
+            reproducedSourceItems.insert( aRefArea->m_zone );
+        }
     }
 
     if( aOpts.m_copyRouting )
@@ -1324,6 +1383,25 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
         findRoutingInRuleArea( aTargetArea, targetRouting, connectivity, targetPoly, aOpts );
         findRoutingInRuleArea( aRefArea, refRouting, connectivity, refPoly, aOpts );
 
+        // Nets used by the target group's own items, footprint pads included.
+        std::set<int> targetGroupNets;
+
+        if( aTargetArea->m_group )
+        {
+            for( EDA_ITEM* member : aTargetArea->m_group->GetItems() )
+            {
+                if( member->Type() == PCB_FOOTPRINT_T )
+                {
+                    for( PAD* pad : static_cast<FOOTPRINT*>( member )->Pads() )
+                        targetGroupNets.insert( pad->GetNetCode() );
+                }
+                else if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( member ) )
+                {
+                    targetGroupNets.insert( bci->GetNetCode() );
+                }
+            }
+        }
+
         for( BOARD_CONNECTED_ITEM* item : targetRouting )
         {
             // Never remove pads as part of routing copy.
@@ -1332,6 +1410,21 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
 
             if( aRefArea->m_designBlockItems.count( item ) )
                 continue;
+
+            // Design block apply: replace only the group's own routing and loose routing on the
+            // group's nets. Other groups' routing belongs to stacked instances (issue 24767).
+            // Everything else is unrelated and just sits inside the block's area (issue 24944).
+            if( aTargetArea->m_group && item->GetParentGroup() != aTargetArea->m_group )
+            {
+                if( item->GetParentGroup() )
+                    continue;
+
+                if( item->IsLocked() )
+                    continue;
+
+                if( item->GetNetCode() <= 0 || !targetGroupNets.contains( item->GetNetCode() ) )
+                    continue;
+            }
 
             if( item->IsLocked() && !aOpts.m_includeLockedItems )
                 continue;
@@ -1381,10 +1474,19 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
             aCommit->Add( copied );
         }
 
-        // Copy generators (meanders) whole so they are not flattened to loose tracks.
+        // Copy generators (meanders) whole so they are not flattened to loose tracks. Design
+        // block apply has an exact item list, other rule areas resolve them by area.
+        std::vector<PCB_GENERATOR*> refGenerators;
+        std::vector<PCB_GENERATOR*> targetGenerators;
+
         if( aRefArea->m_sourceType == PLACEMENT_SOURCE_T::DESIGN_BLOCK )
         {
-            // Remove the target group's existing generators so a re-apply replaces them.
+            for( EDA_ITEM* item : aRefArea->m_designBlockItems )
+            {
+                if( item->Type() == PCB_GENERATOR_T )
+                    refGenerators.push_back( static_cast<PCB_GENERATOR*>( item ) );
+            }
+
             EDA_GROUP* targetGroup = aTargetArea->m_group;
 
             if( !targetGroup && !aTargetArea->m_components.empty() )
@@ -1392,52 +1494,64 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
 
             if( targetGroup )
             {
-                std::vector<PCB_GENERATOR*> targetGenerators;
-
                 for( EDA_ITEM* member : targetGroup->GetItems() )
                 {
                     if( member->Type() == PCB_GENERATOR_T )
                         targetGenerators.push_back( static_cast<PCB_GENERATOR*>( member ) );
                 }
-
-                for( PCB_GENERATOR* gen : targetGenerators )
-                {
-                    gen->RunOnChildren(
-                            [&]( BOARD_ITEM* child )
-                            {
-                                aCommit->Remove( child );
-                            },
-                            RECURSE_MODE::RECURSE );
-                    aCommit->Remove( gen );
-                }
             }
+        }
+        else
+        {
+            const SHAPE_LINE_CHAIN& refOut = aRefArea->m_zone->Outline()->COutline( 0 );
+            const SHAPE_LINE_CHAIN& targetOut = aTargetArea->m_zone->Outline()->COutline( 0 );
 
-            for( EDA_ITEM* item : aRefArea->m_designBlockItems )
+            for( PCB_GENERATOR* gen : board()->Generators() )
             {
-                if( item->Type() != PCB_GENERATOR_T )
+                if( gen->GetGeneratorType() != wxT( "tuning_pattern" ) )
                     continue;
 
-                PCB_GENERATOR* clone = static_cast<PCB_GENERATOR*>( item )->DeepClone();
-
-                clone->ClearFlags();
-                clone->Rotate( VECTOR2( 0, 0 ), rot );
-                clone->Move( disp );
-                aCommit->Add( clone );
-
-                clone->RunOnChildren(
-                        [&]( BOARD_ITEM* child )
-                        {
-                            child->ClearFlags();
-
-                            if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( child ) )
-                                fixupNet( bci, bci, aCompatData.m_matchingComponents );
-
-                            aCommit->Add( child );
-                        },
-                        RECURSE_MODE::RECURSE );
-
-                aCompatData.m_groupableItems.insert( clone );
+                if( gen->HitTest( refOut, false ) )
+                    refGenerators.push_back( gen );
+                else if( gen->HitTest( targetOut, false ) )
+                    targetGenerators.push_back( gen );
             }
+        }
+
+        // Remove the target's existing generators so the copy replaces them.
+        for( PCB_GENERATOR* gen : targetGenerators )
+        {
+            gen->RunOnChildren(
+                    [&]( BOARD_ITEM* child )
+                    {
+                        aCommit->Remove( child );
+                    },
+                    RECURSE_MODE::RECURSE );
+            aCommit->Remove( gen );
+        }
+
+        for( PCB_GENERATOR* gen : refGenerators )
+        {
+            PCB_GENERATOR* clone = gen->DeepClone();
+
+            clone->ClearFlags();
+            clone->Rotate( VECTOR2( 0, 0 ), rot );
+            clone->Move( disp );
+            aCommit->Add( clone );
+
+            clone->RunOnChildren(
+                    [&]( BOARD_ITEM* child )
+                    {
+                        child->ClearFlags();
+
+                        if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( child ) )
+                            fixupNet( bci, bci, aCompatData.m_matchingComponents );
+
+                        aCommit->Add( child );
+                    },
+                    RECURSE_MODE::RECURSE );
+
+            aCompatData.m_groupableItems.insert( clone );
         }
     }
 
@@ -1658,8 +1772,101 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
             // Copy 3D model settings
             targetFP->Models() = refFP->Models();
 
+            std::set<PAD*> consumedPads;
+
+            for( PAD* refPad : refFP->Pads() )
+            {
+                for( PAD* targetPad : targetFP->Pads() )
+                {
+                    if( consumedPads.contains( targetPad ) || targetPad->GetNumber() != refPad->GetNumber() )
+                    {
+                        continue;
+                    }
+
+                    consumedPads.insert( targetPad );
+                    targetPad->ImportSettingsFrom( *refPad );
+                    break;
+                }
+            }
+
             aCompatData.m_affectedItems.insert( targetFP );
             aCompatData.m_groupableItems.insert( targetFP );
+
+            // The matched footprint maps to its target; treat it as reproduced so a group
+            // containing it can be rebuilt.
+            if( preserveGroups && refFP->GetParentGroup() )
+                groupFixupPairs.emplace_back( refFP, targetFP );
+
+            if( preserveGroups )
+                reproducedSourceItems.insert( refFP );
+        }
+    }
+
+    // Rebuild a source group only when all of its members were reproduced. A group that merely
+    // overlaps the source area keeps uncopied members, so it is left untouched rather than
+    // partially duplicated (issue 22316).
+    if( preserveGroups && !groupFixupPairs.empty() )
+    {
+        std::map<EDA_GROUP*, EDA_GROUP*> groupMap;
+        std::map<EDA_GROUP*, bool>       fullyReproducedCache;
+
+        auto groupFullyReproduced =
+                [&]( EDA_GROUP* aGroup )
+                {
+                    if( auto it = fullyReproducedCache.find( aGroup ); it != fullyReproducedCache.end() )
+                        return it->second;
+
+                    bool reproduced = true;
+
+                    for( EDA_ITEM* member : aGroup->GetItems() )
+                    {
+                        // Nested groups are not reproduced, so a parent containing one can never
+                        // be fully reproduced.
+                        if( !member->IsBOARD_ITEM()
+                            || !reproducedSourceItems.contains( static_cast<BOARD_ITEM*>( member ) ) )
+                        {
+                            reproduced = false;
+                            break;
+                        }
+                    }
+
+                    fullyReproducedCache[aGroup] = reproduced;
+                    return reproduced;
+                };
+
+        for( const auto& [sourceItem, destItem] : groupFixupPairs )
+        {
+            EDA_GROUP* parentGroup = sourceItem->GetParentGroup();
+
+            if( !parentGroup || !groupFullyReproduced( parentGroup ) )
+                continue;
+
+            if( !groupMap.contains( parentGroup ) )
+            {
+                PCB_GROUP* newGroup = static_cast<PCB_GROUP*>(
+                        static_cast<PCB_GROUP*>( parentGroup->AsEdaItem() )->Duplicate( false ) );
+                newGroup->GetItems().clear();
+                newGroup->SetParentGroup( nullptr );
+
+                if( newGroup->Type() == PCB_GENERATOR_T )
+                {
+                    newGroup->Rotate( VECTOR2( 0, 0 ), rot );
+                    newGroup->Move( disp );
+                }
+
+                groupMap[parentGroup] = newGroup;
+                aCommit->Add( newGroup );
+            }
+
+            // AddItem reparents the footprint out of any group it already belongs to; stage that
+            // group so the membership change is captured for undo.
+            if( EDA_GROUP* oldGroup = destItem->GetParentGroup() )
+            {
+                if( oldGroup != groupMap[parentGroup] )
+                    aCommit->Modify( oldGroup->AsEdaItem() );
+            }
+
+            groupMap[parentGroup]->AddItem( destItem );
         }
     }
 
@@ -1714,6 +1921,129 @@ void MULTICHANNEL_TOOL::fixupNet( BOARD_CONNECTED_ITEM* aRef, BOARD_CONNECTED_IT
 }
 
 
+std::vector<NETINFO_ITEM*> MULTICHANNEL_TOOL::IsolateDesignBlockAutoNets( BOARD*                      aBoard,
+                                                                          const std::set<FOOTPRINT*>& aFootprints,
+                                                                          const std::unordered_set<EDA_ITEM*>& aItems )
+{
+    std::vector<NETINFO_ITEM*>   created;
+    std::map<int, NETINFO_ITEM*> remap;
+    int                          counter = 0;
+
+    // Auto-generated names are tied to a reference designator, so a block's Net-(D3-A) collides
+    // with a different part's Net-(D3-A) on the board. Named/power nets are intentional and left
+    // alone so the topology matcher keeps excluding real global rails.
+    auto isAutoName = []( const wxString& aName )
+    {
+        return aName.StartsWith( wxT( "Net-(" ) ) || aName.StartsWith( wxT( "unconnected-" ) );
+    };
+
+    auto remapItem = [&]( BOARD_CONNECTED_ITEM* aItem )
+    {
+        int code = aItem->GetNetCode();
+
+        if( code <= 0 )
+            return;
+
+        NETINFO_ITEM* oldNet = aBoard->FindNet( code );
+
+        if( !oldNet || !isAutoName( oldNet->GetNetname() ) )
+            return;
+
+        auto it = remap.find( code );
+
+        if( it == remap.end() )
+        {
+            wxString name;
+
+            do
+            {
+                name = wxString::Format( wxT( "__dbapply_%d_%d" ), code, counter++ );
+            } while( aBoard->FindNet( name ) );
+
+            NETINFO_ITEM* newNet = new NETINFO_ITEM( aBoard, name );
+            aBoard->Add( newNet );
+            created.push_back( newNet );
+            it = remap.emplace( code, newNet ).first;
+        }
+
+        aItem->SetNet( it->second );
+    };
+
+    for( FOOTPRINT* fp : aFootprints )
+    {
+        for( PAD* pad : fp->Pads() )
+            remapItem( pad );
+    }
+
+    for( EDA_ITEM* item : aItems )
+    {
+        if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( item ) )
+            remapItem( bci );
+    }
+
+    return created;
+}
+
+
+// A placed design block or repeated sheet stamps the originating symbol instance UUID into each
+// footprint's path. When that linkage is complete and unique it is an authoritative one to one
+// mapping, independent of net topology. Returns false (and leaves aResult untouched) unless it
+// yields a full pad compatible bijection, so callers can fall back to topology matching.
+static bool matchBySymbolInstancePath( const std::set<FOOTPRINT*>& aRef, const std::set<FOOTPRINT*>& aTarget,
+                                       TMATCH::COMPONENT_MATCHES& aResult )
+{
+    if( aRef.empty() || aRef.size() != aTarget.size() )
+        return false;
+
+    auto symbolUuid = []( const FOOTPRINT* aFp ) -> KIID
+    {
+        const KIID_PATH& path = aFp->GetPath();
+        return path.empty() ? niluuid : path.back();
+    };
+
+    std::map<KIID, FOOTPRINT*> targetByUuid;
+
+    for( FOOTPRINT* fp : aTarget )
+    {
+        KIID uuid = symbolUuid( fp );
+
+        // A missing or duplicated UUID (copy paste, hand built group) is not a clean instance link
+        if( uuid == niluuid || !targetByUuid.emplace( uuid, fp ).second )
+            return false;
+    }
+
+    TMATCH::COMPONENT_MATCHES result;
+    std::set<FOOTPRINT*>      used;
+
+    for( FOOTPRINT* refFp : aRef )
+    {
+        KIID uuid = symbolUuid( refFp );
+
+        if( uuid == niluuid )
+            return false;
+
+        auto it = targetByUuid.find( uuid );
+
+        if( it == targetByUuid.end() )
+            return false;
+
+        FOOTPRINT* targetFp = it->second;
+
+        // Routing and placement copy only makes sense between pad compatible footprints
+        if( refFp->GetFPID() != targetFp->GetFPID() || refFp->Pads().size() != targetFp->Pads().size() )
+            return false;
+
+        if( !used.insert( targetFp ).second )
+            return false;
+
+        result[refFp] = targetFp;
+    }
+
+    aResult = std::move( result );
+    return true;
+}
+
+
 bool MULTICHANNEL_TOOL::resolveConnectionTopology( RULE_AREA* aRefArea, RULE_AREA* aTargetArea,
                                                    RULE_AREA_COMPAT_DATA& aMatches,
                                                    const TMATCH::ISOMORPHISM_PARAMS& aParams )
@@ -1731,11 +2061,94 @@ bool MULTICHANNEL_TOOL::resolveConnectionTopology( RULE_AREA* aRefArea, RULE_ARE
         return true;
     }
 
+    // Placement areas resolve their components from their source, so two areas sharing a sheet,
+    // component class or group resolve to identical footprints. Repeating into such a target would
+    // move and delete the reference's own items, corrupting the placement rather than copying it.
+    if( !aRefArea->m_components.empty() )
+    {
+        std::set<FOOTPRINT*> shared;
+        std::set_intersection( aRefArea->m_components.begin(), aRefArea->m_components.end(),
+                               aTargetArea->m_components.begin(), aTargetArea->m_components.end(),
+                               std::inserter( shared, shared.begin() ) );
+
+        if( !shared.empty() )
+        {
+            aMatches.m_matchingComponents.clear();
+            aMatches.m_isOk = false;
+            aMatches.m_errorMsg = _( "Target Rule Area shares components with the reference area" );
+            aMatches.m_mismatchReasons.clear();
+            aMatches.m_mismatchReasons.push_back(
+                    _( "This target Rule Area selects the same components as the reference area. "
+                       "Repeat layout cannot copy a Rule Area onto itself. Give each placement Rule "
+                       "Area a distinct sheet, component class or group." ) );
+            aMatches.m_mismatchReasons.push_back( wxString::Format( _( "Shared components:\n%s" ),
+                                                                    FormatComponentList( shared ) ) );
+            return false;
+        }
+    }
+
+    // A global rail connects >=2 pads in more than one channel; find them across all areas so the
+    // exclusion is the same for every target, not just the one being matched against.
+    std::unordered_map<int, std::vector<const RULE_AREA*>> netInternalAreas;
+
+    for( const RULE_AREA& area : m_areas.m_areas )
+    {
+        std::unordered_map<int, int> areaNetPadCounts;
+
+        for( const FOOTPRINT* fp : area.m_components )
+        {
+            for( const PAD* pad : fp->Pads() )
+            {
+                if( pad->GetNetCode() > 0 )
+                    areaNetPadCounts[pad->GetNetCode()]++;
+            }
+        }
+
+        for( const auto& [netCode, padCount] : areaNetPadCounts )
+        {
+            if( padCount >= 2 )
+                netInternalAreas[netCode].push_back( &area );
+        }
+    }
+
+    // Require two component-disjoint areas so overlapping rule areas can't make a per-channel net
+    // look global.
+    auto disjoint =
+            []( const RULE_AREA* aA, const RULE_AREA* aB )
+            {
+                for( FOOTPRINT* fp : aA->m_components )
+                {
+                    if( aB->m_components.count( fp ) )
+                        return false;
+                }
+
+                return true;
+            };
+
+    std::unordered_set<int> globalNets;
+
+    for( const auto& [netCode, areas] : netInternalAreas )
+    {
+        for( size_t i = 0; i < areas.size() && !globalNets.count( netCode ); i++ )
+        {
+            for( size_t j = i + 1; j < areas.size(); j++ )
+            {
+                if( disjoint( areas[i], areas[j] ) )
+                {
+                    globalNets.insert( netCode );
+                    break;
+                }
+            }
+        }
+    }
+
     PROF_TIMER timerBuild;
     std::unique_ptr<CONNECTION_GRAPH> cgRef( CONNECTION_GRAPH::BuildFromFootprintSet( aRefArea->m_components,
-                                                                                       aTargetArea->m_components ) );
+                                                                                       aTargetArea->m_components,
+                                                                                       globalNets ) );
     std::unique_ptr<CONNECTION_GRAPH> cgTarget( CONNECTION_GRAPH::BuildFromFootprintSet( aTargetArea->m_components,
-                                                                                         aRefArea->m_components ) );
+                                                                                         aRefArea->m_components,
+                                                                                         globalNets ) );
     timerBuild.Stop();
 
     wxLogTrace( traceMultichannelTool, wxT( "Graph construction: %s (%d + %d components)" ),
@@ -1752,6 +2165,19 @@ bool MULTICHANNEL_TOOL::resolveConnectionTopology( RULE_AREA* aRefArea, RULE_ARE
 
     wxLogTrace( traceMultichannelTool, wxT( "FindIsomorphism: %s, result=%d" ),
                 timerIso.to_string(), status ? 1 : 0 );
+
+    // Net topology can legitimately differ between a design block and its placed instance once the
+    // user edits connectivity on the board (a wire tying two block pads onto one net, etc.). Fall
+    // back to the symbol instance linkage, which still gives the correct mapping in that case. Skip
+    // it on a cancelled scan so cancellation is not mistaken for a topology miss.
+    const bool cancelled = aParams.m_cancelled && aParams.m_cancelled->load( std::memory_order_relaxed );
+
+    if( !status && !cancelled
+        && matchBySymbolInstancePath( aRefArea->m_components, aTargetArea->m_components,
+                                      aMatches.m_matchingComponents ) )
+    {
+        status = true;
+    }
 
     aMatches.m_isOk = status;
 
@@ -1946,7 +2372,49 @@ int MULTICHANNEL_TOOL::AutogenerateRuleAreas( const TOOL_EVENT& aEvent )
         }
         else
         {
-            raOutline = buildRAOutline( ra.m_components, 100000 );
+            // Start from the footprints, then also take everything in the design-block groups
+            // they belong to (recursively) so routing and meanders that extend past the
+            // footprints land inside the outline. Group membership keeps it bounded to this channel.
+            std::set<BOARD_ITEM*> outlineItems;
+            std::set<EDA_GROUP*>  groups;
+            std::set<int>         channelNets;
+
+            for( FOOTPRINT* fp : ra.m_components )
+            {
+                outlineItems.insert( fp );
+
+                for( PAD* pad : fp->Pads() )
+                    channelNets.insert( pad->GetNetCode() );
+
+                for( EDA_GROUP* g = fp->GetParentGroup(); g; g = g->AsEdaItem()->GetParentGroup() )
+                    groups.insert( g );
+            }
+
+            for( EDA_GROUP* g : groups )
+                collectGroupBoardItems( g, outlineItems );
+
+            // Also include tracks and vias on nets local to this channel (all pads on the net
+            // belong to the channel), so loose connections between blocks land in the outline.
+            std::set<int> foreignNets;
+
+            for( FOOTPRINT* fp : board()->Footprints() )
+            {
+                if( ra.m_components.count( fp ) )
+                    continue;
+
+                for( PAD* pad : fp->Pads() )
+                    foreignNets.insert( pad->GetNetCode() );
+            }
+
+            for( PCB_TRACK* track : board()->Tracks() )
+            {
+                int net = track->GetNetCode();
+
+                if( net > 0 && channelNets.count( net ) && !foreignNets.count( net ) )
+                    outlineItems.insert( track );
+            }
+
+            raOutline = buildRAOutline( outlineItems, 100000 );
         }
 
         std::unique_ptr<ZONE> newZone( new ZONE( board() ) );

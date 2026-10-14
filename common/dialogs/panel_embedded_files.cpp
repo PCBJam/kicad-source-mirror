@@ -101,11 +101,10 @@ PANEL_EMBEDDED_FILES::PANEL_EMBEDDED_FILES( wxWindow* aParent, EMBEDDED_FILES* a
 {
     m_files_grid->SetUseNativeColLabels();
 
+    // Deep-copy entries into m_localFiles so that user edits in the dialog (add/remove) operate
+    // on an isolated working copy.  m_localFiles is committed back to m_files on OK.
     for( auto& [name, file] : m_files->EmbeddedFileMap() )
-    {
-        EMBEDDED_FILES::EMBEDDED_FILE* newFile = new EMBEDDED_FILES::EMBEDDED_FILE( *file );
-        m_localFiles->AddFile( newFile );
-    }
+        m_localFiles->AddFile( new EMBEDDED_FILES::EMBEDDED_FILE( *file ) );
 
     for( const EMBEDDED_FILES* inheritedFiles : m_inheritedFiles )
     {
@@ -114,8 +113,7 @@ PANEL_EMBEDDED_FILES::PANEL_EMBEDDED_FILES( wxWindow* aParent, EMBEDDED_FILES* a
             if( m_localFiles->HasFile( name ) )
                 continue;
 
-            EMBEDDED_FILES::EMBEDDED_FILE* newFile = new EMBEDDED_FILES::EMBEDDED_FILE( *file );
-            m_localFiles->AddFile( newFile );
+            m_localFiles->AddFile( new EMBEDDED_FILES::EMBEDDED_FILE( *file ) );
             m_inheritedFileNames.insert( name );
         }
     }
@@ -240,21 +238,10 @@ bool PANEL_EMBEDDED_FILES::TransferDataFromWindow()
             break;
     }
 
-    m_files->ClearEmbeddedFiles();
-
-    std::vector<EMBEDDED_FILES::EMBEDDED_FILE*> files;
-
-    for( const auto& [name, file] : m_localFiles->EmbeddedFileMap() )
-        files.push_back( file );
-
-    for( EMBEDDED_FILES::EMBEDDED_FILE* file : files )
-    {
-        if( m_inheritedFileNames.count( file->name ) )
-            continue;
-
-        m_files->AddFile( file );
-        m_localFiles->RemoveFile( file->name, false );
-    }
+    // Share the payloads instead of moving them out of m_localFiles.  PAGED_DIALOG commits on
+    // both page change and OK, so a destructive commit would wipe every embedded file on the
+    // second pass.
+    m_files->AssignSharedFrom( *m_localFiles, m_inheritedFileNames );
 
     m_files->SetAreFontsEmbedded( m_cbEmbedFonts->IsChecked() );
 

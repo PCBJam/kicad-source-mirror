@@ -26,6 +26,8 @@
 #include <board.h>
 #include <board_design_settings.h>
 #include <pad.h>
+#include <netinfo.h>
+#include <base_units.h>
 #include <pcb_group.h>
 #include <pcb_shape.h>
 #include <pcb_track.h>
@@ -72,6 +74,28 @@ RULE_AREA* findRuleAreaByPartialName( MULTICHANNEL_TOOL* aTool, const wxString& 
     return nullptr;
 }
 
+RULE_AREA* findSheetRuleAreaByPath( MULTICHANNEL_TOOL* aTool, wxString aPath )
+{
+    if( aPath.EndsWith( wxT( "/" ) ) )
+        aPath.RemoveLast();
+
+    for( RULE_AREA& ra : aTool->GetData()->m_areas )
+    {
+        if( ra.m_sourceType != PLACEMENT_SOURCE_T::SHEETNAME )
+            continue;
+
+        wxString path = ra.m_sheetPath;
+
+        if( path.EndsWith( wxT( "/" ) ) )
+            path.RemoveLast();
+
+        if( path == aPath )
+            return &ra;
+    }
+
+    return nullptr;
+}
+
 RULE_AREA* findRuleAreaByPlacementGroup( MULTICHANNEL_TOOL* aTool, const wxString& aGroupName )
 {
     for( RULE_AREA& ra : aTool->GetData()->m_areas )
@@ -83,6 +107,7 @@ RULE_AREA* findRuleAreaByPlacementGroup( MULTICHANNEL_TOOL* aTool, const wxStrin
     return nullptr;
 }
 
+
 int countZonesByNameInRuleArea( BOARD* aBoard, const wxString& aZoneName, const RULE_AREA& aRuleArea )
 {
     int count = 0;
@@ -93,6 +118,29 @@ int countZonesByNameInRuleArea( BOARD* aBoard, const wxString& aZoneName, const 
             continue;
 
         if( zone->GetZoneName() != aZoneName )
+            continue;
+
+        if( aRuleArea.m_zone->Outline()->Contains( zone->Outline()->COutline( 0 ).Centre() ) )
+            count++;
+    }
+
+    return count;
+}
+
+
+int countZonesByNamePrefixInRuleArea( BOARD* aBoard, const wxString& aBaseName, const RULE_AREA& aRuleArea )
+{
+    int count = 0;
+
+    for( const ZONE* zone : aBoard->Zones() )
+    {
+        if( zone == aRuleArea.m_zone )
+            continue;
+
+        const wxString& name = zone->GetZoneName();
+
+        // A copied zone may get a _<n> suffix for uniqueness (issue 23131).
+        if( name != aBaseName && !name.StartsWith( aBaseName + wxT( "_" ) ) )
             continue;
 
         if( aRuleArea.m_zone->Outline()->Contains( zone->Outline()->COutline( 0 ).Centre() ) )
@@ -130,7 +178,8 @@ BOOST_FIXTURE_TEST_CASE( MultichannelToolRegressions, MULTICHANNEL_TEST_FIXTURE 
         BOOST_TEST_MESSAGE( wxString::Format( "RA multichannel sheets = %d",
                                               static_cast<int>( ruleData->m_areas.size() ) ) );
 
-        BOOST_CHECK_EQUAL( ruleData->m_areas.size(), 72 );
+        // 73 counts the /fpga/ container sheet, now offered as a channel.
+        BOOST_CHECK_EQUAL( ruleData->m_areas.size(), 73 );
 
         int cnt = 0;
 
@@ -511,7 +560,9 @@ BOOST_FIXTURE_TEST_CASE( RepeatLayoutRespectsZoneLayerSetsForOtherItems, MULTICH
     BOOST_REQUIRE( copyBStatus >= 0 );
 
     // SourceA and DestA both include F.Cu+B.Cu, so this multilayer zone should copy.
-    BOOST_CHECK_EQUAL( countZonesByNameInRuleArea( m_board.get(), wxT( "MultilayerZoneFrontAndOne" ), *destA ), 1 );
+    // The copy is renamed for uniqueness (issue 23131), so match the base name as a prefix.
+    BOOST_CHECK_EQUAL( countZonesByNamePrefixInRuleArea( m_board.get(), wxT( "MultilayerZoneFrontAndOne" ), *destA ),
+                       1 );
 
     // SourceB only includes F.Cu, so this F.Cu+B.Cu zone should not copy to DestB.
     BOOST_CHECK_EQUAL( countZonesByNameInRuleArea( m_board.get(), wxT( "MultilayerZoneSourceBLayerMismatch" ), *destB ),
@@ -612,6 +663,131 @@ BOOST_FIXTURE_TEST_CASE( TopologyMatchDottedRefDes, MULTICHANNEL_TEST_FIXTURE )
     // Cleanup: remove pads before footprints go out of scope
     fpRef.Pads().clear();
     fpTarget.Pads().clear();
+}
+
+
+/**
+ * A design block created from an un-annotated footprint stores the placeholder reference
+ * REF**. Applying its layout to an annotated destination footprint must still match on
+ * footprint ID and topology; the placeholder reference must act as a wildcard rather than
+ * being compared literally against the destination prefix (issue 24585).
+ */
+BOOST_FIXTURE_TEST_CASE( TopologyMatchUnannotatedReference, MULTICHANNEL_TEST_FIXTURE )
+{
+    using TMATCH::CONNECTION_GRAPH;
+    using TMATCH::COMPONENT;
+
+    auto cgRef = std::make_unique<CONNECTION_GRAPH>();
+    auto cgTarget = std::make_unique<CONNECTION_GRAPH>();
+
+    LIB_ID fpid( wxT( "_BugFpLib" ), wxT( "SW_Hotswap" ) );
+
+    // Reference footprint as stored in the design block: never annotated, so it keeps the
+    // default REF** placeholder.
+    FOOTPRINT fpRef( nullptr );
+    fpRef.SetFPID( fpid );
+    fpRef.SetReference( wxT( "REF**" ) );
+
+    // Destination footprint placed and annotated on the board.
+    FOOTPRINT fpTarget( nullptr );
+    fpTarget.SetFPID( fpid );
+    fpTarget.SetReference( wxT( "SW1" ) );
+
+    PAD padRef1( &fpRef );
+    padRef1.SetNumber( wxT( "1" ) );
+    padRef1.SetNetCode( 1 );
+    fpRef.Add( &padRef1 );
+
+    PAD padRef2( &fpRef );
+    padRef2.SetNumber( wxT( "2" ) );
+    padRef2.SetNetCode( 2 );
+    fpRef.Add( &padRef2 );
+
+    PAD padTarget1( &fpTarget );
+    padTarget1.SetNumber( wxT( "1" ) );
+    padTarget1.SetNetCode( 3 );
+    fpTarget.Add( &padTarget1 );
+
+    PAD padTarget2( &fpTarget );
+    padTarget2.SetNumber( wxT( "2" ) );
+    padTarget2.SetNetCode( 4 );
+    fpTarget.Add( &padTarget2 );
+
+    cgRef->AddFootprint( &fpRef, VECTOR2I( 0, 0 ) );
+    cgTarget->AddFootprint( &fpTarget, VECTOR2I( 0, 0 ) );
+
+    cgRef->BuildConnectivity();
+    cgTarget->BuildConnectivity();
+
+    BOOST_CHECK_EQUAL( cgRef->Components().size(), 1 );
+    BOOST_CHECK_EQUAL( cgTarget->Components().size(), 1 );
+
+    COMPONENT* cmpRef = cgRef->Components()[0];
+    COMPONENT* cmpTarget = cgTarget->Components()[0];
+
+    BOOST_CHECK_MESSAGE( cmpRef->IsSameKind( *cmpTarget ),
+                         "REF** placeholder must be the same kind as an annotated footprint "
+                         "with matching FPID (issue 24585)" );
+
+    TMATCH::COMPONENT_MATCHES result;
+    std::vector<TMATCH::TOPOLOGY_MISMATCH_REASON> details;
+    bool status = cgRef->FindIsomorphism( cgTarget.get(), result, details );
+
+    if( !status )
+    {
+        for( const auto& reason : details )
+        {
+            BOOST_TEST_MESSAGE( wxString::Format( "Mismatch: %s <-> %s: %s",
+                                                  reason.m_reference, reason.m_candidate, reason.m_reason ) );
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( status,
+                         "Design block layout with an un-annotated REF** footprint must match "
+                         "an annotated destination (issue 24585)" );
+    BOOST_CHECK( details.empty() );
+
+    fpRef.Pads().clear();
+    fpTarget.Pads().clear();
+}
+
+
+/**
+ * The placeholder wildcard introduced for issue 24585 must stay narrow. Annotated footprints
+ * with unrelated prefixes must keep the prefix check, and the placeholder wildcard must not
+ * bypass the footprint-ID requirement.
+ */
+BOOST_FIXTURE_TEST_CASE( TopologyMatchAnnotatedReferencesKeepPrefixCheck, MULTICHANNEL_TEST_FIXTURE )
+{
+    using TMATCH::COMPONENT;
+
+    LIB_ID fpid( wxT( "_BugFpLib" ), wxT( "SW_Hotswap" ) );
+    LIB_ID otherFpid( wxT( "_BugFpLib" ), wxT( "R_0402" ) );
+
+    FOOTPRINT fpTarget( nullptr );
+    fpTarget.SetFPID( fpid );
+    fpTarget.SetReference( wxT( "SW1" ) );
+    COMPONENT cmpTarget( fpTarget.GetReference(), &fpTarget );
+
+    // Unrelated annotated prefixes with the same FPID must not match.
+    FOOTPRINT fpUnrelated( nullptr );
+    fpUnrelated.SetFPID( fpid );
+    fpUnrelated.SetReference( wxT( "U1A" ) );
+    COMPONENT cmpUnrelated( fpUnrelated.GetReference(), &fpUnrelated );
+
+    BOOST_CHECK_MESSAGE( !cmpUnrelated.IsSameKind( cmpTarget ),
+                         "Two annotated footprints with unrelated prefixes must not match even "
+                         "with the same FPID (issue 24585)" );
+
+    // The placeholder wildcard must not bypass the footprint-ID requirement.
+    FOOTPRINT fpPlaceholder( nullptr );
+    fpPlaceholder.SetFPID( otherFpid );
+    fpPlaceholder.SetReference( wxT( "REF**" ) );
+    COMPONENT cmpPlaceholder( fpPlaceholder.GetReference(), &fpPlaceholder );
+
+    BOOST_CHECK_MESSAGE( !cmpPlaceholder.IsSameKind( cmpTarget ),
+                         "A REF** placeholder must not match a target with a different FPID "
+                         "(issue 24585)" );
 }
 
 
@@ -1156,6 +1332,135 @@ BOOST_FIXTURE_TEST_CASE( ApplyDesignBlockLayoutCopiesSilkscreen, MULTICHANNEL_TE
 
 
 /**
+ * Apply Design Block Layout maps block footprints to their placed instances by symbol instance
+ * UUID when the board's net topology no longer matches the block (issue: a board wire makes the
+ * two non isomorphic, which used to abort with "No compatible component found in the target area").
+ */
+BOOST_FIXTURE_TEST_CASE( ApplyDesignBlockLayoutMatchesBySymbolPathWhenTopologyDiffers, MULTICHANNEL_TEST_FIXTURE )
+{
+    using TMATCH::CONNECTION_GRAPH;
+
+    m_board = std::make_unique<BOARD>();
+    m_board->SetEnabledLayers( LSET::AllCuMask() );
+
+    NETINFO_ITEM* shared = new NETINFO_ITEM( m_board.get(), wxT( "Net-(J1-Pin_1)" ) );
+    m_board->Add( shared );
+
+    auto makeFootprint = [&]( const wxString& aRef, const VECTOR2I& aPos, const KIID& aSymbolUuid,
+                              NETINFO_ITEM* aNet ) -> FOOTPRINT*
+    {
+        FOOTPRINT* fp = new FOOTPRINT( m_board.get() );
+        fp->SetFPID( LIB_ID( wxT( "TestLib" ), wxT( "Receptacle" ) ) );
+        fp->SetReference( aRef );
+        fp->SetPosition( aPos );
+
+        // Symbol instance UUID, the link between a block footprint and its placed instance
+        KIID_PATH path;
+        path.push_back( aSymbolUuid );
+        fp->SetPath( path );
+
+        PAD* pad = new PAD( fp );
+        pad->SetNumber( wxT( "1" ) );
+        pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        pad->SetPosition( aPos );
+        pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ) );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+
+        if( aNet )
+            pad->SetNet( aNet );
+
+        fp->Add( pad );
+        m_board->Add( fp );
+        return fp;
+    };
+
+    KIID symA, symB;
+
+    // Block source: both receptacles unconnected, so each pad has zero connections
+    FOOTPRINT* refFpA = makeFootprint( wxT( "J5" ), VECTOR2I( 0, 0 ), symA, nullptr );
+    FOOTPRINT* refFpB = makeFootprint( wxT( "J6" ), VECTOR2I( pcbIUScale.mmToIU( 10 ), 0 ), symB, nullptr );
+
+    // Board instance: same symbol instances, but a board wire ties both pads onto one net
+    FOOTPRINT* destFpA =
+            makeFootprint( wxT( "J1" ), VECTOR2I( pcbIUScale.mmToIU( 50 ), pcbIUScale.mmToIU( 50 ) ), symA, shared );
+    FOOTPRINT* destFpB =
+            makeFootprint( wxT( "J2" ), VECTOR2I( pcbIUScale.mmToIU( 80 ), pcbIUScale.mmToIU( 80 ) ), symB, shared );
+
+    // Precondition: topology matching fails, so the symbol path fallback is what rescues the apply
+    {
+        std::set<FOOTPRINT*>      refSet{ refFpA, refFpB };
+        std::set<FOOTPRINT*>      destSet{ destFpA, destFpB };
+        auto                      cgRef = CONNECTION_GRAPH::BuildFromFootprintSet( refSet, destSet );
+        auto                      cgTarget = CONNECTION_GRAPH::BuildFromFootprintSet( destSet, refSet );
+        TMATCH::COMPONENT_MATCHES topoOnly;
+        std::vector<TMATCH::TOPOLOGY_MISMATCH_REASON> details;
+        BOOST_REQUIRE_MESSAGE( !cgRef->FindIsomorphism( cgTarget.get(), topoOnly, details ),
+                               "Test precondition broken: areas are net isomorphic" );
+    }
+
+    PCB_GROUP* destGroup = new PCB_GROUP( m_board.get() );
+    destGroup->SetName( wxT( "design-block-dest" ) );
+    destGroup->AddItem( destFpA );
+    destGroup->AddItem( destFpB );
+    m_board->Add( destGroup );
+
+    RULE_AREA dbRA;
+    dbRA.m_sourceType = PLACEMENT_SOURCE_T::DESIGN_BLOCK;
+    dbRA.m_components.insert( refFpA );
+    dbRA.m_components.insert( refFpB );
+    dbRA.m_designBlockItems.insert( refFpA );
+    dbRA.m_designBlockItems.insert( refFpB );
+    dbRA.m_zone = new ZONE( m_board.get() );
+    dbRA.m_zone->SetIsRuleArea( true );
+    dbRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    dbRA.m_zone->AddPolygon(
+            KIGEOM::BoxToLineChain( BOX2I::ByCorners( VECTOR2I( pcbIUScale.mmToIU( -5 ), pcbIUScale.mmToIU( -5 ) ),
+                                                      VECTOR2I( pcbIUScale.mmToIU( 15 ), pcbIUScale.mmToIU( 5 ) ) ) ) );
+
+    RULE_AREA destRA;
+    destRA.m_sourceType = PLACEMENT_SOURCE_T::GROUP_PLACEMENT;
+    destRA.m_components.insert( destFpA );
+    destRA.m_components.insert( destFpB );
+    destRA.m_group = destGroup;
+    destRA.m_zone = new ZONE( m_board.get() );
+    destRA.m_zone->SetIsRuleArea( true );
+    destRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    destRA.m_zone->AddPolygon( KIGEOM::BoxToLineChain(
+            BOX2I::ByCorners( VECTOR2I( pcbIUScale.mmToIU( 40 ), pcbIUScale.mmToIU( 40 ) ),
+                              VECTOR2I( pcbIUScale.mmToIU( 90 ), pcbIUScale.mmToIU( 90 ) ) ) ) );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    REPEAT_LAYOUT_OPTIONS opts = { .m_copyRouting = true,
+                                   .m_connectedRoutingOnly = false,
+                                   .m_copyPlacement = true,
+                                   .m_copyOtherItems = true,
+                                   .m_groupItems = false,
+                                   .m_includeLockedItems = true,
+                                   .m_anchorFp = nullptr };
+
+    int result = mtTool->RepeatLayout( TOOL_EVENT(), dbRA, destRA, opts );
+
+    delete dbRA.m_zone;
+    delete destRA.m_zone;
+
+    BOOST_CHECK_MESSAGE( result >= 0, "Apply Design Block Layout aborted even though the symbol instance paths "
+                                      "give an unambiguous mapping (No compatible component regression)" );
+
+    // Correct pairing (J5->J1, J6->J2) reproduces the source 10mm spacing, a swap would give -10mm
+    VECTOR2I delta = destFpB->GetPosition() - destFpA->GetPosition();
+    BOOST_CHECK_MESSAGE( delta == VECTOR2I( pcbIUScale.mmToIU( 10 ), 0 ),
+                         wxString::Format( "Destination relative placement wrong, expected "
+                                           "(10mm,0) got (%d,%d) IU",
+                                           delta.x, delta.y ) );
+}
+
+
+/**
  * Apply Design Block Layout must keep a footprint's silkscreen text when the footprint has
  * several text items with the same string (issue 24583).
  *
@@ -1619,6 +1924,1252 @@ BOOST_FIXTURE_TEST_CASE( ApplyDesignBlockLayoutFootprintFreeReapplyReplaces, MUL
     BOOST_CHECK_MESSAGE( rects == 2, wxString::Format( "Re-apply stacked copies: expected 2 rectangles "
                                                        "(source + 1 copy), found %d (issue 24592)",
                                                        rects ) );
+}
+
+
+/**
+ * Applying a design block layout must not delete routing owned by another group. When several
+ * instances of the same block overlap (e.g. stacked right after Update PCB) the target area
+ * encloses a sibling instance's traces. Removing them made each apply wipe the previously applied
+ * instance's routing, so only the last instance kept its layout (issue 24767). Loose routing
+ * without a net is unrelated to the block and survives too (issue 24944).
+ */
+BOOST_FIXTURE_TEST_CASE( ApplyDesignBlockLayoutKeepsOtherGroupRouting, MULTICHANNEL_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetEnabledLayers( LSET::AllCuMask() | LSET::AllTechMask() );
+
+    NETINFO_ITEM* net = new NETINFO_ITEM( m_board.get(), wxT( "NET1" ), 1 );
+    m_board->Add( net );
+
+    // Source block: one track centered on origin.
+    PCB_TRACK* srcTrack = new PCB_TRACK( m_board.get() );
+    srcTrack->SetLayer( F_Cu );
+    srcTrack->SetWidth( pcbIUScale.mmToIU( 0.25 ) );
+    srcTrack->SetStart( VECTOR2I( pcbIUScale.mmToIU( -2 ), 0 ) );
+    srcTrack->SetEnd( VECTOR2I( pcbIUScale.mmToIU( 2 ), 0 ) );
+    srcTrack->SetNet( net );
+    m_board->Add( srcTrack );
+
+    // Destination group with a placeholder so the group exists.
+    PCB_SHAPE* destPlaceholder = new PCB_SHAPE( m_board.get(), SHAPE_T::SEGMENT );
+    destPlaceholder->SetStart( VECTOR2I( pcbIUScale.mmToIU( 49 ), pcbIUScale.mmToIU( 49 ) ) );
+    destPlaceholder->SetEnd( VECTOR2I( pcbIUScale.mmToIU( 51 ), pcbIUScale.mmToIU( 49 ) ) );
+    destPlaceholder->SetLayer( F_SilkS );
+    destPlaceholder->SetStroke( STROKE_PARAMS( pcbIUScale.mmToIU( 0.15 ), LINE_STYLE::SOLID ) );
+    m_board->Add( destPlaceholder );
+
+    PCB_GROUP* destGroup = new PCB_GROUP( m_board.get() );
+    destGroup->SetName( wxT( "design-block-dest" ) );
+    destGroup->AddItem( destPlaceholder );
+    m_board->Add( destGroup );
+
+    // A sibling instance's track, inside the destination area but owned by another group.
+    PCB_TRACK* siblingTrack = new PCB_TRACK( m_board.get() );
+    siblingTrack->SetLayer( F_Cu );
+    siblingTrack->SetWidth( pcbIUScale.mmToIU( 0.25 ) );
+    siblingTrack->SetStart( VECTOR2I( pcbIUScale.mmToIU( 47 ), pcbIUScale.mmToIU( 47 ) ) );
+    siblingTrack->SetEnd( VECTOR2I( pcbIUScale.mmToIU( 49 ), pcbIUScale.mmToIU( 47 ) ) );
+    m_board->Add( siblingTrack );
+
+    PCB_GROUP* siblingGroup = new PCB_GROUP( m_board.get() );
+    siblingGroup->SetName( wxT( "design-block-sibling" ) );
+    siblingGroup->AddItem( siblingTrack );
+    m_board->Add( siblingGroup );
+
+    // Loose, ungrouped routing without a net inside the destination area, unrelated to the block.
+    PCB_TRACK* looseTrack = new PCB_TRACK( m_board.get() );
+    looseTrack->SetLayer( F_Cu );
+    looseTrack->SetWidth( pcbIUScale.mmToIU( 0.25 ) );
+    looseTrack->SetStart( VECTOR2I( pcbIUScale.mmToIU( 47 ), pcbIUScale.mmToIU( 53 ) ) );
+    looseTrack->SetEnd( VECTOR2I( pcbIUScale.mmToIU( 49 ), pcbIUScale.mmToIU( 53 ) ) );
+    m_board->Add( looseTrack );
+
+    RULE_AREA dbRA;
+    dbRA.m_sourceType = PLACEMENT_SOURCE_T::DESIGN_BLOCK;
+    dbRA.m_designBlockItems.insert( srcTrack );
+
+    dbRA.m_zone = new ZONE( m_board.get() );
+    dbRA.m_zone->SetIsRuleArea( true );
+    dbRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    dbRA.m_zone->AddPolygon(
+            KIGEOM::BoxToLineChain( BOX2I::ByCorners( VECTOR2I( pcbIUScale.mmToIU( -5 ), pcbIUScale.mmToIU( -5 ) ),
+                                                      VECTOR2I( pcbIUScale.mmToIU( 5 ), pcbIUScale.mmToIU( 5 ) ) ) ) );
+    dbRA.m_center = dbRA.m_zone->Outline()->COutline( 0 ).Centre();
+
+    RULE_AREA destRA;
+    destRA.m_sourceType = PLACEMENT_SOURCE_T::GROUP_PLACEMENT;
+    destRA.m_group = destGroup;
+
+    destRA.m_zone = new ZONE( m_board.get() );
+    destRA.m_zone->SetIsRuleArea( true );
+    destRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    destRA.m_zone->AddPolygon( KIGEOM::BoxToLineChain(
+            BOX2I::ByCorners( VECTOR2I( pcbIUScale.mmToIU( 45 ), pcbIUScale.mmToIU( 45 ) ),
+                              VECTOR2I( pcbIUScale.mmToIU( 55 ), pcbIUScale.mmToIU( 55 ) ) ) ) );
+    destRA.m_center = destRA.m_zone->Outline()->COutline( 0 ).Centre();
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    REPEAT_LAYOUT_OPTIONS opts = { .m_copyRouting = true,
+                                   .m_connectedRoutingOnly = false,
+                                   .m_copyPlacement = true,
+                                   .m_copyOtherItems = true,
+                                   .m_groupItems = false,
+                                   .m_includeLockedItems = true,
+                                   .m_anchorFp = nullptr };
+
+    wxString err;
+    int      result = mtTool->RepeatLayout( TOOL_EVENT(), dbRA, destRA, opts, nullptr, &err );
+
+    delete dbRA.m_zone;
+    delete destRA.m_zone;
+
+    BOOST_REQUIRE_MESSAGE( result >= 0, wxString::Format( "RepeatLayout failed: %s", err ) );
+
+    // Pointers to removed tracks are deleted, so count survivors by location instead.
+    int siblingTracks = 0;
+    int looseTracks = 0;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        int y = track->GetStart().y;
+
+        if( y > pcbIUScale.mmToIU( 46 ) && y < pcbIUScale.mmToIU( 48 ) )
+            siblingTracks++;
+        else if( y > pcbIUScale.mmToIU( 52 ) && y < pcbIUScale.mmToIU( 54 ) )
+            looseTracks++;
+    }
+
+    BOOST_CHECK_MESSAGE( siblingTracks == 1,
+                         wxString::Format( "Sibling group routing was deleted (issue 24767): found %d, expected 1",
+                                           siblingTracks ) );
+    BOOST_CHECK_MESSAGE( looseTracks == 1,
+                         wxString::Format( "Loose no-net routing in the target area was deleted (issue 24944): "
+                                           "found %d, expected 1",
+                                           looseTracks ) );
+}
+
+
+/**
+ * Applying a design block layout must not rip up unrelated circuitry that merely sits inside the
+ * group's bounding area (issue 24944). Only routing owned by the target group or loose routing on
+ * the group's own nets is replaced. Locked bystander tracks are never removed.
+ */
+BOOST_FIXTURE_TEST_CASE( ApplyDesignBlockLayoutKeepsUnrelatedRouting, MULTICHANNEL_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetEnabledLayers( LSET::AllCuMask() | LSET::AllTechMask() );
+
+    NETINFO_ITEM* net1 = new NETINFO_ITEM( m_board.get(), wxT( "NET1" ), 1 );
+    NETINFO_ITEM* net2 = new NETINFO_ITEM( m_board.get(), wxT( "NET2" ), 2 );
+    m_board->Add( net1 );
+    m_board->Add( net2 );
+
+    auto addTrack = [&]( double aStartX, double aStartY, double aEndX, double aEndY, NETINFO_ITEM* aNet )
+    {
+        PCB_TRACK* track = new PCB_TRACK( m_board.get() );
+        track->SetLayer( F_Cu );
+        track->SetWidth( pcbIUScale.mmToIU( 0.25 ) );
+        track->SetStart( VECTOR2I( pcbIUScale.mmToIU( aStartX ), pcbIUScale.mmToIU( aStartY ) ) );
+        track->SetEnd( VECTOR2I( pcbIUScale.mmToIU( aEndX ), pcbIUScale.mmToIU( aEndY ) ) );
+        track->SetNet( aNet );
+        m_board->Add( track );
+        return track;
+    };
+
+    // Source block: one track centered on origin.
+    PCB_TRACK* srcTrack = addTrack( -2, 0, 2, 0, net1 );
+
+    // Destination group with a placeholder and its own routing from a previous apply.
+    PCB_SHAPE* destPlaceholder = new PCB_SHAPE( m_board.get(), SHAPE_T::SEGMENT );
+    destPlaceholder->SetStart( VECTOR2I( pcbIUScale.mmToIU( 49 ), pcbIUScale.mmToIU( 49 ) ) );
+    destPlaceholder->SetEnd( VECTOR2I( pcbIUScale.mmToIU( 51 ), pcbIUScale.mmToIU( 49 ) ) );
+    destPlaceholder->SetLayer( F_SilkS );
+    destPlaceholder->SetStroke( STROKE_PARAMS( pcbIUScale.mmToIU( 0.15 ), LINE_STYLE::SOLID ) );
+    m_board->Add( destPlaceholder );
+
+    PCB_TRACK* prevTrack = addTrack( 46, 49, 48, 49, net1 );
+
+    PCB_GROUP* destGroup = new PCB_GROUP( m_board.get() );
+    destGroup->SetName( wxT( "design-block-dest" ) );
+    destGroup->AddItem( destPlaceholder );
+    destGroup->AddItem( prevTrack );
+    m_board->Add( destGroup );
+
+    // Bystanders inside the destination area: a track on an unrelated net and a locked track.
+    // Both must survive the apply (issue 24944).
+    addTrack( 46, 47, 48, 47, net2 );
+
+    PCB_TRACK* lockedTrack = addTrack( 46, 51.5, 48, 51.5, net1 );
+    lockedTrack->SetLocked( true );
+
+    // Loose routing on the group's own net, a stale user tweak, which still gets replaced.
+    addTrack( 46, 53, 48, 53, net1 );
+
+    RULE_AREA dbRA;
+    dbRA.m_sourceType = PLACEMENT_SOURCE_T::DESIGN_BLOCK;
+    dbRA.m_designBlockItems.insert( srcTrack );
+
+    dbRA.m_zone = new ZONE( m_board.get() );
+    dbRA.m_zone->SetIsRuleArea( true );
+    dbRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    dbRA.m_zone->AddPolygon(
+            KIGEOM::BoxToLineChain( BOX2I::ByCorners( VECTOR2I( pcbIUScale.mmToIU( -5 ), pcbIUScale.mmToIU( -5 ) ),
+                                                      VECTOR2I( pcbIUScale.mmToIU( 5 ), pcbIUScale.mmToIU( 5 ) ) ) ) );
+    dbRA.m_center = dbRA.m_zone->Outline()->COutline( 0 ).Centre();
+
+    RULE_AREA destRA;
+    destRA.m_sourceType = PLACEMENT_SOURCE_T::GROUP_PLACEMENT;
+    destRA.m_group = destGroup;
+
+    destRA.m_zone = new ZONE( m_board.get() );
+    destRA.m_zone->SetIsRuleArea( true );
+    destRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    destRA.m_zone->AddPolygon( KIGEOM::BoxToLineChain(
+            BOX2I::ByCorners( VECTOR2I( pcbIUScale.mmToIU( 45 ), pcbIUScale.mmToIU( 45 ) ),
+                              VECTOR2I( pcbIUScale.mmToIU( 55 ), pcbIUScale.mmToIU( 55 ) ) ) ) );
+    destRA.m_center = destRA.m_zone->Outline()->COutline( 0 ).Centre();
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    REPEAT_LAYOUT_OPTIONS opts = { .m_copyRouting = true,
+                                   .m_connectedRoutingOnly = false,
+                                   .m_copyPlacement = true,
+                                   .m_copyOtherItems = true,
+                                   .m_groupItems = false,
+                                   .m_includeLockedItems = true,
+                                   .m_anchorFp = nullptr };
+
+    wxString err;
+    int      result = mtTool->RepeatLayout( TOOL_EVENT(), dbRA, destRA, opts, nullptr, &err );
+
+    delete dbRA.m_zone;
+    delete destRA.m_zone;
+
+    BOOST_REQUIRE_MESSAGE( result >= 0, wxString::Format( "RepeatLayout failed: %s", err ) );
+
+    // Pointers to removed tracks are deleted, so count survivors by location instead.
+    int unrelatedTracks = 0;
+    int prevTracks = 0;
+    int copiedTracks = 0;
+    int lockedTracks = 0;
+    int staleTweakTracks = 0;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        int y = track->GetStart().y;
+
+        if( y > pcbIUScale.mmToIU( 46.5 ) && y < pcbIUScale.mmToIU( 47.5 ) )
+            unrelatedTracks++;
+        else if( y > pcbIUScale.mmToIU( 48.5 ) && y < pcbIUScale.mmToIU( 49.5 ) )
+            prevTracks++;
+        else if( y > pcbIUScale.mmToIU( 49.5 ) && y < pcbIUScale.mmToIU( 50.5 ) )
+            copiedTracks++;
+        else if( y > pcbIUScale.mmToIU( 51 ) && y < pcbIUScale.mmToIU( 52 ) )
+            lockedTracks++;
+        else if( y > pcbIUScale.mmToIU( 52.5 ) && y < pcbIUScale.mmToIU( 53.5 ) )
+            staleTweakTracks++;
+    }
+
+    BOOST_CHECK_MESSAGE( unrelatedTracks == 1,
+                         wxString::Format( "Unrelated net routing in the target area was deleted (issue 24944): "
+                                           "found %d, expected 1",
+                                           unrelatedTracks ) );
+    BOOST_CHECK_MESSAGE( lockedTracks == 1,
+                         wxString::Format( "Locked bystander routing in the target area was deleted (issue 24944): "
+                                           "found %d, expected 1",
+                                           lockedTracks ) );
+    BOOST_CHECK_MESSAGE(
+            prevTracks == 0,
+            wxString::Format( "The group's own routing should be replaced: found %d, expected 0", prevTracks ) );
+    BOOST_CHECK_MESSAGE( staleTweakTracks == 0,
+                         wxString::Format( "Loose routing on the group's nets should be replaced: found %d, "
+                                           "expected 0",
+                                           staleTweakTracks ) );
+    BOOST_CHECK_MESSAGE( copiedTracks == 1,
+                         wxString::Format( "Block routing was not copied into the target area: found %d, expected 1",
+                                           copiedTracks ) );
+}
+
+
+/**
+ * Repeat layout must refuse a target Rule Area that resolves to the same components as the
+ * reference area (issue 22318). The repro board has four placement rule areas all bound to the
+ * same sheet "/test sheet 1/", so each resolves to the identical footprint set; copying one onto
+ * another would move and delete the reference's own items.
+ */
+BOOST_FIXTURE_TEST_CASE( RepeatLayoutRefusesDuplicatePlacementAreas, MULTICHANNEL_TEST_FIXTURE )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "issue22318/issue22318", m_board );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    mtTool->FindExistingRuleAreas();
+
+    auto ruleData = mtTool->GetData();
+
+    BOOST_TEST_MESSAGE( wxString::Format( "Found %d rule areas",
+                                          static_cast<int>( ruleData->m_areas.size() ) ) );
+
+    BOOST_REQUIRE_EQUAL( ruleData->m_areas.size(), 4 );
+
+    // The shared membership, not the exact count, is what makes the areas invalid targets.
+    const size_t sharedCount = ruleData->m_areas.front().m_components.size();
+
+    BOOST_REQUIRE( sharedCount > 0 );
+
+    for( const RULE_AREA& ra : ruleData->m_areas )
+        BOOST_CHECK_EQUAL( ra.m_components.size(), sharedCount );
+
+    RULE_AREA* refArea = &ruleData->m_areas.front();
+
+    BOOST_REQUIRE( mtTool->CheckRACompatibility( refArea->m_zone ) >= 0 );
+
+    BOOST_REQUIRE_EQUAL( ruleData->m_compatMap.size(), ruleData->m_areas.size() - 1 );
+
+    for( const auto& [targetArea, compatData] : ruleData->m_compatMap )
+    {
+        BOOST_CHECK_MESSAGE( !compatData.m_isOk,
+                             "Duplicate placement area was wrongly reported as a valid copy target "
+                             "(issue 22318)" );
+        BOOST_CHECK( !compatData.m_mismatchReasons.empty() );
+    }
+
+    // The single-target overload must also refuse rather than corrupt the board.
+    RULE_AREA* targetArea = &ruleData->m_areas[1];
+
+    REPEAT_LAYOUT_OPTIONS opts;
+    wxString              err;
+
+    int result = mtTool->RepeatLayout( TOOL_EVENT(), *refArea, *targetArea, opts, nullptr, &err );
+
+    BOOST_CHECK_MESSAGE( result < 0,
+                         "RepeatLayout copied a Rule Area onto an identical-component area "
+                         "(issue 22318)" );
+    BOOST_CHECK( !err.IsEmpty() );
+}
+
+
+/**
+ * Repeat layout with "group items with their target rule areas" must not duplicate unrelated
+ * user groups that merely overlap the source rule area (issue 22316).
+ *
+ * The fixture has four sheet-based rule areas ("test 1".."test 4") and three user groups
+ * ("test group A/B/C") that contain footprints and tracks.  Some of those grouped tracks fall
+ * geometrically inside the source rule area, so the copy-routing pass duplicates them.  The bug
+ * was that cloning the parent group of any single copied item produced partial "phantom" clones
+ * of the unrelated user groups.  After the fix, a source group is only reconstructed in the
+ * target when all of its members are part of the copied layout.
+ */
+BOOST_FIXTURE_TEST_CASE( RepeatLayoutDoesNotDuplicateUnrelatedGroups, MULTICHANNEL_TEST_FIXTURE )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "issue22316/issue22316", m_board );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    mtTool->FindExistingRuleAreas();
+
+    auto ruleData = mtTool->GetData();
+
+    BOOST_TEST_MESSAGE( wxString::Format( "Found %d rule areas",
+                                          static_cast<int>( ruleData->m_areas.size() ) ) );
+
+    BOOST_REQUIRE_EQUAL( ruleData->m_areas.size(), 4 );
+
+    RULE_AREA* refArea = nullptr;
+
+    for( RULE_AREA& ra : ruleData->m_areas )
+    {
+        if( ra.m_ruleName == wxT( "test 1" ) )
+            refArea = &ra;
+    }
+
+    BOOST_REQUIRE( refArea != nullptr );
+
+    std::set<KIID>     groupUuidsBefore;
+    std::set<wxString> userGroupNamesBefore;
+
+    for( PCB_GROUP* group : m_board->Groups() )
+    {
+        groupUuidsBefore.insert( group->m_Uuid );
+
+        if( !group->GetName().IsEmpty() )
+            userGroupNamesBefore.insert( group->GetName() );
+    }
+
+    mtTool->CheckRACompatibility( refArea->m_zone );
+
+    for( auto& [targetArea, compatData] : ruleData->m_compatMap )
+        compatData.m_doCopy = true;
+
+    ruleData->m_options.m_copyPlacement = true;
+    ruleData->m_options.m_copyRouting = true;
+    ruleData->m_options.m_copyOtherItems = true;
+    ruleData->m_options.m_groupItems = true;
+    ruleData->m_options.m_includeLockedItems = true;
+
+    int result = mtTool->RepeatLayout( TOOL_EVENT(), refArea->m_zone );
+
+    BOOST_REQUIRE( result >= 0 );
+
+    int clonedUserGroups = 0;
+
+    for( PCB_GROUP* group : m_board->Groups() )
+    {
+        bool isNew = !groupUuidsBefore.contains( group->m_Uuid );
+
+        if( isNew && userGroupNamesBefore.contains( group->GetName() ) )
+            clonedUserGroups++;
+    }
+
+    BOOST_CHECK_MESSAGE( clonedUserGroups == 0,
+                         wxString::Format( "Repeat layout cloned %d unrelated user groups "
+                                           "(issue 22316)",
+                                           clonedUserGroups ) );
+}
+
+
+/**
+ * Two channels of the same hierarchical sheet can have genuinely different internal connectivity
+ * when one channel's hierarchical pins are externally looped together on the parent sheet
+ * (issue 24192).  In that case the topology match correctly fails, but the failure message must
+ * explain the real connectivity difference instead of a generic "no compatible component found"
+ * message that wrongly implies a missing or differently-counted part.
+ */
+BOOST_FIXTURE_TEST_CASE( TopoMatchExternalLoopReportsConnectivity, MULTICHANNEL_TEST_FIXTURE )
+{
+    using TMATCH::CONNECTION_GRAPH;
+
+    KI_TEST::LoadBoard( m_settingsManager, "issue24192/issue24192", m_board );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    mtTool->FindExistingRuleAreas();
+
+    auto ruleData = mtTool->GetData();
+
+    BOOST_REQUIRE_EQUAL( ruleData->m_areas.size(), 2 );
+
+    RULE_AREA* refArea = nullptr;
+    RULE_AREA* targetArea = nullptr;
+
+    for( RULE_AREA& ra : ruleData->m_areas )
+    {
+        if( ra.m_ruleName.Contains( wxT( "Untitled Sheet/" ) ) )
+            refArea = &ra;
+        else if( ra.m_ruleName.Contains( wxT( "Untitled Sheet1/" ) ) )
+            targetArea = &ra;
+    }
+
+    BOOST_REQUIRE( refArea != nullptr );
+    BOOST_REQUIRE( targetArea != nullptr );
+
+    // The component counts are identical; only the internal connectivity differs.
+    BOOST_CHECK_EQUAL( refArea->m_components.size(), targetArea->m_components.size() );
+
+    auto cgRef = CONNECTION_GRAPH::BuildFromFootprintSet( refArea->m_components,
+                                                          targetArea->m_components );
+    auto cgTarget = CONNECTION_GRAPH::BuildFromFootprintSet( targetArea->m_components,
+                                                             refArea->m_components );
+
+    TMATCH::COMPONENT_MATCHES result;
+    std::vector<TMATCH::TOPOLOGY_MISMATCH_REASON> details;
+    bool status = cgRef->FindIsomorphism( cgTarget.get(), result, details );
+
+    // The topology genuinely differs, so matching must fail and produce a reason.
+    BOOST_CHECK( !status );
+    BOOST_REQUIRE( !details.empty() );
+
+    // Collect the reference designators that belong to each channel so we can verify the
+    // reason's reference/candidate orientation matches the ref/target areas.
+    std::set<wxString> refRefDes;
+    std::set<wxString> targetRefDes;
+
+    for( FOOTPRINT* fp : refArea->m_components )
+        refRefDes.insert( fp->GetReference() );
+
+    for( FOOTPRINT* fp : targetArea->m_components )
+        targetRefDes.insert( fp->GetReference() );
+
+    bool sawConnectivityReason = false;
+
+    for( const auto& reason : details )
+    {
+        BOOST_TEST_MESSAGE( wxString::Format( "reason: %s <-> %s: %s", reason.m_reference,
+                                              reason.m_candidate, reason.m_reason ) );
+
+        // The generic fallback message must no longer be the only thing reported; instead the
+        // connectivity difference detected by the per-pad isomorphism check must surface.
+        BOOST_CHECK( !reason.m_reason.Contains( wxT( "No compatible component found" ) ) );
+
+        if( reason.m_reason.Contains( wxT( "connects to" ) )
+            || reason.m_reason.Contains( wxT( "connectivity" ) ) )
+        {
+            sawConnectivityReason = true;
+
+            // The reference designator in the reason must come from the reference channel and
+            // the candidate from the target channel, not the other way around (codex-review).
+            BOOST_CHECK_MESSAGE( refRefDes.count( reason.m_reference ) > 0,
+                                 wxString::Format( "Reason reference '%s' should be a reference-area "
+                                                   "component", reason.m_reference ) );
+            BOOST_CHECK_MESSAGE( targetRefDes.count( reason.m_candidate ) > 0,
+                                 wxString::Format( "Reason candidate '%s' should be a target-area "
+                                                   "component", reason.m_candidate ) );
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( sawConnectivityReason,
+                         "Topology mismatch message should explain the connectivity difference "
+                         "rather than report a generic missing-component error (issue 24192)" );
+}
+
+
+/**
+ * Issue 24767: three copies of one design block, but apply works for only two of them.
+ * The block's auto net name Net-(D3-A) clashes with a same name net on a different part in
+ * the copy. They get merged, the matcher then drops them, and the wiring no longer matches.
+ * Isolating the block's auto nets before matching lets every copy apply.
+ */
+BOOST_FIXTURE_TEST_CASE( TopoMatchCollidingAutoNetName, MULTICHANNEL_TEST_FIXTURE )
+{
+    using TMATCH::CONNECTION_GRAPH;
+
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+
+    auto addNet = [&]( const wxString& aName ) -> int
+    {
+        NETINFO_ITEM* net = new NETINFO_ITEM( board.get(), aName );
+        board->Add( net );
+        return net->GetNetCode();
+    };
+
+    const int netGnd = addNet( wxT( "GND" ) );
+    const int netP3V3 = addNet( wxT( "+3V3" ) );
+    const int netCollide = addNet( wxT( "Net-(D3-A)" ) ); // shared name, lands on a different part
+    const int netRefY = addNet( wxT( "Net-(D4-A)" ) );    // block other LED anode
+    const int netTgtX = addNet( wxT( "Net-(D2-A)" ) );    // copy other LED anode
+
+    LIB_ID ledAId( wxT( "TestLib" ), wxT( "LED_A" ) );
+    LIB_ID ledBId( wxT( "TestLib" ), wxT( "LED_B" ) );
+    LIB_ID resId( wxT( "TestLib" ), wxT( "R" ) );
+
+    auto addPad = [&]( FOOTPRINT* fp, const wxString& aNum, int aNet )
+    {
+        PAD* pad = new PAD( fp );
+        pad->SetNumber( aNum );
+        pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ) );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetNetCode( aNet );
+        fp->Add( pad );
+    };
+
+    auto addFp = [&]( const LIB_ID& aId, const wxString& aRef ) -> FOOTPRINT*
+    {
+        FOOTPRINT* fp = new FOOTPRINT( board.get() );
+        fp->SetFPID( aId );
+        fp->SetReference( aRef );
+        board->Add( fp );
+        return fp;
+    };
+
+    // One LED plus its series resistor. The LED anode net is the one that can clash.
+    auto addLedAndRes = [&]( const LIB_ID& aLedId, const wxString& aLedRef, const wxString& aResRef, int aAnodeNet,
+                             std::set<FOOTPRINT*>& aSet )
+    {
+        FOOTPRINT* led = addFp( aLedId, aLedRef );
+        addPad( led, wxT( "1" ), netGnd );
+        addPad( led, wxT( "2" ), aAnodeNet );
+        aSet.insert( led );
+
+        FOOTPRINT* res = addFp( resId, aResRef );
+        addPad( res, wxT( "1" ), aAnodeNet );
+        addPad( res, wxT( "2" ), netP3V3 );
+        aSet.insert( res );
+    };
+
+    // The block: LED_A is D3 on the clashing net, LED_B is D4 on its own net.
+    std::set<FOOTPRINT*> refFps;
+    addLedAndRes( ledAId, wxT( "D3" ), wxT( "R27" ), netCollide, refFps );
+    addLedAndRes( ledBId, wxT( "D4" ), wxT( "R30" ), netRefY, refFps );
+
+    // The copy: same parts, but the clashing name now sits on LED_B (D3), a different part.
+    std::set<FOOTPRINT*> tgtFps;
+    addLedAndRes( ledAId, wxT( "D2" ), wxT( "R1" ), netTgtX, tgtFps );
+    addLedAndRes( ledBId, wxT( "D3" ), wxT( "R2" ), netCollide, tgtFps );
+
+    // The fix gives the block's auto nets private names so they cannot clash with the copy.
+    std::unordered_set<EDA_ITEM*> refItems( refFps.begin(), refFps.end() );
+    MULTICHANNEL_TOOL::IsolateDesignBlockAutoNets( board.get(), refFps, refItems );
+
+    auto cgRef = CONNECTION_GRAPH::BuildFromFootprintSet( refFps, tgtFps );
+    auto cgTarget = CONNECTION_GRAPH::BuildFromFootprintSet( tgtFps, refFps );
+
+    TMATCH::COMPONENT_MATCHES                     result;
+    std::vector<TMATCH::TOPOLOGY_MISMATCH_REASON> details;
+    bool                                          status = cgRef->FindIsomorphism( cgTarget.get(), result, details );
+
+    if( !status )
+    {
+        for( const auto& reason : details )
+        {
+            BOOST_TEST_MESSAGE( wxString::Format( "Mismatch: %s to %s: %s", reason.m_reference, reason.m_candidate,
+                                                  reason.m_reason ) );
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( status, "Topology match failed even after isolating the block's auto nets "
+                                 "(issue 24767)" );
+    BOOST_CHECK_EQUAL( result.size(), refFps.size() );
+}
+
+
+/**
+ * Four single-pad footprints, identical except for their value (NC_0 / NC_1 / NO_0 / NO_1), used
+ * to pair arbitrarily and swap NC with NO. The value breaks the tie. Regression test for the
+ * "design blocks swap the schematic-to-PCB link" report.
+ */
+BOOST_FIXTURE_TEST_CASE( TopoMatchTieBreaksIdenticalPartsByValue, MULTICHANNEL_TEST_FIXTURE )
+{
+    using TMATCH::CONNECTION_GRAPH;
+
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+
+    const LIB_ID receptacleId( wxT( "Don-Con" ), wxT( "Mill-Max-Pin_Receptacle" ) );
+
+    // Unique net per footprint, so the four are a topological tie and only the value differs.
+    auto makeReceptacle = [&]( const wxString& aRef, const wxString& aValue, bool aWithSymbolPath ) -> FOOTPRINT*
+    {
+        FOOTPRINT* fp = new FOOTPRINT( board.get() );
+        fp->SetFPID( receptacleId );
+        fp->SetReference( aRef );
+        fp->SetValue( aValue );
+
+        if( aWithSymbolPath )
+        {
+            KIID_PATH path;
+            path.push_back( KIID() );
+            fp->SetPath( path );
+        }
+
+        NETINFO_ITEM* net = new NETINFO_ITEM( board.get(), wxString::Format( "net_%s", aRef ) );
+        board->Add( net );
+
+        PAD* pad = new PAD( fp );
+        pad->SetNumber( wxT( "1" ) );
+        pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ) );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetNet( net );
+        fp->Add( pad );
+
+        board->Add( fp );
+        return fp;
+    };
+
+    // Block source: no symbol path (as after AppendBoard). Fixed order keeps the test deterministic.
+    FOOTPRINT* refNC0 = makeReceptacle( wxT( "J3" ), wxT( "NC_0" ), false );
+    FOOTPRINT* refNC1 = makeReceptacle( wxT( "J5" ), wxT( "NC_1" ), false );
+    FOOTPRINT* refNO0 = makeReceptacle( wxT( "J6" ), wxT( "NO_0" ), false );
+    FOOTPRINT* refNO1 = makeReceptacle( wxT( "J7" ), wxT( "NO_1" ), false );
+
+    // Target refdes order is the reverse of value order, so a refdes fallback would swap NC and NO.
+    FOOTPRINT* tgtNO1 = makeReceptacle( wxT( "J20" ), wxT( "NO_1" ), true );
+    FOOTPRINT* tgtNO0 = makeReceptacle( wxT( "J21" ), wxT( "NO_0" ), true );
+    FOOTPRINT* tgtNC1 = makeReceptacle( wxT( "J22" ), wxT( "NC_1" ), true );
+    FOOTPRINT* tgtNC0 = makeReceptacle( wxT( "J23" ), wxT( "NC_0" ), true );
+
+    auto cgRef = std::make_unique<CONNECTION_GRAPH>();
+    cgRef->AddFootprint( refNC0, VECTOR2I( 0, 0 ) );
+    cgRef->AddFootprint( refNC1, VECTOR2I( 0, 0 ) );
+    cgRef->AddFootprint( refNO0, VECTOR2I( 0, 0 ) );
+    cgRef->AddFootprint( refNO1, VECTOR2I( 0, 0 ) );
+    cgRef->BuildConnectivity();
+
+    auto cgTarget = std::make_unique<CONNECTION_GRAPH>();
+    cgTarget->AddFootprint( tgtNO1, VECTOR2I( 0, 0 ) );
+    cgTarget->AddFootprint( tgtNO0, VECTOR2I( 0, 0 ) );
+    cgTarget->AddFootprint( tgtNC1, VECTOR2I( 0, 0 ) );
+    cgTarget->AddFootprint( tgtNC0, VECTOR2I( 0, 0 ) );
+    cgTarget->BuildConnectivity();
+
+    TMATCH::COMPONENT_MATCHES                     result;
+    std::vector<TMATCH::TOPOLOGY_MISMATCH_REASON> details;
+    bool                                          status = cgRef->FindIsomorphism( cgTarget.get(), result, details );
+
+    BOOST_CHECK( status );
+    BOOST_CHECK_EQUAL( result.size(), 4 );
+
+    // Each reference must match the same-value target.
+    for( const auto& [refFp, targetFp] : result )
+    {
+        BOOST_TEST_MESSAGE( wxString::Format( "%s (%s) -> %s (%s)", refFp->GetReference(), refFp->GetValue(),
+                                              targetFp->GetReference(), targetFp->GetValue() ) );
+
+        BOOST_CHECK_EQUAL( refFp->GetValue(), targetFp->GetValue() );
+    }
+}
+
+
+/**
+ * Same identical footprints, but run through the full Apply Design Block Layout. The destination
+ * is placed as a mirror of the block, and applying must un-mirror it rather than keep the swap.
+ */
+BOOST_FIXTURE_TEST_CASE( ApplyDesignBlockLayoutUnmirrorsIdenticalReceptacles, MULTICHANNEL_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetEnabledLayers( LSET::AllCuMask() | LSET::AllTechMask() );
+
+    auto makeReceptacle = [&]( const wxString& aRef, const wxString& aValue, const VECTOR2I& aPos,
+                               bool aWithSymbolPath ) -> FOOTPRINT*
+    {
+        FOOTPRINT* fp = new FOOTPRINT( m_board.get() );
+        fp->SetFPID( LIB_ID( wxT( "Don-Con" ), wxT( "Mill-Max-Pin_Receptacle" ) ) );
+        fp->SetReference( aRef );
+        fp->SetValue( aValue );
+        fp->SetPosition( aPos );
+
+        if( aWithSymbolPath )
+        {
+            KIID_PATH path;
+            path.push_back( KIID() );
+            fp->SetPath( path );
+        }
+
+        NETINFO_ITEM* net = new NETINFO_ITEM( m_board.get(), wxString::Format( "net_%s", aRef ) );
+        m_board->Add( net );
+
+        PAD* pad = new PAD( fp );
+        pad->SetNumber( wxT( "1" ) );
+        pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ) );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetNet( net );
+        pad->SetPosition( aPos );
+        fp->Add( pad );
+
+        m_board->Add( fp );
+        return fp;
+    };
+
+    auto mm = []( double a, double b )
+    {
+        return VECTOR2I( pcbIUScale.mmToIU( a ), pcbIUScale.mmToIU( b ) );
+    };
+
+    // Signed area of NC_0, NC_1, NO_0. Same sign as the block is correct, opposite sign is a mirror.
+    auto chirality = []( const VECTOR2I& aNC0, const VECTOR2I& aNC1, const VECTOR2I& aNO0 ) -> double
+    {
+        return (double) ( aNC1.x - aNC0.x ) * ( aNO0.y - aNC0.y ) - (double) ( aNC1.y - aNC0.y ) * ( aNO0.x - aNC0.x );
+    };
+
+    // Block source: the reference arrangement, no symbol path (as after AppendBoard).
+    FOOTPRINT* srcNC0 = makeReceptacle( wxT( "J3" ), wxT( "NC_0" ), mm( 0, 0 ), false );
+    FOOTPRINT* srcNC1 = makeReceptacle( wxT( "J5" ), wxT( "NC_1" ), mm( 0, 7.9 ), false );
+    FOOTPRINT* srcNO0 = makeReceptacle( wxT( "J6" ), wxT( "NO_0" ), mm( -3.58, 2.28 ), false );
+    FOOTPRINT* srcNO1 = makeReceptacle( wxT( "J7" ), wxT( "NO_1" ), mm( 3.58, 5.62 ), false );
+
+    const double srcChir = chirality( srcNC0->GetPosition(), srcNC1->GetPosition(), srcNO0->GetPosition() );
+
+    // Destination placed as a mirror (NO_0 / NO_1 reflected across the NC axis).
+    FOOTPRINT* dstNC0 = makeReceptacle( wxT( "J8" ), wxT( "NC_0" ), mm( 40, 40 ), true );
+    FOOTPRINT* dstNC1 = makeReceptacle( wxT( "J9" ), wxT( "NC_1" ), mm( 40, 47.9 ), true );
+    FOOTPRINT* dstNO0 = makeReceptacle( wxT( "J10" ), wxT( "NO_0" ), mm( 43.58, 42.28 ), true );
+    FOOTPRINT* dstNO1 = makeReceptacle( wxT( "J11" ), wxT( "NO_1" ), mm( 36.42, 45.62 ), true );
+
+    BOOST_REQUIRE_LT( srcChir * chirality( dstNC0->GetPosition(), dstNC1->GetPosition(), dstNO0->GetPosition() ), 0.0 );
+
+    PCB_GROUP* destGroup = new PCB_GROUP( m_board.get() );
+    destGroup->SetName( wxT( "Pin receptacles for safety switch" ) );
+
+    for( FOOTPRINT* fp : { dstNC0, dstNC1, dstNO0, dstNO1 } )
+        destGroup->AddItem( fp );
+
+    m_board->Add( destGroup );
+
+    RULE_AREA dbRA;
+    dbRA.m_sourceType = PLACEMENT_SOURCE_T::DESIGN_BLOCK;
+
+    for( FOOTPRINT* fp : { srcNC0, srcNC1, srcNO0, srcNO1 } )
+    {
+        dbRA.m_components.insert( fp );
+        dbRA.m_designBlockItems.insert( fp );
+    }
+
+    dbRA.m_zone = new ZONE( m_board.get() );
+    dbRA.m_zone->SetIsRuleArea( true );
+    dbRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    dbRA.m_zone->AddPolygon( KIGEOM::BoxToLineChain( BOX2I::ByCorners( mm( -6, -3 ), mm( 6, 11 ) ) ) );
+
+    RULE_AREA destRA;
+    destRA.m_sourceType = PLACEMENT_SOURCE_T::GROUP_PLACEMENT;
+
+    for( FOOTPRINT* fp : { dstNC0, dstNC1, dstNO0, dstNO1 } )
+        destRA.m_components.insert( fp );
+
+    destRA.m_zone = new ZONE( m_board.get() );
+    destRA.m_zone->SetIsRuleArea( true );
+    destRA.m_zone->SetLayerSet( LSET::AllCuMask() );
+    destRA.m_zone->AddPolygon( KIGEOM::BoxToLineChain( BOX2I::ByCorners( mm( 33, 37 ), mm( 47, 51 ) ) ) );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    REPEAT_LAYOUT_OPTIONS opts = { .m_copyRouting = false,
+                                   .m_connectedRoutingOnly = false,
+                                   .m_copyPlacement = true,
+                                   .m_copyOtherItems = false,
+                                   .m_groupItems = false,
+                                   .m_includeLockedItems = true,
+                                   .m_anchorFp = nullptr };
+
+    int result = mtTool->RepeatLayout( TOOL_EVENT(), dbRA, destRA, opts );
+    BOOST_REQUIRE_MESSAGE( result >= 0, "RepeatLayout failed" );
+
+    delete dbRA.m_zone;
+    delete destRA.m_zone;
+
+    const double dstChir = chirality( dstNC0->GetPosition(), dstNC1->GetPosition(), dstNO0->GetPosition() );
+
+    BOOST_TEST_MESSAGE(
+            wxString::Format( "block chirality %.0f, destination chirality after apply %.0f", srcChir, dstChir ) );
+
+    BOOST_CHECK_MESSAGE( srcChir * dstChir > 0.0, "Applied layout left the receptacles mirrored (NC/NO swapped)" );
+}
+
+
+/**
+ * Issue 24019: a global rail with an uneven per-channel pad count (a config strap tied to GND in
+ * some instances, another rail in others) must be excluded from the topology comparison for every
+ * pairing, not just the targets that carry two or more pads on it, or isomorphic channels fail to
+ * match.  Channel 3 straps to +3V3, leaving one lone GND pad; channel 2 must still match it.
+ */
+BOOST_FIXTURE_TEST_CASE( CheckRACompatGlobalRailAcrossChannels, MULTICHANNEL_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetEnabledLayers( LSET::AllCuMask() | LSET::AllTechMask() );
+
+    auto addNet = [&]( const wxString& aName ) -> int
+    {
+        NETINFO_ITEM* net = new NETINFO_ITEM( m_board.get(), aName );
+        m_board->Add( net );
+        return net->GetNetCode();
+    };
+
+    const int netGnd = addNet( wxT( "GND" ) );
+    const int netVcc = addNet( wxT( "+3V3" ) );
+
+    const LIB_ID icId( wxT( "TestLib" ), wxT( "SOT-23-6" ) );
+    const LIB_ID rId( wxT( "TestLib" ), wxT( "R_0402" ) );
+
+    // Each channel is an IC (OUT + GND) and a config resistor strapped to a rail: GND in channels
+    // 1 and 2, +3V3 in channel 3.  That strap difference is intentional and must not defeat the match.
+    auto makeChannel = [&]( int aIdx, int aStrapNet ) -> ZONE*
+    {
+        const int netOut = addNet( wxString::Format( wxT( "Net-(U%d-OUT)" ), aIdx ) );
+        const int netCfg = addNet( wxString::Format( wxT( "Net-(U%d-CFG)" ), aIdx ) );
+
+        auto addPad = [&]( FOOTPRINT* aFp, const wxString& aNumber, int aNetCode )
+        {
+            PAD* pad = new PAD( aFp );
+            pad->SetNumber( aNumber );
+            pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+            pad->SetSize( PADSTACK::ALL_LAYERS,
+                          VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ) );
+            pad->SetLayerSet( LSET( { F_Cu } ) );
+            pad->SetNetCode( aNetCode );
+            aFp->Add( pad );
+        };
+
+        FOOTPRINT* ic = new FOOTPRINT( m_board.get() );
+        ic->SetFPID( icId );
+        ic->SetReference( wxString::Format( wxT( "U%d" ), aIdx ) );
+        m_board->Add( ic );
+        addPad( ic, wxT( "1" ), netOut );
+        addPad( ic, wxT( "2" ), netGnd );
+
+        FOOTPRINT* r = new FOOTPRINT( m_board.get() );
+        r->SetFPID( rId );
+        r->SetReference( wxString::Format( wxT( "R%d" ), aIdx ) );
+        m_board->Add( r );
+        addPad( r, wxT( "1" ), netCfg );
+        addPad( r, wxT( "2" ), aStrapNet );
+
+        ZONE* zone = new ZONE( m_board.get() );
+        m_board->Add( zone );
+
+        return zone;
+    };
+
+    std::vector<std::pair<int, int>> channelStraps = { { 1, netGnd }, { 2, netGnd }, { 3, netVcc } };
+    std::vector<ZONE*>               zones;
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    RULE_AREAS_DATA* ruleData = mtTool->GetData();
+    ruleData->m_areas.reserve( channelStraps.size() );
+
+    for( const auto& [idx, strap] : channelStraps )
+    {
+        ZONE* zone = makeChannel( idx, strap );
+        zones.push_back( zone );
+
+        RULE_AREA ra;
+        ra.m_zone = zone;
+        ra.m_ruleName = wxString::Format( wxT( "Channel %d" ), idx );
+
+        for( FOOTPRINT* fp : m_board->Footprints() )
+        {
+            if( fp->GetReference() == wxString::Format( wxT( "U%d" ), idx )
+                || fp->GetReference() == wxString::Format( wxT( "R%d" ), idx ) )
+            {
+                ra.m_components.insert( fp );
+            }
+        }
+
+        ruleData->m_areas.push_back( ra );
+    }
+
+    // Before the fix, channel 3's lone GND pad hid the rail from that pairing and the match failed.
+    int status = mtTool->CheckRACompatibility( zones[1] );
+    BOOST_REQUIRE_EQUAL( status, 0 );
+
+    for( RULE_AREA& ra : ruleData->m_areas )
+    {
+        if( ra.m_zone == zones[1] )
+            continue;
+
+        auto it = ruleData->m_compatMap.find( &ra );
+        BOOST_REQUIRE( it != ruleData->m_compatMap.end() );
+
+        for( const wxString& reason : it->second.m_mismatchReasons )
+            BOOST_TEST_MESSAGE( wxString::Format( "%s: %s", ra.m_ruleName, reason ) );
+
+        BOOST_CHECK_MESSAGE( it->second.m_isOk,
+                             wxString::Format( "Channel 2 must match %s", ra.m_ruleName ) );
+    }
+}
+
+
+/**
+ * A duplicate rule area over a channel's footprints must not make that channel's own nets look
+ * global.  Channels 1 and 2 genuinely differ on a local net, so the match must still fail even with
+ * a second area covering channel 1.
+ */
+BOOST_FIXTURE_TEST_CASE( CheckRACompatOverlappingAreaKeepsLocalNet, MULTICHANNEL_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetEnabledLayers( LSET::AllCuMask() | LSET::AllTechMask() );
+
+    auto addNet = [&]( const wxString& aName ) -> int
+    {
+        NETINFO_ITEM* net = new NETINFO_ITEM( m_board.get(), aName );
+        m_board->Add( net );
+        return net->GetNetCode();
+    };
+
+    const int netGnd = addNet( wxT( "GND" ) );
+
+    const LIB_ID icId( wxT( "TestLib" ), wxT( "SOT-23-6" ) );
+    const LIB_ID rId( wxT( "TestLib" ), wxT( "R_0402" ) );
+
+    auto addPad = [&]( FOOTPRINT* aFp, const wxString& aNumber, int aNetCode )
+    {
+        PAD* pad = new PAD( aFp );
+        pad->SetNumber( aNumber );
+        pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ) );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetNetCode( aNetCode );
+        aFp->Add( pad );
+    };
+
+    auto makeFp = [&]( const LIB_ID& aFpId, const wxString& aRef ) -> FOOTPRINT*
+    {
+        FOOTPRINT* fp = new FOOTPRINT( m_board.get() );
+        fp->SetFPID( aFpId );
+        fp->SetReference( aRef );
+        m_board->Add( fp );
+        return fp;
+    };
+
+    // Channel 1: U1 pad 1 and R1 pad 1 share a per-channel net, giving that net two internal pads.
+    const int netLocal1 = addNet( wxT( "Net-(U1-SIG)" ) );
+    FOOTPRINT* u1 = makeFp( icId, wxT( "U1" ) );
+    addPad( u1, wxT( "1" ), netLocal1 );
+    addPad( u1, wxT( "2" ), netGnd );
+    FOOTPRINT* r1 = makeFp( rId, wxT( "R1" ) );
+    addPad( r1, wxT( "1" ), netLocal1 );
+    addPad( r1, wxT( "2" ), netGnd );
+
+    // Channel 2: U2 pad 1 is on its own net, so R2 does not share it -- a real difference from
+    // channel 1 that must be reported as a mismatch.
+    const int netLocal2a = addNet( wxT( "Net-(U2-SIG)" ) );
+    const int netLocal2b = addNet( wxT( "Net-(R2-SIG)" ) );
+    FOOTPRINT* u2 = makeFp( icId, wxT( "U2" ) );
+    addPad( u2, wxT( "1" ), netLocal2a );
+    addPad( u2, wxT( "2" ), netGnd );
+    FOOTPRINT* r2 = makeFp( rId, wxT( "R2" ) );
+    addPad( r2, wxT( "1" ), netLocal2b );
+    addPad( r2, wxT( "2" ), netGnd );
+
+    ZONE* zone1 = new ZONE( m_board.get() );
+    m_board->Add( zone1 );
+    ZONE* zone2 = new ZONE( m_board.get() );
+    m_board->Add( zone2 );
+    ZONE* zoneDup = new ZONE( m_board.get() );
+    m_board->Add( zoneDup );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    RULE_AREAS_DATA* ruleData = mtTool->GetData();
+    ruleData->m_areas.reserve( 3 );
+
+    RULE_AREA ra1;
+    ra1.m_zone = zone1;
+    ra1.m_ruleName = wxT( "Channel 1" );
+    ra1.m_components = { u1, r1 };
+    ruleData->m_areas.push_back( ra1 );
+
+    RULE_AREA ra2;
+    ra2.m_zone = zone2;
+    ra2.m_ruleName = wxT( "Channel 2" );
+    ra2.m_components = { u2, r2 };
+    ruleData->m_areas.push_back( ra2 );
+
+    // A second rule area over channel 1's footprints.  Counting it as a distinct channel would make
+    // Net-(U1-SIG) look global (two areas carry it) and hide the difference from channel 2.
+    RULE_AREA raDup;
+    raDup.m_zone = zoneDup;
+    raDup.m_ruleName = wxT( "Channel 1 duplicate" );
+    raDup.m_components = { u1, r1 };
+    ruleData->m_areas.push_back( raDup );
+
+    int status = mtTool->CheckRACompatibility( zone1 );
+    BOOST_REQUIRE_EQUAL( status, 0 );
+
+    RULE_AREA* channel2 = nullptr;
+
+    for( RULE_AREA& ra : ruleData->m_areas )
+    {
+        if( ra.m_zone == zone2 )
+            channel2 = &ra;
+    }
+
+    BOOST_REQUIRE( channel2 != nullptr );
+
+    auto it = ruleData->m_compatMap.find( channel2 );
+    BOOST_REQUIRE( it != ruleData->m_compatMap.end() );
+
+    BOOST_CHECK_MESSAGE( !it->second.m_isOk,
+                         "Channel 1 and channel 2 differ on a local net and must not match; an "
+                         "overlapping rule area must not hide that net by marking it global" );
+}
+
+
+/**
+ * A channel placed as a sheet must include the tracks connecting its design blocks in the
+ * generated rule area outline. Those tracks are loose at the sheet level, not in any group,
+ * so before the fix the outline hugged the footprints and a track bulging past them fell
+ * outside the area and was not repeated to other channels (issue 24983).
+ */
+BOOST_FIXTURE_TEST_CASE( GenerateSheetRAIncludesLooseInterBlockRouting, MULTICHANNEL_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    BOARD* board = m_board.get();
+
+    board->Add( new NETINFO_ITEM( board, wxT( "N1" ), 1 ) );
+
+    auto addFootprint = [&]( const wxString& aRef, const VECTOR2I& aPos )
+    {
+        FOOTPRINT* fp = new FOOTPRINT( board );
+        fp->SetReference( aRef );
+        fp->SetFPID( LIB_ID( wxT( "lib" ), wxT( "R_0402" ) ) );
+        fp->SetSheetname( wxT( "/ChannelA/" ) );
+        fp->SetSheetfile( wxT( "channelA.kicad_sch" ) );
+
+        PAD* pad = new PAD( fp );
+        pad->SetNumber( wxT( "1" ) );
+        pad->SetAttribute( PAD_ATTRIB::SMD );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( pcbIUScale.mmToIU( 1.0 ), pcbIUScale.mmToIU( 1.0 ) ) );
+        fp->Add( pad );
+
+        fp->SetPosition( aPos );
+        board->Add( fp );
+
+        pad->SetNetCode( 1 );
+    };
+
+    addFootprint( wxT( "R1" ), VECTOR2I( 0, 0 ) );
+    addFootprint( wxT( "R2" ), VECTOR2I( pcbIUScale.mmToIU( 10.0 ), 0 ) );
+
+    // Track on the channel-local net, detouring far south of the footprints.
+    PCB_TRACK* track = new PCB_TRACK( board );
+    track->SetLayer( F_Cu );
+    track->SetWidth( pcbIUScale.mmToIU( 0.25 ) );
+    track->SetStart( VECTOR2I( 0, 0 ) );
+    track->SetEnd( VECTOR2I( pcbIUScale.mmToIU( 5.0 ), pcbIUScale.mmToIU( 30.0 ) ) );
+    board->Add( track );
+    track->SetNetCode( 1 );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+    toolMgr.SetEnvironment( board, nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    mtTool->GeneratePotentialRuleAreas();
+
+    auto ruleData = mtTool->GetData();
+    ruleData->m_replaceExisting = true;
+
+    RULE_AREA* channelRA = findSheetRuleAreaByPath( mtTool, wxT( "/ChannelA/" ) );
+    BOOST_REQUIRE( channelRA != nullptr );
+    channelRA->m_generateEnabled = true;
+
+    TOOL_EVENT dummyEvent;
+    mtTool->AutogenerateRuleAreas( dummyEvent );
+
+    ZONE* raZone = nullptr;
+
+    for( ZONE* zone : board->Zones() )
+    {
+        if( zone->GetIsRuleArea() && zone->GetZoneName() == wxT( "auto-placement-area-/ChannelA/" ) )
+        {
+            raZone = zone;
+            break;
+        }
+    }
+
+    BOOST_REQUIRE( raZone != nullptr );
+
+    // A point on the bulging track, well past the footprint band.
+    VECTOR2I onTrack( pcbIUScale.mmToIU( 2.5 ), pcbIUScale.mmToIU( 15.0 ) );
+
+    BOOST_CHECK_MESSAGE( raZone->Outline()->Contains( onTrack ),
+                         "Sheet rule area outline must enclose loose inter-block routing (issue 24983)" );
+}
+
+
+/**
+ * Test that repeat layout copies pad settings (zone connection style, clearance, 
+ * solder mask margin, thermal spoke width) from the reference channel to the
+ * target channel (issue 25244).
+ */
+BOOST_FIXTURE_TEST_CASE( RepeatLayoutCopiesPadOverrides, MULTICHANNEL_TEST_FIXTURE )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "issue22548/issue22548", m_board );
+
+    TOOL_MANAGER       toolMgr;
+    MOCK_TOOLS_HOLDER* toolsHolder = new MOCK_TOOLS_HOLDER;
+
+    toolMgr.SetEnvironment( m_board.get(), nullptr, nullptr, nullptr, toolsHolder );
+
+    MULTICHANNEL_TOOL* mtTool = new MULTICHANNEL_TOOL;
+    toolMgr.RegisterTool( mtTool );
+
+    mtTool->FindExistingRuleAreas();
+
+    auto ruleData = mtTool->GetData();
+
+    RULE_AREA* refArea = nullptr;
+    RULE_AREA* targetArea = nullptr;
+
+    for( RULE_AREA& ra : ruleData->m_areas )
+    {
+        if( ra.m_ruleName.Contains( wxT( "Untitled Sheet/" ) ) )
+            refArea = &ra;
+        else if( ra.m_ruleName.Contains( wxT( "Untitled Sheet1/" ) ) )
+            targetArea = &ra;
+    }
+
+    BOOST_REQUIRE( refArea );
+    BOOST_REQUIRE( targetArea );
+
+    FOOTPRINT* refFP = nullptr;
+    FOOTPRINT* targetFP = nullptr;
+
+    for( FOOTPRINT* fp : refArea->m_components )
+    {
+        if( fp->GetReference() == wxT( "U1" ) )
+            refFP = fp;
+    }
+
+    for( FOOTPRINT* fp : targetArea->m_components )
+    {
+        if( fp->GetReference() == wxT( "U2" ) )
+            targetFP = fp;
+    }
+
+    BOOST_REQUIRE( refFP );
+    BOOST_REQUIRE( targetFP );
+
+    PAD* refPad = refFP->FindPadByNumber( wxT( "1" ) );
+
+    BOOST_REQUIRE( refPad );
+
+    refPad->SetLocalZoneConnection( ZONE_CONNECTION::NONE );
+    refPad->SetLocalSolderMaskMargin( pcbIUScale.mmToIU( 0.15 ) );
+
+    BOOST_REQUIRE( targetFP->FindPadByNumber( wxT( "1" ) )->GetLocalZoneConnection() == ZONE_CONNECTION::INHERITED );
+
+    mtTool->CheckRACompatibility( refArea->m_zone );
+
+    ruleData->m_compatMap[targetArea].m_doCopy = true;
+    ruleData->m_options.m_copyPlacement = true;
+
+    BOOST_REQUIRE( mtTool->RepeatLayout( TOOL_EVENT(), refArea->m_zone ) >= 0 );
+
+    PAD* targetPad = targetFP->FindPadByNumber( wxT( "1" ) );
+
+    BOOST_REQUIRE( targetPad );
+
+    BOOST_CHECK( targetPad->GetLocalZoneConnection() == ZONE_CONNECTION::NONE );
+    BOOST_CHECK( targetPad->GetLocalSolderMaskMargin() == refPad->GetLocalSolderMaskMargin() );
 }
 
 

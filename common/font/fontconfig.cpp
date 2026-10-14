@@ -36,10 +36,17 @@
 using namespace fontconfig;
 
 static FONTCONFIG* g_config = nullptr;
-static bool        g_fcInitSuccess = false;
+static std::mutex g_fontConfigMutex;
 
 REPORTER* FONTCONFIG::s_reporter = nullptr;
-static std::mutex g_fontConfigMutex;
+
+#if KICAD_USE_FONTCONFIG
+
+// ============================================================================
+// Native fontconfig implementation (Linux, macOS, Windows)
+// ============================================================================
+
+static bool g_fcInitSuccess = false;
 
 /**
  * A simple wrapper to avoid exporting fontconfig in the header
@@ -508,3 +515,149 @@ void FONTCONFIG::ListFonts( std::vector<std::string>& aFonts, const std::string&
         aFonts.push_back( entry.second.Family() );
 }
 
+#else // !KICAD_USE_FONTCONFIG
+
+// ============================================================================
+// WASM stub implementation - uses embedded/bundled fonts only
+// ============================================================================
+
+/**
+ * Stub for FONTCONFIG_PAT when fontconfig is not available
+ */
+struct fontconfig::FONTCONFIG_PAT
+{
+    void* pat;  // unused
+};
+
+
+wxString FONTCONFIG::Version()
+{
+    return wxS( "WASM (no fontconfig)" );
+}
+
+
+FONTCONFIG::FONTCONFIG()
+{
+}
+
+
+void fontconfig::FONTCONFIG::SetReporter( REPORTER* aReporter )
+{
+    std::lock_guard lock( g_fontConfigMutex );
+    s_reporter = aReporter;
+}
+
+
+REPORTER* fontconfig::FONTCONFIG::GetReporter()
+{
+    std::lock_guard lock( g_fontConfigMutex );
+    return s_reporter;
+}
+
+
+FONTCONFIG* Fontconfig()
+{
+    if( !g_config )
+    {
+        g_config = new FONTCONFIG();
+    }
+
+    return g_config;
+}
+
+
+FONTCONFIG::FF_RESULT FONTCONFIG::FindFont( const wxString& aFontName, wxString& aFontFile,
+                                            int& aFaceIndex, bool aBold, bool aItalic,
+                                            const std::vector<wxString>* aEmbeddedFiles )
+{
+    // In WASM, we primarily use embedded fonts passed via aEmbeddedFiles
+    // or the built-in KiCad stroke font
+
+    // Check embedded files first
+    if( aEmbeddedFiles && !aEmbeddedFiles->empty() )
+    {
+        // Search for a matching font in embedded files
+        wxString searchName = aFontName.Lower();
+
+        for( const wxString& file : *aEmbeddedFiles )
+        {
+            // Simple matching: check if filename contains the font name
+            if( file.Lower().Contains( searchName ) )
+            {
+                aFontFile = file;
+                aFaceIndex = 0;
+                return FF_RESULT::FF_OK;
+            }
+        }
+
+        // If no exact match, return first embedded file as substitute
+        aFontFile = (*aEmbeddedFiles)[0];
+        aFaceIndex = 0;
+
+        if( s_reporter )
+        {
+            s_reporter->Report( wxString::Format(
+                _( "Font '%s' not found in embedded fonts; using '%s'." ),
+                aFontName, aFontFile ) );
+        }
+
+        return FF_RESULT::FF_SUBSTITUTE;
+    }
+
+    // No embedded fonts available - caller should fall back to stroke font
+    aFontFile = wxEmptyString;
+    aFaceIndex = 0;
+
+    return FF_RESULT::FF_ERROR;
+}
+
+
+void FONTCONFIG::ListFonts( std::vector<std::string>& aFonts, const std::string& aDesiredLang,
+                            const std::vector<wxString>* aEmbeddedFiles, bool aForce )
+{
+    // Clear and rebuild if forced or empty
+    if( m_fontInfoCache.empty() || aForce )
+    {
+        m_fontInfoCache.clear();
+
+        // Add embedded files as available fonts
+        if( aEmbeddedFiles )
+        {
+            for( const wxString& file : *aEmbeddedFiles )
+            {
+                // Extract font family name from filename
+                wxString filename = file.AfterLast( '/' ).AfterLast( '\\' );
+                wxString family = filename.BeforeLast( '.' );
+
+                // Remove common suffixes like -Regular, -Bold, etc.
+                family.Replace( wxS( "-Regular" ), wxEmptyString );
+                family.Replace( wxS( "-Bold" ), wxEmptyString );
+                family.Replace( wxS( "-Italic" ), wxEmptyString );
+                family.Replace( wxS( "-BoldItalic" ), wxEmptyString );
+
+                std::string familyStr = family.ToStdString();
+
+                if( m_fontInfoCache.find( familyStr ) == m_fontInfoCache.end() )
+                {
+                    FONTINFO fontInfo( file.ToStdString(), "Regular", familyStr );
+                    m_fontInfoCache.emplace( familyStr, fontInfo );
+                }
+            }
+        }
+
+        // Always include the built-in KiCad font
+        if( m_fontInfoCache.find( "KiCad Font" ) == m_fontInfoCache.end() )
+        {
+            FONTINFO kicadFont( "", "Regular", "KiCad Font" );
+            m_fontInfoCache.emplace( "KiCad Font", kicadFont );
+        }
+    }
+
+    // Return all cached font families
+    for( const auto& entry : m_fontInfoCache )
+    {
+        aFonts.push_back( entry.second.Family() );
+    }
+}
+
+#endif // KICAD_USE_FONTCONFIG

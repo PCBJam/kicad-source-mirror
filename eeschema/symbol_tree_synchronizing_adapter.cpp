@@ -37,6 +37,7 @@
 #include <symbol_preview_widget.h>
 #include <libraries/symbol_library_adapter.h>
 #include <widgets/wx_panel.h>
+#include <kiplatform/ui.h>
 
 
 wxObjectDataPtr<LIB_TREE_MODEL_ADAPTER>
@@ -75,6 +76,13 @@ void SYMBOL_TREE_SYNCHRONIZING_ADAPTER::Sync( const wxString& aForceRefresh,
                                               std::function<void( int, int, const wxString& )> aProgressCallback )
 {
     THROTTLE progressThrottle( std::chrono::milliseconds( 120 ) );
+
+    // Cancels a queued scroll; a frame-clock tick would else walk rows freed below
+    KIPLATFORM::UI::CancelPendingScroll( m_widget );
+
+    // Detaches the model for the rebuild; a frame-clock tick during the progress dialog
+    // yield would else validate freed rows
+    ResetTreeView resetGuard( *this );
 
     m_lastSyncHash = m_libMgr->GetHash();
     int i = 0, max = GetLibrariesCount();
@@ -142,8 +150,16 @@ void SYMBOL_TREE_SYNCHRONIZING_ADAPTER::Sync( const wxString& aForceRefresh,
             bool pinned = alg::contains( cfg->m_Session.pinned_symbol_libs, libName )
                             || alg::contains( project.m_PinnedSymbolLibs, libName );
 
-            LIB_TREE_NODE_LIBRARY& lib_node = DoAddLibraryNode( libName, ( *optRow )->Description(), pinned );
+            LIB_TREE_NODE_LIBRARY& lib_node =
+                    DoAddLibraryNode( libName, ( *optRow )->Description(), pinned );
 
+            // Eager: enumerate this library's symbols into the tree now (via the
+            // fast fatLoad in the pcbjam plugin), so the symbol editor's filter
+            // searches across ALL libraries — the lazy per-expand load lost that
+            // global search (docs/features/libs/0013). The boot-time bulk preload
+            // (SYMBOL_LIBRARY_ADAPTER::enumerateLibrary) stays a no-op, so this is
+            // the single place the full set is enumerated, on symbol-editor tree
+            // build (covered by the React load overlay).
             updateLibrary( lib_node );
         }
     }

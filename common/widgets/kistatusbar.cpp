@@ -76,7 +76,7 @@ private:
 
 
 KISTATUSBAR::KISTATUSBAR( int aNumberFields, wxWindow* parent, wxWindowID id, STYLE_FLAGS aFlags ) :
-        wxStatusBar( parent, id ),
+        wxStatusBar( parent, id, wxSTB_SIZEGRIP | wxSTB_ELLIPSIZE_MIDDLE | wxSTB_SHOW_TIPS | wxFULL_REPAINT_ON_RESIZE ),
         m_backgroundStopButton( nullptr ),
         m_notificationsButton( nullptr ),
         m_warningButton( nullptr ),
@@ -105,25 +105,6 @@ KISTATUSBAR::KISTATUSBAR( int aNumberFields, wxWindow* parent, wxWindowID id, ST
     if( showNotification )
         extraFields++;
 
-    SetFieldsCount( aNumberFields + extraFields );
-
-    m_fieldWidths.assign( aNumberFields + extraFields, -1 );
-
-#ifdef __WXOSX__
-    // offset from the right edge
-    m_fieldWidths[aNumberFields + extraFields - 1] = 10;
-#endif
-
-    SetStatusWidths( aNumberFields + extraFields, m_fieldWidths.data() );
-
-    int* styles = new int[aNumberFields + extraFields];
-
-    for( int i = 0; i < aNumberFields + extraFields; i++ )
-        styles[i] = wxSB_FLAT;
-
-    SetStatusStyles( aNumberFields + extraFields, styles );
-    delete[] styles;
-
     m_backgroundTxt = new wxStaticText( this, wxID_ANY, wxT( "" ), wxDefaultPosition,
                                         wxDefaultSize, wxALIGN_RIGHT | wxST_NO_AUTORESIZE );
 
@@ -132,8 +113,7 @@ KISTATUSBAR::KISTATUSBAR( int aNumberFields, wxWindow* parent, wxWindowID id, ST
 
     if( showCancel )
     {
-        m_backgroundStopButton = new wxButton( this, wxID_ANY, "X", wxDefaultPosition,
-                                               wxDefaultSize, wxBU_EXACTFIT );
+        m_backgroundStopButton = new wxButton( this, wxID_ANY, "X", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
     }
 
     if( showNotification )
@@ -160,8 +140,22 @@ KISTATUSBAR::KISTATUSBAR( int aNumberFields, wxWindow* parent, wxWindowID id, ST
         m_warningButton->SetToolTip( _( "View load messages" ) );
         m_warningButton->Hide();
 
+
         m_warningButton->Bind( wxEVT_BUTTON, &KISTATUSBAR::onLoadWarningsIconClick, this );
     }
+
+    m_fieldWidths.assign( aNumberFields + extraFields, -1 );
+
+#ifdef __WXOSX__
+    // offset from the right edge
+    int padding = KIUI::GetTextSize( wxT( "M" ), this ).x;
+    m_fieldWidths[aNumberFields + extraFields - 1] = padding;
+#endif
+
+    SetFieldsCount( m_fieldWidths.size(), m_fieldWidths.data() );
+
+    std::vector<int> styles( aNumberFields + extraFields, wxSB_FLAT );
+    SetStatusStyles( styles.size(), styles.data() );
 
     Bind( wxEVT_SIZE, &KISTATUSBAR::onSize, this );
     m_backgroundProgressBar->Bind( wxEVT_LEFT_DOWN, &KISTATUSBAR::onBackgroundProgressClick, this );
@@ -351,11 +345,14 @@ void KISTATUSBAR::SetBackgroundStatusText( const wxString& aTxt )
     // text, and restore it when the background text is cleared.
     if( m_normalFieldsCount > 1 )
     {
-        int adjacentField = m_normalFieldsCount - 1;
+        int      adjacentField = m_normalFieldsCount - 1;
+        wxString currentText = GetStatusText( adjacentField );
 
         if( !aTxt.empty() )
         {
-            m_savedStatusText = GetStatusText( adjacentField );
+            if( !currentText.empty() )
+                m_savedStatusText = currentText;
+
             SetStatusText( wxEmptyString, adjacentField );
         }
         else if( !m_savedStatusText.empty() )
@@ -372,28 +369,40 @@ void KISTATUSBAR::updateAuxFieldWidths()
     if( m_fieldWidths.empty() )
         return;
 
+    int padding = KIUI::GetTextSize( wxT( "M" ), this ).x;
+
+    // The background job label and gauge only carry content while a job is running. When idle
+    // they must collapse to zero so they do not consume stretch reserved for the normal fields.
+    bool jobActive = m_backgroundProgressBar && m_backgroundProgressBar->IsShown();
+
     if( std::optional<int> idx = fieldIndex( FIELD::BGJOB_LABEL ) )
-        m_fieldWidths[m_normalFieldsCount + *idx] = -2;
+        m_fieldWidths[m_normalFieldsCount + *idx] = jobActive ? -1 : 0;
 
     if( std::optional<int> idx = fieldIndex( FIELD::BGJOB_GAUGE ) )
-        m_fieldWidths[m_normalFieldsCount + *idx] = 75;
+        m_fieldWidths[m_normalFieldsCount + *idx] = jobActive ? 75 : 0;
 
     if( std::optional<int> idx = fieldIndex( FIELD::BGJOB_CANCEL ) )
     {
-        m_fieldWidths[m_normalFieldsCount + *idx] =
-                m_backgroundStopButton && m_backgroundStopButton->IsShown() ? 20 : 0;
+        if( m_backgroundStopButton && m_backgroundStopButton->IsShown() )
+            m_fieldWidths[m_normalFieldsCount + *idx] = m_backgroundStopButton->GetSize().x + padding;
+        else
+            m_fieldWidths[m_normalFieldsCount + *idx] = 0;
     }
 
     if( std::optional<int> idx = fieldIndex( FIELD::WARNING ) )
     {
-        m_fieldWidths[m_normalFieldsCount + *idx] =
-                m_warningButton && m_warningButton->IsShown() ? 20 : 0;
+        if( m_warningButton && m_warningButton->IsShown() )
+            m_fieldWidths[m_normalFieldsCount + *idx] = m_warningButton->GetSize().x + padding;
+        else
+            m_fieldWidths[m_normalFieldsCount + *idx] = 0;
     }
 
     if( std::optional<int> idx = fieldIndex( FIELD::NOTIFICATION ) )
     {
-        m_fieldWidths[m_normalFieldsCount + *idx] =
-                m_notificationsButton && m_notificationsButton->IsShown() ? 20 : 0;
+        if( m_notificationsButton && m_notificationsButton->IsShown() )
+            m_fieldWidths[m_normalFieldsCount + *idx] = m_notificationsButton->GetSize().x + padding;
+        else
+            m_fieldWidths[m_normalFieldsCount + *idx] = 0;
     }
 
     SetStatusWidths( static_cast<int>( m_fieldWidths.size() ), m_fieldWidths.data() );
@@ -584,29 +593,6 @@ void KISTATUSBAR::onLoadWarningsIconClick( wxCommandEvent& aEvent )
     dlg.ShowModal();
 }
 
-void KISTATUSBAR::SetEllipsedTextField( const wxString& aText, int aFieldId )
-{
-    wxRect       fieldRect;
-    int          width = -1;
-    wxString     etext = aText;
-
-    // Only GetFieldRect() returns the current size for variable size fields
-    // Other methods return -1 for the width of these fields.
-    if( GetFieldRect( aFieldId, fieldRect ) )
-        width = fieldRect.GetWidth();
-
-    if( width > 20 )
-    {
-        wxClientDC dc( this );
-
-        // Gives a margin to the text to be sure it is not clamped at its end
-        int margin = KIUI::GetTextSize( wxT( "XX" ), this ).x;
-        etext = wxControl::Ellipsize( etext, dc, wxELLIPSIZE_MIDDLE, width - margin );
-    }
-
-    SetStatusText( etext, aFieldId );
-}
-
 
 std::optional<int> KISTATUSBAR::fieldIndex( FIELD aField ) const
 {
@@ -655,4 +641,13 @@ std::optional<int> KISTATUSBAR::fieldIndex( FIELD aField ) const
     }
 
     return std::nullopt;
+}
+
+
+void KISTATUSBAR::SetStatusWidths( int aSize, const int* aWidths )
+{
+    wxStatusBar::SetStatusWidths( aSize, aWidths );
+
+    for( int i = 0; ( i < aSize ) && ( i < static_cast<int>( m_fieldWidths.size() ) ); i++ )
+        m_fieldWidths[i] = *( aWidths + i );
 }

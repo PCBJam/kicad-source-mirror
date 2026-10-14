@@ -357,9 +357,14 @@ void SCH_BASE_FRAME::ActivateGalCanvas()
 
         m_spaceMouse->SetCanvas( GetCanvas() );
     }
-    catch( const std::system_error& e )
+    catch( const std::exception& e )
     {
-        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), e.what() );
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), wxS( "%s" ), e.what() );
+    }
+    catch( ... )
+    {
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ),
+                    wxT( "Unknown exception during SpaceMouse initialization" ) );
     }
 }
 
@@ -795,6 +800,7 @@ wxString SCH_BASE_FRAME::SelectLibrary( const wxString& aDialogTitle, const wxSt
 
 void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
 {
+#if wxUSE_FSWATCHER
     Unbind( wxEVT_FSWATCHER, &SCH_BASE_FRAME::OnSymChange, this );
 
     if( m_watcher )
@@ -861,11 +867,15 @@ void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
         wxLogNull silence;
         m_watcher->Add( fn );
     }
+#else
+    (void) aID;
+#endif
 }
 
 
 void SCH_BASE_FRAME::OnSymChange( wxFileSystemWatcherEvent& aEvent )
 {
+#if wxUSE_FSWATCHER
     wxLogTrace( traceLibWatch, "OnSymChange: %s, watcher file: %s",
                 aEvent.GetPath().GetFullPath(), m_watcherFileName.GetFullPath() );
 
@@ -893,6 +903,9 @@ void SCH_BASE_FRAME::OnSymChange( wxFileSystemWatcherEvent& aEvent )
         wxLogTrace( traceLibWatch, "Failed to start the debounce timer" );
         return;
     }
+#else
+    (void) aEvent;
+#endif
 }
 
 
@@ -918,6 +931,17 @@ void SCH_BASE_FRAME::OnSymChangeDebounceTimer( wxTimerEvent& aEvent )
     if( !IsEnabled() )
     {
         wxLogTrace( traceLibWatch, "Frame disabled (dialog open); restarting debounce timer" );
+        m_watcherDebounceTimer.StartOnce( 1000 );
+        return;
+    }
+
+    // An interactive tool (move, draw, place pin/text) holds references into the current symbol
+    // while its event loop runs.  Reloading now would free those out from under the running tool
+    // and crash.  Restart the timer before touching the watcher timestamp so the reload is retried
+    // once the tool finishes rather than silently dropped.
+    if( !ToolStackIsEmpty() )
+    {
+        wxLogTrace( traceLibWatch, "Interactive tool active; restarting debounce timer" );
         m_watcherDebounceTimer.StartOnce( 1000 );
         return;
     }

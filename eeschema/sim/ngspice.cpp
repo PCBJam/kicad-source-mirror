@@ -34,13 +34,13 @@
 
 #include "spice_circuit_model.h"
 #include "ngspice.h"
-#include "simulator_reporter.h"
 #include "spice_settings.h"
 
 #include <wx/stdpaths.h>
 #include <wx/dir.h>
 #include <wx/log.h>
 
+#include <memory>
 #include <stdexcept>
 #include <algorithm>
 
@@ -83,7 +83,21 @@ NGSPICE::NGSPICE() :
 }
 
 
-NGSPICE::~NGSPICE() = default;
+#ifdef __EMSCRIPTEN__
+// wasm/stubs/sharedspice_client.cpp — unregisters this instance's callbacks.
+extern "C" void pcbjam_ngspice_reset_callbacks( void* aUser );
+#endif
+
+
+NGSPICE::~NGSPICE()
+{
+#ifdef __EMSCRIPTEN__
+    // E-9: a late ngspice_service worker event dispatches through the client
+    // stub's registered callbacks; after this destructor they would
+    // dereference a dead NGSPICE (use-after-free on simulator close).
+    pcbjam_ngspice_reset_callbacks( this );
+#endif
+}
 
 
 void NGSPICE::updateNgspiceSettings()
@@ -314,28 +328,35 @@ bool NGSPICE::Attach( const std::shared_ptr<SIMULATION_MODEL>& aModel, const wxS
 
 bool NGSPICE::LoadNetlist( const std::string& aNetlist )
 {
-    LOCALE_IO          c_locale;       // ngspice works correctly only with C locale
-    std::vector<char*> lines;
-    std::stringstream  ss( aNetlist );
+    LOCALE_IO         c_locale; // ngspice works correctly only with C locale
+    std::stringstream ss( aNetlist );
 
-    m_netlist.erase();
+    // Own the deck as strings so a bad_alloc mid-build cannot leak or leave m_netlist
+    // half-populated.  ngSpice_Circ only reads the array during the call, so plain string
+    // storage is sufficient and avoids manual strdup/free.
+    std::vector<std::string> ownedLines;
+    std::string              netlist;
 
     for( std::string line; std::getline( ss, line ); )
     {
-        lines.push_back( strdup( line.data() ) );
-        m_netlist += line;
-        m_netlist += '\n';
+        netlist += line;
+        netlist += '\n';
+        ownedLines.push_back( std::move( line ) );
     }
+
+    std::vector<char*> lines;
+    lines.reserve( ownedLines.size() + 1 );
+
+    for( std::string& line : ownedLines )
+        lines.push_back( line.data() );
 
     lines.push_back( nullptr ); // sentinel, as requested in ngSpice_Circ description
 
+    m_netlist = std::move( netlist );
+
     Command( "remcirc" );
-    bool success = !m_ngSpice_Circ( lines.data() );
 
-    for( char* line : lines )
-        free( line );
-
-    return success;
+    return !m_ngSpice_Circ( lines.data() );
 }
 
 
@@ -478,6 +499,33 @@ void NGSPICE::init_dll()
     LOCALE_IO c_locale;               // ngspice works correctly only with C locale
     const wxStandardPaths& stdPaths = wxStandardPaths::Get();
 
+#ifdef __EMSCRIPTEN__
+    // WASM: no dlopen — the ngspice engine runs in the ngspice_service worker
+    // and the statically linked sharedspice client (sharedspice_client.cpp,
+    // declared in the sharedspice.h stub) forwards each call over RPC. Bind
+    // the function pointers directly; everything below the dll section
+    // (ngSpice_Init registration and the initial commands) runs unchanged.
+    // The spinit/codemodel staging is skipped too (second ifdef below): the
+    // service embeds its own spinit and code models, and the staging's
+    // wxSetWorkingDirectory( exe dir ) always fails in MEMFS, popping a
+    // wxLog error dialog over the simulator frame.
+    m_ngSpice_Init = &pcbjam_ngSpice_Init;
+    m_ngSpice_Circ = &pcbjam_ngSpice_Circ;
+    m_ngSpice_Command = &pcbjam_ngSpice_Command;
+    m_ngGet_Vec_Info = &pcbjam_ngGet_Vec_Info;
+    m_ngCM_Input_Path = &pcbjam_ngCM_Input_Path;
+    m_ngSpice_CurPlot = &pcbjam_ngSpice_CurPlot;
+    m_ngSpice_AllPlots = &pcbjam_ngSpice_AllPlots;
+    m_ngSpice_AllVecs = &pcbjam_ngSpice_AllVecs;
+    m_ngSpice_Running = &pcbjam_ngSpice_Running;
+
+    // Vector-realloc locking happens inside the service (its getVecInfo copies
+    // under ngSpice_LockRealloc); the client-side RAII lock stays a no-op.
+    m_ngSpice_LockRealloc = nullptr;
+    m_ngSpice_UnlockRealloc = nullptr;
+
+    m_error = false;
+#else
     if( m_dll.IsLoaded() )      // enable force reload
         m_dll.Unload();
 
@@ -568,10 +616,12 @@ void NGSPICE::init_dll()
         m_ngSpice_LockRealloc = (ngSpice_LockRealloc) m_dll.GetSymbol( "ngSpice_LockRealloc" );
         m_ngSpice_UnlockRealloc = (ngSpice_UnlockRealloc) m_dll.GetSymbol( "ngSpice_UnlockRealloc" );
     }
+#endif // __EMSCRIPTEN__
 
     m_ngSpice_Init( &cbSendChar, &cbSendStat, &cbControlledExit, nullptr, nullptr,
                     &cbBGThreadRunning, this );
 
+#ifndef __EMSCRIPTEN__
     // Load a custom spinit file, to fix the problem with loading .cm files
     // Switch to the executable directory, so the relative paths are correct
     wxString cwd( wxGetCwd() );
@@ -621,6 +671,7 @@ void NGSPICE::init_dll()
 
     // Restore the working directory
     wxSetWorkingDirectory( cwd );
+#endif // !__EMSCRIPTEN__
 
     // Workarounds to avoid hang ups on certain errors
     // These commands have to be called, no matter what is in the spinit file
@@ -757,8 +808,8 @@ int NGSPICE::cbBGThreadRunning( NG_BOOL aFinished, int aId, void* aUser )
     if( aFinished )
         sim->restoreSignalHandlers();
 
-    if( sim->m_reporter )
-        sim->m_reporter->OnSimStateChange( sim, aFinished ? SIM_IDLE : SIM_RUNNING );
+    if( sim->m_stateListener )
+        sim->m_stateListener->OnSimStateChange( sim, aFinished ? SIM_IDLE : SIM_RUNNING );
 
     return 0;
 }
@@ -779,7 +830,8 @@ int NGSPICE::cbControlledExit( int aStatus, NG_BOOL aImmediate, NG_BOOL aExitOnQ
                 _( "Simulation terminated by ngspice. This may be caused by insufficient "
                    "memory or an internal error. The simulator will be reset." ) );
 
-        sim->m_reporter->OnSimStateChange( sim, SIM_IDLE );
+        if( sim->m_stateListener )
+            sim->m_stateListener->OnSimStateChange( sim, SIM_IDLE );
     }
 
     return 0;

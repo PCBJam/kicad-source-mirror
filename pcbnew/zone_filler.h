@@ -31,6 +31,7 @@
 #include <vector>
 #include <zone.h>
 #include <geometry/shape_poly_set.h>
+#include <hash_128.h>
 
 class PROGRESS_REPORTER;
 class BOARD;
@@ -71,8 +72,8 @@ private:
     void addHoleKnockout( PAD* aPad, int aGap, SHAPE_POLY_SET& aHoles );
 
     void knockoutThermalReliefs( const ZONE* aZone, PCB_LAYER_ID aLayer, SHAPE_POLY_SET& aFill,
-                                 std::vector<BOARD_ITEM*>& aThermalConnectionPads,
-                                 std::vector<PAD*>& aNoConnectionPads );
+                                 std::vector<BOARD_ITEM*>& aThermalConnectionPads, std::vector<PAD*>& aNoConnectionPads,
+                                 std::vector<BOARD_ITEM*>& aSolidConnectionItems );
 
     void buildCopperItemClearances( const ZONE* aZone, PCB_LAYER_ID aLayer,
                                     const std::vector<PAD*>& aNoConnectionPads,
@@ -85,6 +86,13 @@ private:
      */
     void buildDifferentNetZoneClearances( const ZONE* aZone, PCB_LAYER_ID aLayer,
                                           SHAPE_POLY_SET& aHoles );
+
+    /**
+     * Test whether aKnockout's fill can knock out any part of aZone's fill.  Every reader of
+     * another zone's fill must gate on this same predicate; see the implementation for why and
+     * for the reach rationale.
+     */
+    bool zoneKnockoutMayInteract( const ZONE* aZone, const ZONE* aKnockout ) const;
 
     void subtractHigherPriorityZones( const ZONE* aZone, PCB_LAYER_ID aLayer,
                                       SHAPE_POLY_SET& aRawFill );
@@ -166,8 +174,13 @@ private:
      * Remove minimum-width violations introduced by zone-to-zone knockouts.
      * Runs a deflate/reconnect/inflate cycle and intersects with the pre-deflate boundary
      * to avoid re-inflating into cleared areas.
+     *
+     * @param aSameNetApron copper an abutting same-net zone will supply just outside this
+     * zone's boundary.  It is unioned in for the deflate/inflate cycle and clipped back off
+     * afterwards, so a shared border is not treated as a convex corner and rounded away.
      */
-    void postKnockoutMinWidthPrune( const ZONE* aZone, SHAPE_POLY_SET& aFillPolys );
+    void postKnockoutMinWidthPrune( const ZONE* aZone, SHAPE_POLY_SET& aFillPolys,
+                                    const SHAPE_POLY_SET& aSameNetApron );
 
     /**
      * Snapshot of zone fill polygons captured before an iterative refill wave.
@@ -195,11 +208,26 @@ private:
     int                   m_maxError;
     int                   m_worstClearance;
 
+    // ExtraClearance plus max approximation error, part of the knockout reach
+    int                   m_zoneKnockoutSlack;
+
     bool                  m_debugZoneFiller;
 
     // Cache of pre-knockout fills for iterative refill optimization (issue 21746)
     // Key: (zone pointer, layer), Value: fill polygon before higher-priority zone knockout
     std::map<std::pair<const ZONE*, PCB_LAYER_ID>, SHAPE_POLY_SET> m_preKnockoutFillCache;
+
+    // Un-hatched extent per (zone, layer); lets the refiller re-border carved hatch zones (#24758).
+    std::map<std::pair<const ZONE*, PCB_LAYER_ID>, SHAPE_POLY_SET> m_preHatchSolidFillCache;
+
+    // Band just outside each (zone, layer) that an abutting same-net zone pours into.  Buffers the
+    // refiller's min-width cycle the way the smoothed outline buffers the initial one (#23790).
+    std::map<std::pair<const ZONE*, PCB_LAYER_ID>, SHAPE_POLY_SET> m_sameNetApronCache;
+
+    // Refill result keyed by (zone, layer); value is the knockout-geometry hash + cached fill.
+    // Hit lets an unchanged-knockout zone skip the refill subtract + prune.  Cleared each Fill().
+    std::map<std::pair<const ZONE*, PCB_LAYER_ID>, std::pair<HASH_128, SHAPE_POLY_SET>>
+                                                                   m_refillResultCache;
     mutable std::mutex                                             m_cacheMutex;
 };
 

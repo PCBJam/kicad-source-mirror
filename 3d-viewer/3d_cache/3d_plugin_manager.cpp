@@ -41,6 +41,10 @@
 #include "3d_cache/sg/scenegraph.h"
 #include "plugins/ldr/3d/pluginldr3D.h"
 
+#ifdef __EMSCRIPTEN__
+#include "3d_cache/pcbjam_static_3d_plugins.h"
+#endif
+
 
 /**
  * Flag to enable 3D plugin manager debug tracing.
@@ -124,6 +128,14 @@ void S3D_PLUGIN_MANAGER::loadPlugins( void )
     std::list<wxString> pluginlist;
     wxFileName          fn;
 
+#ifdef __EMSCRIPTEN__
+    // WASM: no dlopen or plugin directories — register the statically linked
+    // plugins (pcbjam_static_3d_plugins.cpp) through the normal Open flow below.
+    pluginlist = PCBJAM_3D::StaticPluginPaths();
+
+    std::list< wxString >::iterator sPL;
+    std::list< wxString >::iterator ePL;
+#else
 #ifndef __WXMAC__
     if( wxGetEnv( wxT( "KICAD_RUN_FROM_BUILD_DIR" ), nullptr ) )
     {
@@ -209,6 +221,7 @@ void S3D_PLUGIN_MANAGER::loadPlugins( void )
         listPlugins( *sPL, pluginlist );
         ++sPL;
     }
+#endif  // !__EMSCRIPTEN__
 
     if( pluginlist.empty() )
         return;

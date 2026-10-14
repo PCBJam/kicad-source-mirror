@@ -154,8 +154,7 @@ public:
     static const wxString QUANTITY_VARIABLE;
     static const wxString ITEM_NUMBER_VARIABLE;
 
-    void AddColumn( const wxString& aFieldName, const wxString& aLabel, bool aAddedByUser,
-                    const wxString& aVariantName );
+    void AddColumn( const wxString& aFieldName, const wxString& aLabel, bool aAddedByUser );
     void RemoveColumn( int aCol );
     void RenameColumn( int aCol, const wxString& newName );
 
@@ -322,14 +321,14 @@ public:
         return m_cols[aCol].m_show;
     }
 
-    void     ApplyBomPreset( const BOM_PRESET& preset, const wxString& aVariantName );
+    void       ApplyBomPreset( const BOM_PRESET& preset );
     BOM_PRESET GetBomSettings();
     wxString Export( const BOM_FMT_PRESET& settings );
 
     void AddReferences( const SCH_REFERENCE_LIST& aRefs );
     void RemoveReferences( const SCH_REFERENCE_LIST& aRefs );
     void RemoveSymbol( const SCH_SYMBOL& aSymbol );
-    void UpdateReferences( const SCH_REFERENCE_LIST& aRefs, const wxString& aVariantName );
+    void UpdateReferences( const SCH_REFERENCE_LIST& aRefs );
 
     // Identity-based undo serialization (keyed by symbol, not row position) for the dialog's
     // Ctrl+Z, so it stays correct as rows are grouped/sorted/reordered.
@@ -365,6 +364,24 @@ private:
     // Helper functions to deal with translating wxGrid values to and from
     // named field values like ${DNP}
     bool     isAttribute( const wxString& aFieldName );
+
+    /**
+     * Test whether a field's storage is common to every sheet path that reaches a symbol.
+     *
+     * Shared sheets present one symbol under several paths.  Edits to storage they have in
+     * common must be recorded against all of those paths, while variant overrides belong to
+     * a single symbol instance.
+     *
+     * @param aFieldName is the canonical field or attribute name.
+     * @retval true if the field is stored on the symbol.
+     * @retval false if the field is stored on the symbol instance.
+     */
+    bool storageIsSharedAcrossPaths( const wxString& aFieldName ) const;
+
+    // True when an ancestor sheet forces this attribute on, not the symbol itself.
+    bool attributeInheritedFromSheet( const SCH_REFERENCE& aRef, const wxString& aAttributeName ) const;
+    bool rowAttributeInheritedFromSheet( const DATA_MODEL_ROW& aGroup, int aCol );
+
     wxString getAttributeValue( const SCH_REFERENCE& aRef, const wxString& aAttributeName,
                                 const wxString& aVariantNames );
 
@@ -400,8 +417,7 @@ private:
 
     void Sort();
 
-    void updateDataStoreSymbolField( const SCH_REFERENCE& aSymbolRef, const wxString& aFieldName,
-                                     const wxString& aVariantName );
+    void updateDataStoreSymbolField( const SCH_REFERENCE& aSymbolRef, const wxString& aFieldName );
 
 protected:
     /**

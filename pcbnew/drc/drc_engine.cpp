@@ -681,6 +681,9 @@ void DRC_ENGINE::loadRules( const wxFileName& aPath )
             std::function<bool( wxString* )> resolver =
                     [&]( wxString* token ) -> bool
                     {
+                        if( IsComponentClassSelector( *token ) )
+                            return false;
+
                         return m_board->ResolveTextVar( token, 0 );
                     };
 
@@ -740,6 +743,15 @@ void DRC_ENGINE::compileRules()
             engineConstraint->condition = condition;
             engineConstraint->constraint = constraint;
             engineConstraint->parentRule = rule;
+
+            if( rule->IsImplicit() && constraint.m_Type == DISALLOW_CONSTRAINT
+                && rule->m_ImplicitItem && rule->m_ImplicitItem->Type() == PCB_ZONE_T )
+            {
+                // Duplicate zone UUIDs make an item-by-id lookup return the wrong same-UUID
+                // zone and defeat self-exclusion, so use the rule's own zone pointer
+                engineConstraint->implicitKeepoutZone = static_cast<ZONE*>( rule->m_ImplicitItem );
+            }
+
             ruleVec->push_back( engineConstraint );
         }
     }
@@ -1365,12 +1377,19 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                     REPORT( EscapeHTML( _( "--> Assertion failed. <--" ) ) )
             };
 
-    auto processConstraint =
+    // Within a single EvalRules call a, b, aLayer and the constraint type are fixed, so a rule
+    // condition's result depends only on its expression. Large rule sets contain many rules with
+    // identical conditions; caching by expression collapses those duplicates into one evaluation
+    // each and avoids re-running the (allocation-heavy) expression VM. Only used on the bulk path
+    // with no reporter, since the reporter path has reporting side effects.
+    std::unordered_map<wxString, bool> conditionCache;
+
+    auto reportConstraintHeader =
             [&]( const DRC_ENGINE_CONSTRAINT* c )
             {
-                bool implicit = c->parentRule && c->parentRule->IsImplicit();
-
                 REPORT( "" )
+
+                bool implicit = c->parentRule && c->parentRule->IsImplicit();
 
                 switch( c->constraint.m_Type )
                 {
@@ -1568,31 +1587,84 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                     REPORT( wxString::Format( _( "Checking %s." ),
                                               EscapeHTML( c->constraint.GetName() ) ) )
                 }
+            };
+
+    auto checkCondition =
+            [&]( const DRC_ENGINE_CONSTRAINT* c, REPORTER* r )
+            {
+                bool condMatched = false;
+
+                if( r )
+                {
+                    condMatched = c->condition->EvaluateFor( a, b, c->constraint.m_Type, aLayer, r );
+                }
+                else
+                {
+                    const wxString& expr = c->condition->GetExpression();
+                    auto            it = conditionCache.find( expr );
+
+                    if( it != conditionCache.end() )
+                    {
+                        condMatched = it->second;
+                    }
+                    else
+                    {
+                        condMatched = c->condition->EvaluateFor( a, b, c->constraint.m_Type, aLayer, r );
+                        conditionCache[expr] = condMatched;
+                    }
+                }
+
+                return condMatched;
+            };
+
+    auto processConstraint =
+            [&]( const DRC_ENGINE_CONSTRAINT* c )
+            {
+                bool implicit = c->parentRule && c->parentRule->IsImplicit();
+
+                if( implicit && c->parentRule->GetImplicitSource() == DRC_IMPLICIT_SOURCE::NET_CLASS )
+                {
+                    if( c->constraint.m_Type == CLEARANCE_CONSTRAINT )
+                    {
+                        if( a_is_non_copper || b_is_non_copper )
+                        {
+                            reportConstraintHeader( c );
+                            REPORT( _( "Netclass clearances apply only between copper items." ) )
+                            return;
+                        }
+                    }
+
+                    if( !checkCondition( c, nullptr ) )
+                        return;
+                }
+
+                reportConstraintHeader( c );
 
                 if( c->constraint.m_Type == CLEARANCE_CONSTRAINT )
                 {
-                    if( a_is_non_copper || b_is_non_copper )
+                    if( a_is_non_copper )
                     {
-                        if( implicit )
-                        {
-                            REPORT( _( "Netclass clearances apply only between copper items." ) )
-                        }
-                        else if( a_is_non_copper )
-                        {
-                            REPORT( wxString::Format( _( "%s contains no copper.  Rule ignored." ),
-                                                      EscapeHTML( a->GetItemDescription( this, true ) ) ) )
-                        }
-                        else if( b_is_non_copper )
-                        {
-                            REPORT( wxString::Format( _( "%s contains no copper.  Rule ignored." ),
-                                                      EscapeHTML( b->GetItemDescription( this, true ) ) ) )
-                        }
-
+                        REPORT( wxString::Format( _( "%s contains no copper.  Constraint ignored." ),
+                                                  EscapeHTML( a->GetItemDescription( this, true ) ) ) )
+                        return;
+                    }
+                    else if( b_is_non_copper )
+                    {
+                        REPORT( wxString::Format( _( "%s contains no copper.  Constraint ignored." ),
+                                                  EscapeHTML( b->GetItemDescription( this, true ) ) ) )
                         return;
                     }
                 }
                 else if( c->constraint.m_Type == DISALLOW_CONSTRAINT )
                 {
+                    // A footprint's own keepout never applies to that footprint; decide
+                    // ownership from the rule's zone so a hijacked UUID cache can't defeat it
+                    if( c->implicitKeepoutZone && a == c->implicitKeepoutZone->GetParentFootprint() )
+                    {
+                        REPORT( _( "Keepout belongs to the footprint under test; constraint ignored." ) )
+                        return;
+                    }
+
                     int mask;
 
                     if( a->GetFlags() & HOLE_PROXY )
@@ -1741,7 +1813,14 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                                                   EscapeHTML( c->condition->GetExpression() ) ) )
                     }
 
-                    if( c->condition->EvaluateFor( a, b, c->constraint.m_Type, aLayer, aReporter ) )
+                    bool condMatched;
+
+                    if( implicit && c->parentRule->GetImplicitSource() == DRC_IMPLICIT_SOURCE::NET_CLASS )
+                        condMatched = true;
+                    else
+                        condMatched = checkCondition( c, aReporter );
+
+                    if( condMatched )
                     {
                         if( aReporter )
                         {
@@ -1860,6 +1939,10 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
             a = parentFootprint;
         else
             b = parentFootprint;
+
+        // a/b just changed, so conditions evaluated against the pad must not be reused for the
+        // parent footprint.
+        conditionCache.clear();
 
         auto it = m_constraintMap.find( aConstraintType );
 
@@ -2192,6 +2275,14 @@ void DRC_ENGINE::ReportViolation( const std::shared_ptr<DRC_ITEM>& aItem, const 
 {
     {
         std::lock_guard<std::mutex> lock( m_errorLimitsMutex );
+
+        // Providers pre-check IsErrorLimitExceeded(), but that check is racy when items
+        // are processed in parallel, letting many threads slip past the cap and overshoot
+        // it.  Enforce the per-code limit atomically here so the reported count is exact
+        // and reproducible regardless of worker scheduling.
+        if( m_errorLimits[ aItem->GetErrorCode() ] <= 0 )
+            return;
+
         m_errorLimits[ aItem->GetErrorCode() ] -= 1;
     }
 

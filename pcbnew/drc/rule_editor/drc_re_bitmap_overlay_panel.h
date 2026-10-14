@@ -89,6 +89,17 @@ public:
 
 protected:
     /**
+     * Position a control on the bitmap overlay.
+     *
+     * @param aId String identifier for this field (used for error display and lookup).
+     * @param aPosition Position specification in 1x bitmap coordinates.
+     * @param aControl The control to use
+     * @return Pointer to the created field wrapper.
+     */
+    template <typename T>
+    DRC_RE_OVERLAY_FIELD* AddControl( const wxString& aId, const DRC_RE_FIELD_POSITION& aPosition, T* aControl );
+
+    /**
      * Create and position a field control on the bitmap overlay.
      *
      * @tparam T The wxWindow-derived control type to create.
@@ -119,6 +130,7 @@ protected:
 
     /**
      * Create and position a checkbox control on the bitmap overlay.
+     * Checkbox label is set to label text specified in aPosition
      *
      * @param aId String identifier for this checkbox.
      * @param aPosition Position specification in 1x bitmap coordinates.
@@ -157,48 +169,66 @@ private:
      */
     void PositionLabel( DRC_RE_OVERLAY_FIELD* aField );
 
+    /**
+     * Position a prefix label to the left of its field control.
+     *
+     * @param aField The overlay field containing the prefix label to position.
+     */
+    void PositionPrefixLabel( DRC_RE_OVERLAY_FIELD* aField );
+
 protected:
     wxBitmap                                        m_bitmap;       ///< Current background bitmap
     BITMAPS                                         m_bitmapId;     ///< BITMAPS enum value
-    wxSize                                          m_baseBitmapSize; ///< Bitmap size at 1x scale
+    wxSize                                          m_logicalBitmapSize; ///< Bitmap size in logical pixels
     std::vector<std::unique_ptr<DRC_RE_OVERLAY_FIELD>> m_fields;    ///< All overlay fields
     std::map<wxString, DRC_RE_OVERLAY_FIELD*>       m_fieldIdMap;   ///< Field ID to field lookup
 };
 
 
 template <typename T>
-DRC_RE_OVERLAY_FIELD* DRC_RE_BITMAP_OVERLAY_PANEL::AddField( const wxString& aId,
-                                                             const DRC_RE_FIELD_POSITION& aPosition,
-                                                             long aStyle )
+DRC_RE_OVERLAY_FIELD* DRC_RE_BITMAP_OVERLAY_PANEL::AddControl( const wxString&              aId,
+                                                               const DRC_RE_FIELD_POSITION& aPosition, T* aControl )
 {
-    // Create the control
-    T* control = new T( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, aStyle );
-
     // Create the overlay field wrapper
-    auto field = std::make_unique<DRC_RE_OVERLAY_FIELD>( this, aId, control, aPosition );
+    auto                  field = std::make_unique<DRC_RE_OVERLAY_FIELD>( this, aId, aControl, aPosition );
     DRC_RE_OVERLAY_FIELD* fieldPtr = field.get();
 
     // Set up styling
-    SetupFieldStyling( control );
+    SetupFieldStyling( aControl );
 
-    // Position the field
-    wxPoint pos( aPosition.xStart, aPosition.yTop );
-    int width = aPosition.xEnd - aPosition.xStart + DRC_RE_OVERLAY_WE;
-    wxSize size( width, control->GetBestSize().GetHeight() );
-    control->SetPosition( pos );
-    control->SetSize( size );
+    // Position the field (yCenter is vertical mid-point of the control)
+    int     height = aControl->GetBestSize().GetHeight();
+    int     width = aPosition.xEnd - aPosition.xStart;
+    wxPoint pos( aPosition.xStart, aPosition.yCenter - ( height + 1 ) / 2 );
+    wxSize  size( width, height );
+    aControl->SetPosition( pos );
+    aControl->SetSize( size );
 
-    // Create label if specified
-    fieldPtr->CreateLabel();
+    // Create labels if specified
+    fieldPtr->CreateLabels();
 
     if( fieldPtr->HasLabel() )
         PositionLabel( fieldPtr );
+
+    if( fieldPtr->HasPrefixLabel() )
+        PositionPrefixLabel( fieldPtr );
 
     // Store in collections
     m_fieldIdMap[aId] = fieldPtr;
     m_fields.push_back( std::move( field ) );
 
     return fieldPtr;
+}
+
+
+template <typename T>
+DRC_RE_OVERLAY_FIELD* DRC_RE_BITMAP_OVERLAY_PANEL::AddField( const wxString&              aId,
+                                                             const DRC_RE_FIELD_POSITION& aPosition, long aStyle )
+{
+    // Create the control
+    T* control = new T( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, aStyle );
+
+    return AddControl( aId, aPosition, control );
 }
 
 

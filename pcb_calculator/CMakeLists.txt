@@ -86,6 +86,40 @@ if( APPLE )
     set( MACOSX_BUNDLE_NAME pcb_calculator )
 endif()
 
+if( EMSCRIPTEN )
+    # WASM: single-binary build (mirrors bitmap2component pattern).
+    # single_top.cpp already has a !defined(BUILD_KIWAY_DLL) branch that statically
+    # resolves KIFACE_GETTER for pcb_calculator and bitmap2component, so we link
+    # all kiface sources directly into the executable and skip the MODULE library.
+    add_executable( pcb_calculator
+        ${CMAKE_SOURCE_DIR}/common/single_top.cpp
+        pcb_calculator.cpp
+        ${PCB_CALCULATOR_SRCS}
+        ${PCB_CALCULATOR_RESOURCES}
+        )
+    set_source_files_properties( ${CMAKE_SOURCE_DIR}/common/single_top.cpp PROPERTIES
+        COMPILE_DEFINITIONS "TOP_FRAME=FRAME_CALC"
+        )
+    set_source_files_properties( pcb_calculator.cpp PROPERTIES
+        COMPILE_DEFINITIONS "COMPILING_DLL"
+        )
+    target_link_libraries( pcb_calculator
+        common
+        kicommon
+        markdown_lib
+        ${wxWidgets_LIBRARIES}
+        )
+    # Emit calculator.{js,wasm,...} so the JS loader's embedded wasm URL matches
+    # what the test harness serves at /kicad/calculator.{js,wasm}.
+    set_target_properties( pcb_calculator PROPERTIES OUTPUT_NAME calculator )
+    target_link_options( pcb_calculator PRIVATE
+        "LINKER:--allow-multiple-definition"
+        $<$<BOOL:${KICAD_MAKE_LINK_MAPS}>:-Wl,--cref,-Map=pcb_calculator.map>
+        )
+endif()
+
+# Native: a launcher executable + the pcb_calculator_kiface MODULE (loaded dynamically).
+if( NOT EMSCRIPTEN )
 add_executable( pcb_calculator WIN32 MACOSX_BUNDLE
     ${CMAKE_SOURCE_DIR}/common/single_top.cpp
     ${PCB_CALCULATOR_RESOURCES}
@@ -191,11 +225,18 @@ if( KICAD_WIN32_INSTALL_PDBS )
     install(FILES $<TARGET_PDB_FILE:pcb_calculator> DESTINATION ${KICAD_BIN})
     install(FILES $<TARGET_PDB_FILE:pcb_calculator_kiface> DESTINATION ${KICAD_KIFACE})
 endif()
+endif()
 
 # auto-generate pcb_calculator_datafile.h and pcb_calculator_datafile_keywords.cpp
-# for the storage data file format.
+# for the storage data file format. On EMSCRIPTEN the kiface sources live in the
+# pcb_calculator executable; on native they live in the pcb_calculator_kiface MODULE.
+if( EMSCRIPTEN )
+    set( _PCBCALC_LEXER_TARGET pcb_calculator )
+else()
+    set( _PCBCALC_LEXER_TARGET pcb_calculator_kiface )
+endif()
 make_lexer(
-    pcb_calculator_kiface
+    ${_PCBCALC_LEXER_TARGET}
     pcb_calculator_datafile.keywords
     pcb_calculator_datafile_lexer.h
     pcb_calculator_datafile_keywords.cpp

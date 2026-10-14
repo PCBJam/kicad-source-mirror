@@ -53,7 +53,56 @@ set( GAL_SRCS
     cairo/cairo_print.cpp
     )
 
-add_library( gal SHARED ${GAL_SRCS} )
+# On Emscripten the OpenGL GAL is replaced by the WebGL GAL (pure WebGL 2.0, no
+# LEGACY_GL_EMULATION). The shared hidpi_gl_* canvases stay in GAL_SRCS above.
+if( EMSCRIPTEN )
+    list( REMOVE_ITEM GAL_SRCS
+        opengl/opengl_gal.cpp
+        opengl/gl_resources.cpp
+        opengl/shader.cpp
+        opengl/vertex_item.cpp
+        opengl/vertex_container.cpp
+        opengl/cached_container.cpp
+        opengl/cached_container_gpu.cpp
+        opengl/cached_container_ram.cpp
+        opengl/noncached_container.cpp
+        opengl/vertex_manager.cpp
+        opengl/gpu_manager.cpp
+        opengl/antialiasing.cpp
+        opengl/opengl_compositor.cpp
+        opengl/utils.cpp
+    )
+    list( APPEND GAL_SRCS
+        # WebGL GAL (ported from OPENGL_GAL)
+        webgl/webgl_gal.cpp
+        webgl/webgl_compositor.cpp
+        webgl/shader.cpp
+        webgl/vertex_manager.cpp
+        webgl/vertex_container.cpp
+        webgl/vertex_item.cpp
+        webgl/gpu_manager.cpp
+        webgl/cached_container.cpp
+        webgl/cached_container_gpu.cpp
+        webgl/cached_container_ram.cpp
+        webgl/noncached_container.cpp
+        webgl/webgl_antialiasing.cpp
+        webgl/fullscreen_quad.cpp
+        webgl/gl_context_mgr.cpp
+        webgl/gl_resources.cpp
+        webgl/utils.cpp
+        # Note: bitmap_font_desc.c and bitmap_font_img.c are #included from gl_resources.cpp
+
+        # GLU tesselator (earcut-based, works for both native and WASM)
+        ${CMAKE_SOURCE_DIR}/libs/kimath/glu_tess/glu_tess_impl.cpp
+    )
+endif()
+
+# WASM: STATIC for the same reason as kicommon (emcc 6 runtime-dynamic .so).
+if( EMSCRIPTEN )
+    add_library( gal STATIC ${GAL_SRCS} )
+else()
+    add_library( gal SHARED ${GAL_SRCS} )
+endif()
 
 if( KICAD_USE_PCH )
     target_precompile_headers( gal
@@ -64,6 +113,15 @@ if( KICAD_USE_PCH )
             <pgm_base.h>
             <wx/wx.h>
              )
+endif()
+
+# For WASM: include paths for WebGL and GLU stub headers
+if( EMSCRIPTEN )
+    target_include_directories( gal PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/webgl
+        ${CMAKE_SOURCE_DIR}/libs/kimath/glu_tess
+        ${KICAD_WASM_LAYER}/stubs
+    )
 endif()
 
 if( WIN32 )
@@ -78,13 +136,20 @@ target_link_libraries( gal
     nlohmann_json
     ${CAIRO_LIBRARIES}
     ${PIXMAN_LIBRARIES}
-    ${OPENGL_LIBRARIES}
     ${GDI_PLUS_LIBRARIES}
     # outline font support
     ${FREETYPE_LIBRARIES}
     ${HarfBuzz_LIBRARIES}
     ${Fontconfig_LIBRARIES}
 )
+
+# OpenGL libraries - WASM uses Emscripten's built-in GL via -sFULL_ES3
+if( NOT EMSCRIPTEN )
+    target_link_libraries( gal
+        ${GLEW_LIBRARIES}
+        ${OPENGL_LIBRARIES}
+    )
+endif()
 
 target_compile_definitions( gal PRIVATE GAL_DLL=1 )
 
@@ -121,6 +186,7 @@ if( APPLE )
     set_target_properties( gal PROPERTIES BUILD_WITH_INSTALL_RPATH 1 )
 endif()
 
+# OpenGL shaders - native uses GLSL 1.20 directly, WASM uses ES 3.0 converted shaders
 function( add_shader outTarget inFile shaderName )
     set(outCppName "${shaderName}.cpp")
     set(outHeaderName "${shaderName}.h")
@@ -143,6 +209,12 @@ function( add_shader outTarget inFile shaderName )
     target_sources( ${outTarget} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/${outCppName} )
     target_include_directories( ${outTarget} PUBLIC ${CMAKE_BINARY_DIR}/include/gal/shaders/ )
 endfunction()
+
+if( EMSCRIPTEN )
+    # On Emscripten, redefine add_shader() to emit GLSL ES 3.0 (the later definition wins), so the
+    # unconditional add_shader() calls below produce ES3 shaders; native keeps the GLSL 1.20 path.
+    include( WasmShaderOverride )
+endif()
 
 add_shader( gal kicad_frag.glsl glsl_kicad_frag )
 add_shader( gal kicad_vert.glsl glsl_kicad_vert )

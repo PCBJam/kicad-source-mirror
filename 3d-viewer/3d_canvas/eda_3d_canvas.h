@@ -39,6 +39,7 @@ class WX_INFOBAR;
 class wxStatusBar;
 class BOARD;
 class RENDER_3D_RAYTRACE_GL;
+class RENDER_3D_RAYTRACE_RAM;
 class RENDER_3D_OPENGL;
 
 
@@ -301,6 +302,15 @@ private:
 
     RAY getRayAtCurrentMousePosition();
 
+#ifdef __EMSCRIPTEN__
+    /**
+     * WASM only: upload the CPU raytracer's RGBA output buffer to a texture and
+     * draw it across the canvas with a WebGL2 fullscreen quad. The blit program,
+     * VAO/VBO and texture are created lazily on first use.
+     */
+    void blitRaytracerImage();
+#endif
+
 private:
     TOOL_DISPATCHER*       m_eventDispatcher = nullptr;
     wxStatusBar*           m_parentStatusBar = nullptr;         // Parent statusbar to report progress
@@ -323,11 +333,30 @@ private:
 
     BOARD_ADAPTER&         m_boardAdapter;            // Pre-computed 3D info and settings
     RENDER_3D_BASE*        m_3d_render = nullptr;
+#ifdef __EMSCRIPTEN__
+    // WASM has no fixed-function GL: the 3D viewer renders with the GL-free CPU
+    // raytracer (RENDER_3D_RAYTRACE_RAM) and blits its RGBA buffer to the canvas
+    // via a WebGL2 textured quad. RENDER_3D_RAYTRACE_RAM also provides the
+    // IntersectBoardItem() picking shared with the desktop RENDER_3D_RAYTRACE_GL.
+    RENDER_3D_RAYTRACE_RAM* m_3d_render_raytracing;
+#else
     RENDER_3D_RAYTRACE_GL* m_3d_render_raytracing;
+#endif
     RENDER_3D_OPENGL*      m_3d_render_opengl;
 
     bool                   m_opengl_supports_raytracing = true;
     bool                   m_render_raytracing_was_requested = false;
+
+#ifdef __EMSCRIPTEN__
+    // GL objects for blitting the CPU raytracer's RGBA buffer to the canvas.
+    // (GLuint/GLint are unsigned int/int; kept untyped here to avoid a GL header
+    // dependency in this widely-included canvas header.)
+    unsigned int           m_rtBlitProgram = 0;
+    unsigned int           m_rtBlitTexture = 0;
+    unsigned int           m_rtBlitVAO = 0;
+    unsigned int           m_rtBlitVBO = 0;
+    int                    m_rtBlitTexLoc = -1;
+#endif
 
     ACCELERATOR_3D*        m_accelerator3DShapes = nullptr;    // used for mouse over searching
 

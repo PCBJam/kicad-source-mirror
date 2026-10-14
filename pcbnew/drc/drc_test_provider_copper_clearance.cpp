@@ -281,10 +281,11 @@ bool DRC_TEST_PROVIDER_COPPER_CLEARANCE::testSingleLayerItemAgainstItem( BOARD_I
 
         if( itemShape->Collide( otherShape, sub_e( clearance ), &actual, &pos ) )
         {
-            if( itemNet && m_drcEngine->IsNetTieExclusion( itemNet->GetNetCode(), layer, pos, other ) )
+            if( ( itemNet && m_drcEngine->IsNetTieExclusion( itemNet->GetNetCode(), layer, pos, other ) )
+                || ( otherNet && m_drcEngine->IsNetTieExclusion( otherNet->GetNetCode(), layer, pos, item ) ) )
             {
-                // Collision occurred as track was entering a pad marked as a net-tie.  We
-                // allow these.
+                // Collision occurred as a copper item entered a pad marked as a net-tie.  We allow
+                // these regardless of which side DRC happened to test first.
             }
             else if( actual == 0 && otherNet && testShorting )
             {
@@ -1007,20 +1008,21 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testGraphicClearances()
     std::atomic<size_t> done( 1 );
 
     for( FOOTPRINT* footprint : m_board->Footprints() )
-        count += footprint->GraphicalItems().size();
+        count += footprint->GraphicalItems().size() + footprint->GetFields().size();
 
     REPORT_AUX( wxString::Format( wxT( "Testing %d graphics..." ), count ) );
 
     auto isKnockoutText =
             []( BOARD_ITEM* item )
             {
-                return item->Type() == PCB_TEXT_T && static_cast<PCB_TEXT*>( item )->IsKnockout();
+                return ( item->Type() == PCB_TEXT_T || item->Type() == PCB_FIELD_T )
+                        && static_cast<PCB_TEXT*>( item )->IsKnockout();
             };
 
     auto testGraphicAgainstZone =
             [this, isKnockoutText]( BOARD_ITEM* item )
             {
-                if( item->Type() == PCB_REFERENCE_IMAGE_T )
+                if( item->Type() == PCB_REFERENCE_IMAGE_T || isInvisibleText( item ) )
                     return;
 
                 if( !IsCopperLayer( item->GetLayer() ) )
@@ -1139,6 +1141,17 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testGraphicClearances()
                                 testCopperGraphic( static_cast<PCB_SHAPE*>( item ) );
                             }
 
+                            done.fetch_add( 1 );
+                        }
+                    }
+
+                    // Fields (reference, value, etc.) live in their own list but render as real
+                    // copper when placed on a copper layer, so they must be tested too.
+                    for( PCB_FIELD* field : footprint->GetFields() )
+                    {
+                        if( !m_drcEngine->IsCancelled() )
+                        {
+                            testGraphicAgainstZone( field );
                             done.fetch_add( 1 );
                         }
                     }

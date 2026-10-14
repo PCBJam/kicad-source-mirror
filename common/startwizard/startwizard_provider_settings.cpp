@@ -27,8 +27,10 @@
 #include <bitmaps/bitmaps_list.h>
 #include <settings/common_settings.h>
 #include <settings/settings_manager.h>
+#include <trace_helpers.h>
 #include <widgets/std_bitmap_button.h>
 #include <wx/dirdlg.h>
+#include <wx/log.h>
 
 
 class PANEL_STARTWIZARD_SETTINGS : public PANEL_STARTWIZARD_SETTINGS_BASE
@@ -212,6 +214,13 @@ void STARTWIZARD_PROVIDER_SETTINGS::Finish()
     // Else, perform migration.  First copy the old files in, then reload the in-memory copies.
     mgr.MigrateFromPreviousVersion( m_model->import_path );
     mgr.Load();
+
+    // The wizard defaulted to the system locale, so re-apply the just-imported language from
+    // common settings to avoid requiring a restart.
+    wxString languageErr;
+
+    if( !Pgm().SetLanguage( languageErr, true ) )
+        wxLogTrace( traceLocale, wxT( "Unable to apply imported language: %s" ), languageErr );
 }
 
 

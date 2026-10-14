@@ -18,8 +18,12 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <ranges>
+#include <utility>
+#include <vector>
 
 #include <mock_pgm_base.h>
 #include <richio.h>
@@ -36,6 +40,7 @@
 #include <libraries/library_table_parser.h>
 #include <libraries/library_table_grammar.h>
 #include <settings/kicad_settings.h>
+#include <startwizard/startwizard_provider_libraries.h>
 
 
 BOOST_AUTO_TEST_SUITE( LibraryTables )
@@ -301,6 +306,8 @@ BOOST_AUTO_TEST_CASE( IsPcmManagedRow_URITemplateMatching )
           wxS( "Legacy versioned 3RD_PARTY template should still match the wildcard" ) },
         { wxS( "${KICAD10_3RD_PARTY}/footprints/bar/bar.pretty" ), true,
           wxS( "Footprint library using 3RD_PARTY template should match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/design_blocks/baz/baz.kicad_blocks" ), true,
+          wxS( "Design block library using 3RD_PARTY template should match" ) },
         { wxS( "${KICAD_USER_LIB}/symbols/test.kicad_sym" ), false,
           wxS( "Row using a different env var must not be flagged as PCM-managed" ) },
         { wxS( "${KIPRJMOD}/libs/local.kicad_sym" ), false,
@@ -311,6 +318,32 @@ BOOST_AUTO_TEST_CASE( IsPcmManagedRow_URITemplateMatching )
           wxS( "Malformed empty var name must not match" ) },
         { wxS( "${KICAD10_3RD_PARTY_EXTRA}/foo" ), false,
           wxS( "Similar-but-different var name must not match" ) },
+        // Issue #23476: a user who repurposes KICADn_3RD_PARTY to point at their own
+        // library collection adds libraries directly under that root (no PCM category
+        // folder). Such rows must not be treated as PCM-managed or auto-remove deletes
+        // them.
+        { wxS( "${KICAD10_3RD_PARTY}/mylib.kicad_sym" ), false,
+          wxS( "User library directly under repurposed 3RD_PARTY root must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/MyLibs/mylib.kicad_sym" ), false,
+          wxS( "User library under a non-PCM subfolder of 3RD_PARTY must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/eagle/imported.pretty" ), false,
+          wxS( "User footprint library under a non-PCM subfolder must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/symbols" ), false,
+          wxS( "3RD_PARTY/symbols with no nested package must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/symbols/mylib.kicad_sym" ), false,
+          wxS( "User symbol library directly in symbols folder (no package level) must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}symbols/foo/foo.kicad_sym" ), false,
+          wxS( "Missing separator after env var must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/design_blocks/baz/baz.kicad_dbl" ), false,
+          wxS( "Wrong design-block library extension must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/symbols/foo/foo.txt" ), false,
+          wxS( "Non-library file in PCM symbols tree must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}\\symbols\\foo\\foo.kicad_sym" ), false,
+          wxS( "Backslash-separated URI is never emitted by PCM and must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/symbols//foo.kicad_sym" ), false,
+          wxS( "Empty package-id component must not match" ) },
+        { wxS( "${KICAD10_3RD_PARTY}/symbols/foo/.kicad_sym" ), false,
+          wxS( "Extension-only leaf with empty library stem must not match" ) },
     };
 
     for( const CASE& c : cases )
@@ -372,6 +405,67 @@ BOOST_AUTO_TEST_CASE( ReadOnlyTable )
     // Clean up
     tmpFn.SetPermissions( wxS_IRUSR | wxS_IWUSR );
     wxRemoveFile( tmpFn.GetFullPath() );
+}
+
+
+/**
+ * Regression test for a new project-scope library not appearing in the symbol editor
+ * library tree until KiCad was restarted.
+ *
+ * A project with no sym-lib-table has no table on disk, so the manager builds one on demand
+ * for a path that does not exist. The table constructor treats a missing file as a parse
+ * failure and flags the table invalid, and Rows() drops every row of an invalid table. A
+ * library added to such a project was written to disk but stayed invisible to everything
+ * that enumerates rows, which is why it only turned up after a restart.
+ */
+BOOST_AUTO_TEST_CASE( RowsAddedToANewProjectTableAreEnumerated )
+{
+    std::error_code       ec;
+    std::filesystem::path dir =
+            std::filesystem::temp_directory_path( ec ) / std::filesystem::path( "kicad_qa_new_project_table" );
+
+    std::filesystem::remove_all( dir, ec );
+    std::filesystem::create_directories( dir, ec );
+
+    std::filesystem::path proPath = dir / "new_project.kicad_pro";
+
+    {
+        std::ofstream proFile( proPath );
+        proFile << R"({ "meta": { "filename": "new_project.kicad_pro", "version": 3 } })";
+    }
+
+    SETTINGS_MANAGER& settings = Pgm().GetSettingsManager();
+    BOOST_REQUIRE( settings.LoadProject( wxString( proPath.string() ) ) );
+
+    wxFileName tableFile( wxString( ( dir / "sym-lib-table" ).string() ) );
+    BOOST_REQUIRE( !tableFile.FileExists() );
+
+    LIBRARY_MANAGER manager;
+
+    std::optional<LIBRARY_TABLE*> optTable = manager.Table( LIBRARY_TABLE_TYPE::SYMBOL, LIBRARY_TABLE_SCOPE::PROJECT );
+    BOOST_REQUIRE( optTable.has_value() );
+
+    LIBRARY_TABLE*     table = optTable.value();
+    LIBRARY_TABLE_ROW& row = table->InsertRow();
+
+    row.SetNickname( wxS( "NewLib" ) );
+    row.SetURI( wxS( "${KIPRJMOD}/NewLib.kicad_sym" ) );
+    row.SetType( wxS( "KiCad" ) );
+
+    auto projectRowCount = [&]() -> size_t
+    {
+        return manager.Rows( LIBRARY_TABLE_TYPE::SYMBOL, LIBRARY_TABLE_SCOPE::PROJECT ).size();
+    };
+
+    BOOST_CHECK_MESSAGE( projectRowCount() == 1,
+                         "A library added to a project with no library table must be visible to "
+                         "Rows(), which is what fills the library tree" );
+
+    BOOST_REQUIRE( table->Save().has_value() );
+    BOOST_CHECK_EQUAL( projectRowCount(), 1 );
+
+    settings.UnloadProject( &settings.Prj(), false );
+    std::filesystem::remove_all( dir, ec );
 }
 
 
@@ -454,6 +548,112 @@ BOOST_AUTO_TEST_CASE( StockTableReferenceURIHonorsExternalDefinition )
         vars[templateVar] = savedEntry;
     else
         vars.erase( templateVar );
+}
+
+
+/// Builds an in-memory symbol library table seeded with the given user rows.
+static LIBRARY_TABLE makeImportedSymbolTable( const std::vector<std::pair<wxString, wxString>>& aUserRows )
+{
+    LIBRARY_TABLE table( true, wxEmptyString, LIBRARY_TABLE_SCOPE::GLOBAL );
+    table.SetType( LIBRARY_TABLE_TYPE::SYMBOL );
+
+    for( const auto& [nickname, uri] : aUserRows )
+    {
+        LIBRARY_TABLE_ROW& row = table.InsertRow();
+        row.SetNickname( nickname );
+        row.SetURI( uri );
+        row.SetType( wxS( "KiCad" ) );
+    }
+
+    return table;
+}
+
+
+static size_t countChainedKiCadRows( const LIBRARY_TABLE& aTable )
+{
+    return std::ranges::count_if( aTable.Rows(),
+            []( const LIBRARY_TABLE_ROW& aRow )
+            {
+                return aRow.Type() == LIBRARY_TABLE_ROW::TABLE_TYPE_NAME
+                       && aRow.Nickname() == wxS( "KiCad" );
+            } );
+}
+
+
+/**
+ * Regression test for issue 24594. A user who removed every built-in KiCad library in the
+ * previous version selected "Import tables" + "Migrate built-in libraries"; migration must not
+ * silently add the stock libraries back into their table.
+ */
+BOOST_AUTO_TEST_CASE( MigrateBuiltInLibraries_NoStockRefsAddsNothing )
+{
+    const wxString stockPath = wxS( "${KICAD10_SYMBOL_DIR}/sym-lib-table" );
+
+    LIBRARY_TABLE table = makeImportedSymbolTable( {
+        { wxS( "MyParts" ),   wxS( "${KIPRJMOD}/../libs/MyParts.kicad_sym" ) },
+        { wxS( "MyPassives" ), wxS( "/home/user/kicad/MyPassives.kicad_sym" ) },
+    } );
+
+    const size_t rowsBefore = table.Rows().size();
+
+    bool modified = STARTWIZARD_PROVIDER_LIBRARIES::MigrateBuiltInLibraries(
+            table, LIBRARY_TABLE_TYPE::SYMBOL, stockPath, true );
+
+    BOOST_CHECK_MESSAGE( !modified, "Table with no stock references should not be modified" );
+    BOOST_CHECK_EQUAL( table.Rows().size(), rowsBefore );
+    BOOST_CHECK_EQUAL( countChainedKiCadRows( table ), 0u );
+}
+
+
+/// Direct stock rows are removed and replaced by a single chained reference to the latest stock.
+BOOST_AUTO_TEST_CASE( MigrateBuiltInLibraries_DirectStockRowsBecomeChained )
+{
+    const wxString stockPath = wxS( "${KICAD10_SYMBOL_DIR}/sym-lib-table" );
+
+    LIBRARY_TABLE table = makeImportedSymbolTable( {
+        { wxS( "Device" ),  wxS( "${KICAD9_SYMBOL_DIR}/Device.kicad_sym" ) },
+        { wxS( "MyParts" ), wxS( "${KIPRJMOD}/../libs/MyParts.kicad_sym" ) },
+    } );
+
+    bool modified = STARTWIZARD_PROVIDER_LIBRARIES::MigrateBuiltInLibraries(
+            table, LIBRARY_TABLE_TYPE::SYMBOL, stockPath, true );
+
+    BOOST_CHECK( modified );
+    BOOST_CHECK_EQUAL( countChainedKiCadRows( table ), 1u );
+
+    // The user's own row must survive and the direct stock row must be gone.
+    BOOST_CHECK( table.Row( wxS( "MyParts" ) ).has_value() );
+    BOOST_CHECK( !table.Row( wxS( "Device" ) ).has_value() );
+}
+
+
+/// An existing chained reference is repointed at the latest stock without a second one being added.
+BOOST_AUTO_TEST_CASE( MigrateBuiltInLibraries_ChainedRowMigratedInPlace )
+{
+    const wxString stockPath = wxS( "${KICAD10_SYMBOL_DIR}/sym-lib-table" );
+
+    LIBRARY_TABLE table( true, wxEmptyString, LIBRARY_TABLE_SCOPE::GLOBAL );
+    table.SetType( LIBRARY_TABLE_TYPE::SYMBOL );
+
+    LIBRARY_TABLE_ROW& chained = table.InsertRow();
+    chained.SetType( LIBRARY_TABLE_ROW::TABLE_TYPE_NAME );
+    chained.SetNickname( wxS( "KiCad" ) );
+    chained.SetURI( wxS( "${KICAD9_SYMBOL_DIR}/sym-lib-table" ) );
+
+    LIBRARY_TABLE_ROW& mine = table.InsertRow();
+    mine.SetNickname( wxS( "MyParts" ) );
+    mine.SetURI( wxS( "${KIPRJMOD}/../libs/MyParts.kicad_sym" ) );
+    mine.SetType( wxS( "KiCad" ) );
+
+    bool modified = STARTWIZARD_PROVIDER_LIBRARIES::MigrateBuiltInLibraries(
+            table, LIBRARY_TABLE_TYPE::SYMBOL, stockPath, true );
+
+    BOOST_CHECK( modified );
+    BOOST_CHECK_EQUAL( countChainedKiCadRows( table ), 1u );
+
+    auto migrated = table.Row( wxS( "KiCad" ) );
+    BOOST_REQUIRE( migrated.has_value() );
+    BOOST_CHECK_EQUAL( ( *migrated )->URI(), stockPath );
 }
 
 

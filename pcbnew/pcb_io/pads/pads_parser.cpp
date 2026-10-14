@@ -28,6 +28,7 @@
 #include <iostream>
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <wx/log.h>
@@ -239,6 +240,13 @@ void PARSER::Parse( const wxString& aFileName )
         m_is_basic_units = true;
     }
 
+    // PADS V3-V5 use 2-line text/label entries (no font line). The version
+    // sequence then jumps to the year releases V2003/V2005/V2007 and to V9+,
+    // all of which insert a font style line between the attribute and name
+    // lines. An unrecognized header defaults to the modern 3-line format.
+    int majorVer = parseMajorVersion();
+    m_has_font_lines = ( majorVer == 0 || majorVer >= 9 );
+
     while( readLine( file, line ) )
     {
         if( line.empty() ) continue;
@@ -347,6 +355,31 @@ bool PARSER::readLine( std::ifstream& aStream, std::string& aLine )
 void PARSER::pushBackLine( const std::string& aLine )
 {
     m_pushed_line = aLine;
+}
+
+
+int PARSER::parseMajorVersion() const
+{
+    const std::string& ver = m_file_header.version;
+
+    // Version strings look like "V5.0", "V9.4", "V2005.0", etc.
+    size_t start = 0;
+
+    if( !ver.empty() && ( ver[0] == 'V' || ver[0] == 'v' ) )
+        start = 1;
+
+    size_t dot = ver.find( '.', start );
+    std::string major_str = ( dot != std::string::npos ) ? ver.substr( start, dot - start )
+                                                         : ver.substr( start );
+
+    try
+    {
+        return std::stoi( major_str );
+    }
+    catch( const std::exception& )
+    {
+        return 0;
+    }
 }
 
 void PARSER::parseSectionPCB( std::ifstream& aStream )
@@ -653,11 +686,12 @@ void PARSER::parseSectionPARTS( std::ifstream& aStream )
                 attr.right_reading = ( right_reading_str == "Y" || right_reading_str == "ORTHO" );
             }
 
-            // Line 2: Font
-            if( !readLine( aStream, line ) ) break;
-            attr.font_info = line;
+            if( m_has_font_lines )
+            {
+                if( !readLine( aStream, line ) ) break;
+                attr.font_info = line;
+            }
 
-            // Line 3: Name
             if( !readLine( aStream, line ) ) break;
             attr.name = line;
 
@@ -1489,32 +1523,30 @@ void PARSER::parseSectionPARTDECAL( std::ifstream& aStream )
         }
 
         // Parse Text/Labels
-        // The header says how many text/labels.
-        // In the example:
-        // VALUE ...
-        // Regular ...
-        // Part Type
-        // VALUE ...
-        // Regular ...
-        // Ref.Des.
-
-        // Each text/label seems to take 3 lines?
-        // VALUE line, Font line, Content line.
+        // V9+ format: 3 lines per entry (VALUE line, font line, name line)
+        // V5.x format: 2 lines per entry (VALUE line, name line, no font)
 
         for( int i = 0; i < text_cnt + labels; ++i )
         {
-             std::string line1, line2, line3;
-             if( !readLine( aStream, line1 ) ) break;
-             if( !readLine( aStream, line2 ) ) break;
-             if( !readLine( aStream, line3 ) ) break;
+             std::string attrLine, fontLine, nameLine;
+
+             if( !readLine( aStream, attrLine ) )
+                 break;
+
+             if( m_has_font_lines )
+             {
+                 if( !readLine( aStream, fontLine ) )
+                     break;
+             }
+
+             if( !readLine( aStream, nameLine ) )
+                 break;
 
              ATTRIBUTE attr;
-             // Line 1: VALUE X Y ...
-             std::stringstream ss( line1 );
+             std::stringstream ss( attrLine );
              std::string type_token;
              ss >> type_token;
 
-             // First token is visibility type: VALUE, FULL_NAME, NAME, FULL_BOTH, BOTH, NONE
              std::string mirrored_str, right_reading_str;
 
              if( ss >> attr.x >> attr.y >> attr.orientation >> attr.level
@@ -1528,34 +1560,38 @@ void PARSER::parseSectionPARTDECAL( std::ifstream& aStream )
                  attr.right_reading = ( right_reading_str == "Y" || right_reading_str == "ORTHO" );
              }
 
-             attr.font_info = line2;
-             attr.name = line3;
+             attr.font_info = fontLine;
+             attr.name = nameLine;
 
              decal.attributes.push_back( attr );
-        }        // Parse Terminals (T lines)
+        }
+
+        // Parse Terminals (T lines)
         // T-150  -110  -150  -110  1
-        // Format: T X Y NMX NMY PINNUM
-        // Wait, the example has: T-150 -110 -150 -110 1
-        // It seems to be T<X> <Y> <NMX> <NMY> <PINNUM>
-        // Note: T is attached to X coordinate sometimes? "T-150"
+        // Format: T X Y NMX NMY [PINNUM]
+        // The T prefix is concatenated with the X coordinate (e.g. "T-150").
+        // V5.x omits the pin number; V9+ includes it.
 
         for( int i = 0; i < terminals; ++i )
         {
             if( !readLine( aStream, line ) ) break;
 
-            // Handle T prefix
             size_t t_pos = line.find( 'T' );
+
             if( t_pos != std::string::npos )
-            {
-                line[t_pos] = ' '; // Replace T with space
-            }
+                line[t_pos] = ' ';
 
             std::stringstream iss_t( line );
             TERMINAL term;
             double nmx = 0.0, nmy = 0.0;
 
-            if( iss_t >> term.x >> term.y >> nmx >> nmy >> term.name )
+            if( iss_t >> term.x >> term.y >> nmx >> nmy )
             {
+                iss_t >> term.name;
+
+                if( term.name.empty() )
+                    term.name = std::to_string( i + 1 );
+
                 decal.terminals.push_back( term );
             }
         }
@@ -1829,6 +1865,9 @@ void PARSER::parseSectionROUTES( std::ifstream& aStream )
     double last_plane_connection_width = 0;
     bool last_plane_on_copper = false;
     std::string default_via_name;
+    bool has_pending_arc_center = false;
+    ARC_POINT pending_arc_center;
+    std::string pending_arc_dir;
 
     while( readLine( aStream, line ) )
     {
@@ -1844,6 +1883,7 @@ void PARSER::parseSectionROUTES( std::ifstream& aStream )
                  }
 
                  prev_is_plane_connection = false;
+                 has_pending_arc_center = false;
 
                  std::istringstream iss( line );
                  std::string token;
@@ -2099,18 +2139,52 @@ void PARSER::parseSectionROUTES( std::ifstream& aStream )
             }
         }
 
-        // If an arc direction was specified, mark this as an arc point
-        // The arc center will be calculated from the previous and next points
+        // A corner carrying an arc direction is the arc's center, not a track vertex.
+        // Per the PADS ASCII spec the arc begins on the preceding corner and ends on
+        // the following one, curving around this corner. Defer it and attach explicit
+        // geometry to the next corner.
         if( !arc_dir.empty() )
         {
-            // For route arcs, we need previous point to calculate arc parameters
-            // The arc goes from previous point to this point with given direction
-            // PADS uses CW/CCW to indicate arc direction
-            // We'll store a placeholder arc and the loader will need to compute it
-            pt.is_arc = true;
+            pending_arc_center = pt;
+            pending_arc_dir = arc_dir;
+            has_pending_arc_center = true;
+            continue;
+        }
 
-            // Delta angle sign indicates direction: positive = CCW, negative = CW
-            pt.arc.delta_angle = ( arc_dir == "CCW" ) ? 90.0 : -90.0;
+        if( has_pending_arc_center )
+        {
+            has_pending_arc_center = false;
+
+            if( in_track && !current_track.points.empty() )
+            {
+                const ARC_POINT& arc_start = current_track.points.back();
+                double dx0 = arc_start.x - pending_arc_center.x;
+                double dy0 = arc_start.y - pending_arc_center.y;
+                double start_angle = std::atan2( dy0, dx0 );
+                double end_angle =
+                        std::atan2( pt.y - pending_arc_center.y, pt.x - pending_arc_center.x );
+                double sweep = end_angle - start_angle;
+
+                // atan2 differences land in (-2pi, 2pi); pull the sweep onto the arc's
+                // side so the winding matches the recorded direction.
+                if( pending_arc_dir == "CCW" )
+                {
+                    while( sweep <= 0.0 )
+                        sweep += 2.0 * M_PI;
+                }
+                else
+                {
+                    while( sweep >= 0.0 )
+                        sweep -= 2.0 * M_PI;
+                }
+
+                pt.is_arc = true;
+                pt.arc.cx = pending_arc_center.x;
+                pt.arc.cy = pending_arc_center.y;
+                pt.arc.radius = std::sqrt( dx0 * dx0 + dy0 * dy0 );
+                pt.arc.start_angle = start_angle * 180.0 / M_PI;
+                pt.arc.delta_angle = sweep * 180.0 / M_PI;
+            }
         }
 
         // Per PADS spec: Layer 0 means "unrouted portion" - these are NOT physical tracks.
@@ -2418,58 +2492,62 @@ void PARSER::parseSectionTEXT( std::ifstream& aStream )
             }
         }
 
-        // Read Font line
-        // Format: fontstyle[:fontheight:fontdescent] fontface
-        if( readLine( aStream, line ) )
+        if( m_has_font_lines )
         {
-            std::istringstream fiss( line );
-            std::string font_style_part;
-
-            fiss >> font_style_part;
-
-            size_t colon_pos = font_style_part.find( ':' );
-
-            if( colon_pos != std::string::npos )
+            // Read Font line
+            // Format: fontstyle[:fontheight:fontdescent] fontface
+            if( readLine( aStream, line ) )
             {
-                text.font_style = font_style_part.substr( 0, colon_pos );
-                std::string remaining = font_style_part.substr( colon_pos + 1 );
+                std::istringstream fiss( line );
+                std::string font_style_part;
 
-                size_t second_colon = remaining.find( ':' );
+                fiss >> font_style_part;
 
-                if( second_colon != std::string::npos )
+                size_t colon_pos = font_style_part.find( ':' );
+
+                if( colon_pos != std::string::npos )
                 {
-                    text.font_height = PADS_COMMON::ParseDouble(
-                            remaining.substr( 0, second_colon ), 0.0, "font height" );
-                    text.font_descent = PADS_COMMON::ParseDouble(
-                            remaining.substr( second_colon + 1 ), 0.0, "font descent" );
+                    text.font_style = font_style_part.substr( 0, colon_pos );
+                    std::string remaining = font_style_part.substr( colon_pos + 1 );
+
+                    size_t second_colon = remaining.find( ':' );
+
+                    if( second_colon != std::string::npos )
+                    {
+                        text.font_height = PADS_COMMON::ParseDouble(
+                                remaining.substr( 0, second_colon ), 0.0, "font height" );
+                        text.font_descent = PADS_COMMON::ParseDouble(
+                                remaining.substr( second_colon + 1 ), 0.0, "font descent" );
+                    }
+                    else
+                    {
+                        text.font_height =
+                                PADS_COMMON::ParseDouble( remaining, 0.0, "font height" );
+                    }
                 }
                 else
                 {
-                    text.font_height = PADS_COMMON::ParseDouble( remaining, 0.0, "font height" );
+                    text.font_style = font_style_part;
                 }
-            }
-            else
-            {
-                text.font_style = font_style_part;
-            }
 
-            // Extract font face (after angle brackets or rest of line)
-            size_t bracket_start = line.find( '<' );
-            size_t bracket_end = line.find( '>' );
+                size_t bracket_start = line.find( '<' );
+                size_t bracket_end = line.find( '>' );
 
-            if( bracket_start != std::string::npos && bracket_end != std::string::npos )
-            {
-                text.font_face = line.substr( bracket_start + 1, bracket_end - bracket_start - 1 );
-            }
-            else
-            {
-                std::string rest;
-                std::getline( fiss, rest );
+                if( bracket_start != std::string::npos && bracket_end != std::string::npos )
+                {
+                    text.font_face =
+                            line.substr( bracket_start + 1, bracket_end - bracket_start - 1 );
+                }
+                else
+                {
+                    std::string rest;
+                    std::getline( fiss, rest );
 
-                if( !rest.empty() && rest[0] == ' ' )
-                    rest = rest.substr( 1 );
+                    if( !rest.empty() && rest[0] == ' ' )
+                        rest = rest.substr( 1 );
 
-                text.font_face = rest;
+                    text.font_face = rest;
+                }
             }
         }
 
@@ -2957,7 +3035,7 @@ void PARSER::parseSectionLINES( std::ifstream& aStream )
                 dim.points.push_back( pt2 );
             }
 
-            // Parse text items for this dimension (same 3-line format as board text).
+            // Parse text items for this dimension.
             // The first text is used as the dimension value label.
             for( int t = 0; t < textCount; ++t )
             {
@@ -2976,8 +3054,11 @@ void PARSER::parseSectionLINES( std::ifstream& aStream )
 
                 if( tiss.fail() )
                 {
-                    readLine( aStream, line );
-                    readLine( aStream, line );
+                    int skipLines = m_has_font_lines ? 2 : 1;
+
+                    for( int s = 0; s < skipLines; ++s )
+                        readLine( aStream, line );
+
                     continue;
                 }
 
@@ -2986,9 +3067,11 @@ void PARSER::parseSectionLINES( std::ifstream& aStream )
                 double theight = 0.0, twidth = 0.0;
                 tiss >> trot >> tlayer >> theight >> twidth;
 
-                // Font line
-                if( !readLine( aStream, line ) )
-                    break;
+                if( m_has_font_lines )
+                {
+                    if( !readLine( aStream, line ) )
+                        break;
+                }
 
                 // Content line
                 if( !readLine( aStream, line ) )
@@ -3524,8 +3607,9 @@ void PARSER::parseSectionLINES( std::ifstream& aStream )
             }
         }
 
-        // Parse text items that follow the pieces (3 lines each: properties, font, content).
-        // Text coordinates are relative to the drawing item origin.
+        // Parse text items that follow the pieces.
+        // V9+ format: 3 lines each (properties, font, content)
+        // V5.x format: 2 lines each (properties, content)
         for( int t = 0; t < textCount; ++t )
         {
             if( !readLine( aStream, line ) )
@@ -3545,9 +3629,11 @@ void PARSER::parseSectionLINES( std::ifstream& aStream )
 
             if( tiss.fail() )
             {
-                // Consume remaining 2 lines and continue
-                readLine( aStream, line );
-                readLine( aStream, line );
+                int skipLines = m_has_font_lines ? 2 : 1;
+
+                for( int s = 0; s < skipLines; ++s )
+                    readLine( aStream, line );
+
                 continue;
             }
 
@@ -3559,32 +3645,37 @@ void PARSER::parseSectionLINES( std::ifstream& aStream )
             text.mirrored = ( mirrored == "M" );
             tiss >> text.hjust >> text.vjust;
 
-            // Font line
-            if( !readLine( aStream, line ) )
-                break;
-
-            if( line[0] == '*' )
+            if( m_has_font_lines )
             {
-                pushBackLine( line );
-                return;
+                if( !readLine( aStream, line ) )
+                    break;
+
+                if( line[0] == '*' )
+                {
+                    pushBackLine( line );
+                    return;
+                }
+
+                size_t bracket_start = line.find( '<' );
+                size_t bracket_end = line.find( '>' );
+
+                if( bracket_start != std::string::npos && bracket_end != std::string::npos )
+                {
+                    text.font_face =
+                            line.substr( bracket_start + 1, bracket_end - bracket_start - 1 );
+                }
+
+                std::istringstream fiss( line );
+                std::string font_style_part;
+                fiss >> font_style_part;
+
+                size_t colon_pos = font_style_part.find( ':' );
+
+                if( colon_pos != std::string::npos )
+                    text.font_style = font_style_part.substr( 0, colon_pos );
+                else
+                    text.font_style = font_style_part;
             }
-
-            size_t bracket_start = line.find( '<' );
-            size_t bracket_end = line.find( '>' );
-
-            if( bracket_start != std::string::npos && bracket_end != std::string::npos )
-                text.font_face = line.substr( bracket_start + 1, bracket_end - bracket_start - 1 );
-
-            std::istringstream fiss( line );
-            std::string font_style_part;
-            fiss >> font_style_part;
-
-            size_t colon_pos = font_style_part.find( ':' );
-
-            if( colon_pos != std::string::npos )
-                text.font_style = font_style_part.substr( 0, colon_pos );
-            else
-                text.font_style = font_style_part;
 
             // Content line
             if( !readLine( aStream, line ) )
@@ -4093,11 +4184,13 @@ void PARSER::parseSectionJUMPER( std::ifstream& aStream )
                 attr.right_reading = ( right_reading_str == "Y" || right_reading_str == "ORTHO" );
             }
 
-            // Line 2: Font info
-            if( !readLine( aStream, line ) )
-                break;
+            if( m_has_font_lines )
+            {
+                if( !readLine( aStream, line ) )
+                    break;
 
-            attr.font_info = line;
+                attr.font_info = line;
+            }
 
             jumper.labels.push_back( attr );
         }

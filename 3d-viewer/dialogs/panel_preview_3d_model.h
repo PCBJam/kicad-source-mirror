@@ -238,7 +238,9 @@ private:
     /// The 3d viewer Render initial settings (must be saved and restored)
     EDA_3D_VIEWER_SETTINGS::RENDER_SETTINGS          m_initialRender;
 
-#if defined(__linux__) || defined(__FreeBSD__)
+#ifdef __EMSCRIPTEN__
+    // SpaceMouse not supported in WASM
+#elif defined( __linux__ ) || defined( __FreeBSD__ )
     std::unique_ptr<SPNAV_VIEWER_PLUGIN> m_spaceMouse;
 #else
     std::unique_ptr<NL_FOOTPRINT_PROPERTIES_PLUGIN>  m_spaceMouse;

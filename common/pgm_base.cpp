@@ -61,7 +61,9 @@
 #include <pgm_base.h>
 #include <design_block_library_adapter.h>
 #include <policy_keys.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <settings/common_settings.h>
 #include <settings/settings_manager.h>
 #include <string_utils.h>
@@ -406,6 +408,31 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aSkipPyInit, bool aIsUnitTest )
     App().SetVendorName(  wxT( "KiCad" ) );
     App().SetAppName( pgm_name );
 
+#if wxCHECK_VERSION( 3, 3, 1 ) && defined( __WXGTK__ ) && defined( KICAD_DESKTOP_APP_NAME )
+    // wxGTK feeds the class name to gdk_wayland_window_set_application_id(), so setting it
+    // to the installed desktop file basename lets Wayland compositors resolve the correct
+    // window icon and launch feedback. The prefix varies by build (regular, Flatpak, Nightly)
+    // and is supplied by CMake. The main manager keeps the bare app name; the other GUI apps
+    // are prefixed. Executables without a desktop file (pl_editor, kicad-cli) are left alone.
+    wxString desktopId;
+
+    if( pgm_name == wxT( "kicad" ) )
+    {
+        desktopId = wxT( KICAD_DESKTOP_APP_NAME );
+    }
+    else if( pgm_name == wxT( "eeschema" ) || pgm_name == wxT( "pcbnew" )
+             || pgm_name == wxT( "gerbview" ) || pgm_name == wxT( "bitmap2component" )
+             || pgm_name == wxT( "pcb_calculator" ) )
+    {
+        // pcb_calculator installs as pcbcalculator to satisfy freedesktop naming rules.
+        wxString appName = pgm_name == wxT( "pcb_calculator" ) ? wxT( "pcbcalculator" ) : pgm_name;
+        desktopId = wxString( wxT( KICAD_DESKTOP_APP_PREFIX ) ) + wxT( "." ) + appName;
+    }
+
+    if( !desktopId.IsEmpty() )
+        App().SetClassName( desktopId );
+#endif
+
     // Analyze the command line & initialize the binary path
     wxString tmp;
     SetLanguagePath();
@@ -477,8 +504,10 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aSkipPyInit, bool aIsUnitTest )
 
     // Create the python scripting stuff
     // Skip it for applications that do not use it
+#ifdef KICAD_SCRIPTING
     if( !aSkipPyInit )
         m_python_scripting = std::make_unique<SCRIPTING>();
+#endif
 
     // TODO(JE): Remove this if apps are refactored to not assume Prj() always works
     // Need to create a project early for now (it can have an empty path for the moment)

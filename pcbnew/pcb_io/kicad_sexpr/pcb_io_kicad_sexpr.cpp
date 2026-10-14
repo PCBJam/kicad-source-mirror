@@ -801,6 +801,14 @@ void PCB_IO_KICAD_SEXPR::formatTeardropParameters( const TEARDROP_PARAMETERS& td
 
 void PCB_IO_KICAD_SEXPR::format( const BOARD* aBoard ) const
 {
+    // Rebuild once per board-level save rather than lazily on first use, so a caller that
+    // reuses this plugin instance to save the same board pointer more than once (e.g. after
+    // items were added to or removed from a group) never formats groups against a stale cache.
+    m_groupValidPtrs.clear();
+
+    for( const auto& [uuid, item] : aBoard->GetItemByIdCache() )
+        m_groupValidPtrs.insert( item );
+
     std::set<BOARD_ITEM*, BOARD_ITEM::ptr_cmp> sorted_footprints( aBoard->Footprints().begin(),
                                                                   aBoard->Footprints().end() );
     std::set<BOARD_ITEM*, BOARD::cmp_drawings> sorted_drawings( aBoard->Drawings().begin(),
@@ -2259,7 +2267,10 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_TEXT* aText ) const
     std::string      prefix;
     std::string      type;
     VECTOR2I         pos = aText->GetTextPos();
-    const PCB_FIELD* field = dynamic_cast<const PCB_FIELD*>( aText );
+
+    // Match the Type() dispatch in Format(). A field body is headerless, so it is only valid
+    // inside the (property ...) its caller opened.
+    const PCB_FIELD* field = aText->Type() == PCB_FIELD_T ? static_cast<const PCB_FIELD*>( aText ) : nullptr;
 
     // Always format dimension text as gr_text
     if( dynamic_cast<const PCB_DIMENSION_BASE*>( aText ) )
@@ -2453,24 +2464,17 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_GROUP* aGroup ) const
     // applies when the group itself is part of m_board; for groups created off-board (e.g. a
     // DeepClone() used by the clipboard) the cache contains the originals, not our clones, so
     // skip the validation in that case and trust the member pointers.
-    bool                                validateAgainstBoard = false;
-    std::unordered_set<const EDA_ITEM*> validPtrs;
-
-    if( m_board )
-    {
-        const auto& cache = m_board->GetItemByIdCache();
-
-        for( const auto& [uuid, item] : cache )
-            validPtrs.insert( item );
-
-        validateAgainstBoard = validPtrs.count( aGroup ) > 0;
-    }
+    //
+    // m_groupValidPtrs is rebuilt once per board-level save (see format( const BOARD* )) rather
+    // than once per group; formatting scaled as O(Groups * BoardItems) when the pointer set was
+    // rebuilt inside this function.
+    bool validateAgainstBoard = m_board && m_groupValidPtrs.count( aGroup ) > 0;
 
     if( validateAgainstBoard )
     {
         for( EDA_ITEM* member : aGroup->GetItems() )
         {
-            if( validPtrs.count( member ) )
+            if( m_groupValidPtrs.count( static_cast<const BOARD_ITEM*>( member ) ) )
                 memberIds.Add( member->m_Uuid.AsString() );
         }
     }
@@ -3241,6 +3245,9 @@ void PCB_IO_KICAD_SEXPR::FootprintEnumerate( wxArrayString& aFootprintNames,
     try
     {
         validateCache( aLibPath );
+
+        if( !dir.IsOpened() )
+            THROW_IO_ERRORF( _( "Footprint library '%s' not found." ), aLibPath );
     }
     catch( const IO_ERROR& ioe )
     {

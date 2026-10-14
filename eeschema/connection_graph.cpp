@@ -656,8 +656,19 @@ void CONNECTION_GRAPH::Merge( CONNECTION_GRAPH& aGraph )
     for( auto& [key, value] : aGraph.m_net_code_to_subgraphs_map )
         m_net_code_to_subgraphs_map.insert_or_assign( key, value );
 
+    // Union rather than replace.  An incremental pass may only have rebuilt the item on some of
+    // its sheet paths, and dropping the surviving subgraphs here would orphan their references
+    // to the item so a later removal could no longer find them.
     for( auto& [key, value] : aGraph.m_item_to_subgraph_map )
-        m_item_to_subgraph_map.insert_or_assign( key, value );
+    {
+        std::vector<CONNECTION_SUBGRAPH*>& existing = m_item_to_subgraph_map[key];
+
+        for( CONNECTION_SUBGRAPH* sg : value )
+        {
+            if( !alg::contains( existing, sg ) )
+                existing.push_back( sg );
+        }
+    }
 
     for( auto& [key, value] : aGraph.m_local_label_cache )
         m_local_label_cache.insert_or_assign( key, value );
@@ -683,12 +694,13 @@ void CONNECTION_GRAPH::ExchangeItem( SCH_ITEM* aOldItem, SCH_ITEM* aNewItem )
         if( it == m_item_to_subgraph_map.end() )
             return;
 
-        CONNECTION_SUBGRAPH* sg = it->second;
+        std::vector<CONNECTION_SUBGRAPH*> sgs = std::move( it->second );
 
-        sg->ExchangeItem( aOld, aNew );
+        for( CONNECTION_SUBGRAPH* sg : sgs )
+            sg->ExchangeItem( aOld, aNew );
 
         m_item_to_subgraph_map.erase( it );
-        m_item_to_subgraph_map.emplace( aNew, sg );
+        m_item_to_subgraph_map.emplace( aNew, std::move( sgs ) );
 
         for( auto it2 = m_items.begin(); it2 != m_items.end(); ++it2 )
         {
@@ -795,6 +807,20 @@ void CONNECTION_GRAPH::Recalculate( const SCH_SHEET_LIST& aSheetList, bool aUnco
                     SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
 
                     for( SCH_PIN* pin : symbol->GetPins( &sheet ) )
+                    {
+                        if( pin->IsConnectivityDirty() )
+                        {
+                            dirty_items.insert( pin );
+                        }
+                    }
+                }
+                // updateItemConnectivity() rebuilds the sheet's pins too, so clear their dirty
+                // flags or the painter keeps ignoring their connections
+                else if( item->Type() == SCH_SHEET_T )
+                {
+                    SCH_SHEET* sheetItem = static_cast<SCH_SHEET*>( item );
+
+                    for( SCH_SHEET_PIN* pin : sheetItem->GetPins() )
                     {
                         if( pin->IsConnectivityDirty() )
                         {
@@ -1017,12 +1043,16 @@ void CONNECTION_GRAPH::RemoveItem( SCH_ITEM* aItem )
     if( it == m_item_to_subgraph_map.end() )
         return;
 
-    CONNECTION_SUBGRAPH* subgraph = it->second;
+    // The item sits in one subgraph per instantiating sheet path, and every one of them must
+    // drop it here or a subsequent recalculation resolves drivers against freed memory
+    for( CONNECTION_SUBGRAPH* subgraph : it->second )
+    {
+        while( subgraph->m_absorbed_by )
+            subgraph = subgraph->m_absorbed_by;
 
-    while(subgraph->m_absorbed_by )
-        subgraph = subgraph->m_absorbed_by;
+        subgraph->RemoveItem( aItem );
+    }
 
-    subgraph->RemoveItem( aItem );
     std::erase( m_items, aItem );
     m_item_to_subgraph_map.erase( it );
 }
@@ -1154,7 +1184,9 @@ void CONNECTION_GRAPH::removeSubgraphs( std::set<CONNECTION_SUBGRAPH*>& aSubgrap
 
         for( auto it = m_item_to_subgraph_map.begin(); it != m_item_to_subgraph_map.end(); )
         {
-            if( it->second == sg )
+            std::erase( it->second, sg );
+
+            if( it->second.empty() )
                 it = m_item_to_subgraph_map.erase( it );
             else
                 ++it;
@@ -1243,8 +1275,24 @@ void CONNECTION_GRAPH::updateSymbolConnectivity( const SCH_SHEET_PATH& aSheet, S
 
             for( const wxString& pinNumber : group )
             {
-                if( SCH_PIN* pin = aSymbol->GetPin( pinNumber ) )
-                    pins.emplace_back( pin );
+                SCH_PIN* found = aSymbol->GetPin( pinNumber );
+
+                if( !found )
+                {
+                    // A group member can name one contact of a stacked pin like [A1,A12].
+                    for( SCH_PIN* pin : aSymbol->GetPins( &aSheet ) )
+                    {
+                        if( alg::contains( pin->GetStackedPinNumbers(), pinNumber ) )
+                        {
+                            found = pin;
+                            break;
+                        }
+                    }
+                }
+
+                // Several members can name contacts of the same pin, which must be linked once.
+                if( found && !alg::contains( pins, found ) )
+                    pins.emplace_back( found );
             }
 
             linkPinsInVec( pins );
@@ -1557,7 +1605,7 @@ void CONNECTION_GRAPH::buildItemSubGraphs()
                 subgraph->AddItem( item );
 
                 connection->SetSubgraphCode( subgraph->m_code );
-                m_item_to_subgraph_map[item] = subgraph;
+                m_item_to_subgraph_map[item].push_back( subgraph );
 
                 std::list<SCH_ITEM*> memberlist;
 
@@ -1589,7 +1637,7 @@ void CONNECTION_GRAPH::buildItemSubGraphs()
                     if( connected_conn->SubgraphCode() == 0 )
                     {
                         connected_conn->SetSubgraphCode( subgraph->m_code );
-                        m_item_to_subgraph_map[connected_item] = subgraph;
+                        m_item_to_subgraph_map[connected_item].push_back( subgraph );
                         subgraph->AddItem( connected_item );
                         const SCH_ITEM_VEC& citemset = connected_item->ConnectedItems( sheet );
 
@@ -1947,10 +1995,11 @@ void CONNECTION_GRAPH::processSubGraphs()
         // Test subgraphs with weak drivers for net name conflicts and fix them
         unsigned suffix = 1;
 
+        wxString base_name = connection->Name();
+
         auto create_new_name =
-                [&suffix]( SCH_CONNECTION* aConn ) -> wxString
+                [&suffix, &base_name]( SCH_CONNECTION* aConn ) -> wxString
                 {
-                    wxString newName;
                     wxString suffixStr = std::to_wstring( suffix );
 
                     // For group buses with a prefix, we can add the suffix to the prefix.
@@ -1966,20 +2015,52 @@ void CONNECTION_GRAPH::processSubGraphs()
                         // Use BusPrefix length to skip past any formatting markers
                         // in the prefix (e.g. ~{RESET}) rather than AfterFirst('{')
                         // which would split at a formatting brace.
-                        wxString members = aConn->Name().Mid( aConn->BusPrefix().length() );
+                        wxString members = base_name.Mid( aConn->BusPrefix().length() );
 
+                        wxString newName;
                         newName << prefix << wxT( "_" ) << suffixStr << members;
 
                         aConn->ConfigureFromLabel( newName );
                     }
                     else
                     {
-                        newName << aConn->Name() << wxT( "_" ) << suffixStr;
+                        // Reset to the unsuffixed base so retries generate base_1, base_2, ...
+                        // instead of stacking suffixes onto the previous attempt.
                         aConn->SetSuffix( wxString( wxT( "_" ) ) << suffixStr );
                     }
 
                     suffix++;
-                    return newName;
+                    return aConn->Name();
+                };
+
+        // Promote a weakly-driven sheet-pin subgraph to a strong driver so that it is considered
+        // below for propagation/merging.  A sheet pin sharing its (path-less) name with a global
+        // label on the same sheet would then be treated as if it had a matching local label, so we
+        // skip the promotion in that case to avoid a false merge.
+        auto promote_sheet_pin_driver =
+                [&]()
+                {
+                    if( !subgraph->m_driver || subgraph->m_driver->Type() != SCH_SHEET_PIN_T )
+                        return;
+
+                    wxString global_name = connection->Name( true );
+                    auto     kk          = m_net_name_to_subgraphs_map.find( global_name );
+
+                    if( kk != m_net_name_to_subgraphs_map.end() )
+                    {
+                        for( const CONNECTION_SUBGRAPH* candidate : kk->second )
+                        {
+                            if( candidate->m_sheet == sheet )
+                            {
+                                wxLogTrace( ConnTrace,
+                                            wxS( "%ld (%s) skipped for promotion due to potential conflict" ),
+                                            subgraph->m_code, connection->Name() );
+                                return;
+                            }
+                        }
+                    }
+
+                    subgraph->m_strong_driver = true;
                 };
 
         if( !subgraph->m_strong_driver )
@@ -2015,52 +2096,14 @@ void CONNECTION_GRAPH::processSubGraphs()
                 m_net_name_to_subgraphs_map[new_name].emplace_back( subgraph );
 
                 name = new_name;
+
+                // The renamed sheet pin still drives its own bus members through the hierarchy, so
+                // it must be promoted for propagation to reach them (issue #21798).
+                promote_sheet_pin_driver();
             }
             else if( subgraph->m_driver )
             {
-                // If there is no conflict, promote sheet pins to be strong drivers so that they
-                // will be considered below for propagation/merging.
-
-                // It is possible for this to generate a conflict if the sheet pin has the same
-                // name as a global label on the same sheet, because global merging will then treat
-                // this subgraph as if it had a matching local label.  So, for those cases, we
-                // don't apply this promotion
-
-                if( subgraph->m_driver->Type() == SCH_SHEET_PIN_T )
-                {
-                    bool     conflict    = false;
-                    wxString global_name = connection->Name( true );
-                    auto     kk          = m_net_name_to_subgraphs_map.find( global_name );
-
-                    if( kk != m_net_name_to_subgraphs_map.end() )
-                    {
-                        // A global will conflict if it is on the same sheet as this subgraph, since
-                        // it would be connected by implicit local label linking
-                        std::vector<CONNECTION_SUBGRAPH*>& candidates = kk->second;
-
-                        for( const CONNECTION_SUBGRAPH* candidate : candidates )
-                        {
-                            if( candidate->m_sheet == sheet )
-                                conflict = true;
-                        }
-                    }
-
-                    if( conflict )
-                    {
-                        wxLogTrace( ConnTrace, wxS( "%ld (%s) skipped for promotion due to potential conflict" ),
-                                    subgraph->m_code, name );
-                    }
-                    else
-                    {
-                        UNITS_PROVIDER unitsProvider( schIUScale, EDA_UNITS::MM );
-
-                        wxLogTrace( ConnTrace, wxS( "%ld (%s) weakly driven by unique sheet pin %s, promoting" ),
-                                    subgraph->m_code, name,
-                                    subgraph->m_driver->GetItemDescription( &unitsProvider, true ) );
-
-                        subgraph->m_strong_driver = true;
-                    }
-                }
+                promote_sheet_pin_driver();
             }
         }
 
@@ -3534,8 +3577,13 @@ CONNECTION_SUBGRAPH* CONNECTION_GRAPH::FindFirstSubgraphByName( const wxString& 
 
 CONNECTION_SUBGRAPH* CONNECTION_GRAPH::GetSubgraphForItem( SCH_ITEM* aItem ) const
 {
-    auto                 it  = m_item_to_subgraph_map.find( aItem );
-    CONNECTION_SUBGRAPH* ret = it != m_item_to_subgraph_map.end() ? it->second : nullptr;
+    auto it = m_item_to_subgraph_map.find( aItem );
+
+    // Callers expect a single subgraph even for items registered on several sheet paths, so
+    // hand back the most recently registered one
+    CONNECTION_SUBGRAPH* ret = ( it != m_item_to_subgraph_map.end() && !it->second.empty() )
+                                       ? it->second.back()
+                                       : nullptr;
 
     while( ret && ret->m_absorbed )
         ret = ret->m_absorbed_by;

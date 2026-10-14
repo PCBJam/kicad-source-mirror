@@ -22,7 +22,10 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <algorithm>
+#include <map>
 #include <memory>
+#include <set>
 
 #include "altium_parser_sch.h"
 #include <io/io_utils.h>
@@ -43,6 +46,7 @@
 #include <sch_pin.h>
 #include <sch_bitmap.h>
 #include <sch_bus_entry.h>
+#include <sch_connection.h>
 #include <sch_symbol.h>
 #include <sch_junction.h>
 #include <sch_line.h>
@@ -81,6 +85,12 @@
 #define HARNESS_PORT_COLOR_DEFAULT_OUTLINE    COLOR4D( 0.56078431372549020, \
                                                        0.61960784313725492, \
                                                        0.78823529411764703, 1.0 )
+
+
+// Pure label/name transforms shared with the QA suite; see AltiumWrapBusLabel and
+// AltiumDeriveSheetName below.
+wxString AltiumWrapBusLabel( const wxString& aText );
+wxString AltiumDeriveSheetName( const wxString& aFilename, const std::set<wxString>& aExistingNames );
 
 
 static const VECTOR2I GetRelativePosition( const VECTOR2I& aPosition, const SCH_SYMBOL* aSymbol )
@@ -381,7 +391,7 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicProject( SCHEMATIC* aSchematic, const std
 {
     int x = 1;
     int y = 1;
-    int page = 2; // Start at page 2 since page 1 is the root sheet.
+    int page = 1;
 
     std::map<wxString, SCH_SHEET*> sheets;
     wxFileName project( aProperties->at( "project_file" ) );
@@ -452,19 +462,12 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicProject( SCHEMATIC* aSchematic, const std
         // to sheet symbols within a parent). Derive a name from the Altium filename.
         if( sheet->GetName().Trim().empty() )
         {
-            wxString baseName = wxFileName( fn ).GetName();
-            baseName.Replace( wxT( "/" ), wxT( "_" ) );
-
-            wxString           sheetName = baseName;
             std::set<wxString> existingNames;
 
             for( auto& [path, existing] : sheets )
                 existingNames.insert( existing->GetName() );
 
-            for( int ii = 1; existingNames.count( sheetName ); ++ii )
-                sheetName = baseName + wxString::Format( wxT( "_%d" ), ii );
-
-            sheet->SetName( sheetName );
+            sheet->SetName( AltiumDeriveSheetName( fn.GetFullPath(), existingNames ) );
         }
 
         m_sheetPath.SetPageNumber( pageNo );
@@ -627,6 +630,9 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
 
         m_rootSheet = &aSchematic->Root();
     }
+
+    if( !aAppendToMe )
+        NormalizeRepeatedSheetInstances();
 
     if( m_reporter )
     {
@@ -1024,6 +1030,250 @@ void SCH_IO_ALTIUM::CreateAliases()
 }
 
 
+wxString AltiumWrapBusLabel( const wxString& aText )
+{
+    // Altium marks bus membership by geometry alone (a scalar label placed on a bus line);
+    // KiCad needs the same label expressed as a single-member bus group to make the
+    // connection.  Already-formatted bus labels are left untouched.
+    if( SCH_CONNECTION::IsBusLabel( aText ) )
+        return aText;
+
+    // Spaces and commas separate members inside a bus group, so a multi-word net name would
+    // otherwise fan out into several members.  Quote such names so the bus-group reader in
+    // NET_SETTINGS::ParseBusGroup keeps the whole name as a single member.
+    if( aText.Contains( wxT( " " ) ) || aText.Contains( wxT( "," ) ) )
+        return wxT( "{\"" ) + aText + wxT( "\"}" );
+
+    return wxT( "{" ) + aText + wxT( "}" );
+}
+
+
+wxString AltiumDeriveSheetName( const wxString& aFilename, const std::set<wxString>& aExistingNames )
+{
+    wxString baseName = wxFileName( aFilename ).GetName();
+    baseName.Replace( wxT( "/" ), wxT( "_" ) );
+
+    if( baseName.Trim().empty() )
+        baseName = wxT( "Sheet" );
+
+    wxString sheetName = baseName;
+
+    for( int ii = 1; aExistingNames.count( sheetName ); ++ii )
+        sheetName = baseName + wxString::Format( wxT( "_%d" ), ii );
+
+    return sheetName;
+}
+
+
+void SCH_IO_ALTIUM::PostProcessBusLabels()
+{
+    SCH_SCREEN* screen = getCurrentScreen();
+    wxCHECK( screen, /* void */ );
+
+    bool hasBusLines = false;
+
+    for( SCH_ITEM* item : screen->Items().OfType( SCH_LINE_T ) )
+    {
+        SCH_LINE* line = static_cast<SCH_LINE*>( item );
+
+        if( line->IsBus() )
+        {
+            hasBusLines = true;
+            break;
+        }
+    }
+
+    if( !hasBusLines )
+        return;
+
+    // Collect labels that need wrapping, then modify them after iteration to avoid
+    // modifying the R-tree during traversal.
+    std::vector<SCH_LABEL*> labelsToWrap;
+
+    for( SCH_ITEM* item : screen->Items().OfType( SCH_LABEL_T ) )
+    {
+        SCH_LABEL* label = static_cast<SCH_LABEL*>( item );
+
+        if( SCH_CONNECTION::IsBusLabel( label->GetText() ) )
+            continue;
+
+        for( SCH_ITEM* busItem : screen->Items().Overlapping( SCH_LINE_T, label->GetBoundingBox() ) )
+        {
+            SCH_LINE* busLine = static_cast<SCH_LINE*>( busItem );
+
+            if( busLine->IsBus() && busLine->HitTest( label->GetPosition() ) )
+            {
+                labelsToWrap.push_back( label );
+                break;
+            }
+        }
+    }
+
+    for( SCH_LABEL* label : labelsToWrap )
+        label->SetText( AltiumWrapBusLabel( label->GetText() ) );
+}
+
+
+void SCH_IO_ALTIUM::EnsureSheetSymbolNames()
+{
+    SCH_SCREEN* screen = getCurrentScreen();
+    wxCHECK( screen, /* void */ );
+
+    std::set<wxString> existingNames;
+
+    for( SCH_ITEM* item : screen->Items().OfType( SCH_SHEET_T ) )
+    {
+        SCH_SHEET* sheet = static_cast<SCH_SHEET*>( item );
+
+        if( !sheet->GetName().Trim().empty() )
+            existingNames.insert( sheet->GetName() );
+    }
+
+    for( auto& [idx, sheet] : m_sheets )
+    {
+        if( !sheet->GetName().Trim().empty() )
+            continue;
+
+        SCH_FIELD* filenameField = sheet->GetField( FIELD_T::SHEET_FILENAME );
+        wxString   filename = filenameField ? filenameField->GetText() : wxString();
+        wxString   sheetName = AltiumDeriveSheetName( filename, existingNames );
+
+        sheet->SetName( sheetName );
+        existingNames.insert( sheetName );
+    }
+}
+
+
+wxFileName SCH_IO_ALTIUM::ResolveSheetFileName( const wxString& aParentPath,
+                                                const wxString& aSheetFileName ) const
+{
+    wxFileName loadAltiumFileName( aParentPath, aSheetFileName );
+
+    if( loadAltiumFileName.IsFileReadable() )
+        return loadAltiumFileName;
+
+    if( !loadAltiumFileName.HasExt() )
+    {
+        wxFileName withExt( loadAltiumFileName );
+        withExt.SetExt( wxT( "SchDoc" ) );
+
+        if( withExt.IsFileReadable() )
+            return withExt;
+    }
+
+    wxFileName sheetFn( aSheetFileName );
+    bool       extensionless = !sheetFn.HasExt();
+
+    wxArrayString files;
+    wxDir::GetAllFiles( aParentPath, &files, wxEmptyString, wxDIR_FILES | wxDIR_HIDDEN );
+
+    for( const wxString& candidate : files )
+    {
+        wxFileName candidateFname( candidate );
+
+        if( candidateFname.GetFullName().IsSameAs( aSheetFileName, false )
+            || ( extensionless
+                 && !sheetFn.GetName().empty()
+                 && candidateFname.GetName().IsSameAs( sheetFn.GetName(), false )
+                 && candidateFname.GetExt().IsSameAs( wxT( "SchDoc" ), false ) ) )
+        {
+            return candidateFname;
+        }
+    }
+
+    return loadAltiumFileName;
+}
+
+
+void SCH_IO_ALTIUM::NormalizeRepeatedSheetInstances()
+{
+    wxCHECK( m_schematic, /* void */ );
+
+    m_schematic->RefreshHierarchy();
+
+    SCH_SHEET_LIST sheetList = m_schematic->Hierarchy();
+    std::map<wxString, std::vector<SCH_SHEET_PATH>> pathsByFile;
+
+    for( const SCH_SHEET_PATH& sheetPath : sheetList )
+    {
+        if( sheetPath.size() < 2 || !sheetPath.LastScreen() )
+            continue;
+
+        wxString sheetFileName = sheetPath.Last()->GetFileName().Lower();
+
+        if( sheetFileName.IsEmpty() )
+            continue;
+
+        SCH_SHEET_PATH parentPath = sheetPath;
+        parentPath.pop_back();
+
+        pathsByFile[parentPath.Path().AsString() + wxT( "|" ) + sheetFileName]
+                .push_back( sheetPath );
+    }
+
+    for( auto& [groupKey, sheetPaths] : pathsByFile )
+    {
+        if( sheetPaths.size() < 2 )
+            continue;
+
+        std::sort( sheetPaths.begin(), sheetPaths.end(),
+                   []( const SCH_SHEET_PATH& aFirst, const SCH_SHEET_PATH& aSecond )
+                   {
+                       const VECTOR2I& firstPos = aFirst.Last()->GetPosition();
+                       const VECTOR2I& secondPos = aSecond.Last()->GetPosition();
+
+                       if( firstPos.y != secondPos.y )
+                           return firstPos.y < secondPos.y;
+
+                       return firstPos.x < secondPos.x;
+                   } );
+
+        long basePage = 0;
+
+        for( const SCH_SHEET_PATH& sheetPath : sheetPaths )
+        {
+            long page = 0;
+
+            if( sheetPath.GetPageNumber().ToLong( &page ) && page > 0 )
+                basePage = basePage == 0 ? page : std::min( basePage, page );
+        }
+
+        if( basePage == 0 )
+        {
+            wxString nextPage = sheetList.GetNextPageNumber();
+            nextPage.ToLong( &basePage );
+        }
+
+        if( basePage == 0 )
+            basePage = 1;
+
+        for( size_t ii = 0; ii < sheetPaths.size(); ++ii )
+        {
+            SCH_SHEET_PATH& sheetPath = sheetPaths[ii];
+
+            sheetPath.SetPageNumber( wxString::Format( wxT( "%ld" ), basePage + (long) ii ) );
+
+            for( SCH_ITEM* item : sheetPath.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+                wxString    baseRef = symbol->GetField( FIELD_T::REFERENCE )->GetText();
+
+                if( baseRef.StartsWith( wxT( "#" ) ) )
+                {
+                    symbol->AddSheetPathReferenceEntryIfMissing( sheetPath.Path() );
+                    continue;
+                }
+
+                if( !baseRef.IsEmpty() )
+                    symbol->SetRef( &sheetPath, baseRef + wxT( "_" ) + sheetPath.Last()->GetName() );
+            }
+        }
+    }
+
+    m_schematic->RefreshHierarchy();
+}
+
+
 void SCH_IO_ALTIUM::ParseAltiumSch( const wxString& aFileName )
 {
     // Load path may be different from the project path.
@@ -1080,50 +1330,8 @@ void SCH_IO_ALTIUM::ParseAltiumSch( const wxString& aFileName )
 
         wxCHECK2( sheet, continue );
 
-        // The assumption is that all of the Altium schematic files will be in the same
-        // path as the parent sheet path.
-        wxFileName loadAltiumFileName( parentFileName.GetPath(), sheet->GetFileName() );
-
-        if( !loadAltiumFileName.IsFileReadable() )
-        {
-            // Altium sheet symbols sometimes store filenames without the .SchDoc extension.
-            // Try appending it before falling through to the directory search.
-            if( !loadAltiumFileName.HasExt() )
-            {
-                wxFileName withExt( loadAltiumFileName );
-                withExt.SetExt( wxT( "SchDoc" ) );
-
-                if( withExt.IsFileReadable() )
-                    loadAltiumFileName = withExt;
-            }
-        }
-
-        if( !loadAltiumFileName.IsFileReadable() )
-        {
-            // Try case-insensitive search, matching by base name so that extensionless
-            // filenames from Altium sheet symbols can resolve to .SchDoc files on disk.
-            wxFileName sheetFn( sheet->GetFileName() );
-            bool       extensionless = !sheetFn.HasExt();
-
-            wxArrayString files;
-            wxDir::GetAllFiles( parentFileName.GetPath(), &files, wxEmptyString,
-                                wxDIR_FILES | wxDIR_HIDDEN );
-
-            for( const wxString& candidate : files )
-            {
-                wxFileName candidateFname( candidate );
-
-                if( candidateFname.GetFullName().IsSameAs( sheet->GetFileName(), false )
-                    || ( extensionless
-                         && !sheetFn.GetName().empty()
-                         && candidateFname.GetName().IsSameAs( sheetFn.GetName(), false )
-                         && candidateFname.GetExt().IsSameAs( wxT( "SchDoc" ), false ) ) )
-                {
-                    loadAltiumFileName = candidateFname;
-                    break;
-                }
-            }
-        }
+        wxFileName loadAltiumFileName = ResolveSheetFileName( parentFileName.GetPath(),
+                                                              sheet->GetFileName() );
 
         if( loadAltiumFileName.GetFullName().IsEmpty() || !loadAltiumFileName.IsFileReadable() )
         {
@@ -1147,36 +1355,6 @@ void SCH_IO_ALTIUM::ParseAltiumSch( const wxString& aFileName )
             projectFileName.SetExt( FILEEXT::KiCadSchematicFileExtension );
             sheet->SetFileName( projectFileName.GetFullName() );
 
-            // Set up symbol instance data for this new sheet path. When the same schematic
-            // is reused in multiple hierarchical instances, each instance needs its own
-            // symbol references with the sheet name as suffix to match Altium's behavior.
-            m_sheetPath.push_back( sheet );
-
-            for( SCH_ITEM* symItem : loadedScreen->Items().OfType( SCH_SYMBOL_T ) )
-            {
-                SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( symItem );
-
-                // Get the base reference from existing instance data
-                wxString baseRef;
-
-                if( !symbol->GetInstances().empty() )
-                    baseRef = symbol->GetInstances().front().m_Reference;
-                else
-                    baseRef = symbol->GetField( FIELD_T::REFERENCE )->GetText();
-
-                // Skip power symbols and graphics
-                if( baseRef.StartsWith( wxT( "#" ) ) )
-                {
-                    symbol->AddSheetPathReferenceEntryIfMissing( m_sheetPath.Path() );
-                    continue;
-                }
-
-                // Create new reference with sheet name suffix (e.g., P1 -> P1_Connector2)
-                wxString newRef = baseRef + wxT( "_" ) + sheet->GetName();
-                symbol->SetRef( &m_sheetPath, newRef );
-            }
-
-            m_sheetPath.pop_back();
             // Do not need to load the sub-sheets - this has already been done.
         }
         else
@@ -1301,6 +1479,9 @@ void SCH_IO_ALTIUM::ParseAdditional( const ALTIUM_COMPOUND_FILE& aAltiumSchFile 
 
     CreateAliases();
 
+    // Wrap any remaining net labels sitting on bus lines in curly braces
+    PostProcessBusLabels();
+
     if( reader.HasParsingError() )
         THROW_IO_ERROR( "stream was not parsed correctly!" );
 
@@ -1381,6 +1562,12 @@ void SCH_IO_ALTIUM::ParseFileHeader( const ALTIUM_COMPOUND_FILE& aAltiumSchFile 
     // Handle Ports
     for( const ASCH_PORT& port : m_altiumPortsCurrentSheet )
         ParsePort( port );
+
+    // Bus labels are wrapped in ParseAdditional() after CreateAliases() has had a chance to
+    // append harness suffixes; doing it here would prematurely mark labels as bus groups.
+
+    // Assign default names to any sheet symbols that didn't get a SHEET_NAME record
+    EnsureSheetSymbolNames();
 
     m_altiumPortsCurrentSheet.clear();
     m_altiumComponents.clear();
@@ -1495,6 +1682,12 @@ void SCH_IO_ALTIUM::ParseASCIISchematic( const wxString& aFileName )
 
     // Add the aliases used for harnesses
     CreateAliases();
+
+    // Wrap net labels sitting on bus lines in curly braces so KiCad recognizes them
+    PostProcessBusLabels();
+
+    // Assign default names to any sheet symbols that didn't get a SHEET_NAME record
+    EnsureSheetSymbolNames();
 
     m_altiumHarnesses.clear();
     m_altiumPortsCurrentSheet.clear();
@@ -1781,18 +1974,34 @@ void SCH_IO_ALTIUM::ParseComponent( int aIndex, const std::map<wxString, wxStrin
     auto pair = m_altiumComponents.insert( { aIndex, altiumSymbol } );
     const ASCH_SYMBOL& elem = pair.first->second;
 
-    // TODO: this is a hack until we correctly apply all transformations to every element
-    wxString name = wxString::Format( "%s_%d%s_%s_%s",
-                                      sheetName,
-                                      elem.orientation,
-                                      elem.isMirrored ? "_mirrored" : "",
-                                      elem.libreference,
-                                      elem.sourcelibraryname );
+    wxString name;
+    LIB_ID   libId;
 
-    if( elem.displaymodecount > 1 )
-        name << '_' << elem.displaymode;
+    if( !elem.sourcelibraryname.IsEmpty() && !elem.libreference.IsEmpty() )
+    {
+        // The part comes from an Altium library that project import registers in the symbol
+        // library table, so address it by its real library id and let the placement transform
+        // ride on the SCH_SYMBOL rather than baking it into a unique name. Altium stores Windows
+        // paths, so split the source library name accordingly.
+        name = elem.libreference;
+        libId = AltiumToKiCadLibID( wxFileName( elem.sourcelibraryname, wxPATH_WIN ).GetName(),
+                                    name );
+    }
+    else
+    {
+        // TODO: this is a hack until we correctly apply all transformations to every element
+        name = wxString::Format( "%s_%d%s_%s_%s",
+                                 sheetName,
+                                 elem.orientation,
+                                 elem.isMirrored ? "_mirrored" : "",
+                                 elem.libreference,
+                                 elem.sourcelibraryname );
 
-    LIB_ID libId = AltiumToKiCadLibID( getLibName(), name );
+        if( elem.displaymodecount > 1 )
+            name << '_' << elem.displaymode;
+
+        libId = AltiumToKiCadLibID( getLibName(), name );
+    }
 
     LIB_SYMBOL* ksymbol = new LIB_SYMBOL( wxEmptyString );
     ksymbol->SetName( name );
@@ -1814,12 +2023,15 @@ void SCH_IO_ALTIUM::ParseComponent( int aIndex, const std::map<wxString, wxStrin
 
     int orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_0;
 
+    // Altium encodes symbol rotation as quarter turns CCW, matching KiCad's SYM_ORIENT_* angles
+    // one for one. The stored value must equal the Altium angle so a later "Update Symbols from
+    // Library" against a canonical upright symbol does not rotate the placement.
     switch( elem.orientation )
     {
-    case 0: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_90;  break;
-    case 1: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_180; break;
-    case 2: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_270; break;
-    case 3: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_0;   break;
+    case 0: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_0;   break;
+    case 1: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_90;  break;
+    case 2: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_180; break;
+    case 3: orientation = SYMBOL_ORIENTATION_T::SYM_ORIENT_270; break;
     default: break;
     }
 
@@ -1827,14 +2039,6 @@ void SCH_IO_ALTIUM::ParseComponent( int aIndex, const std::map<wxString, wxStrin
         orientation += SYMBOL_ORIENTATION_T::SYM_MIRROR_Y;
 
     symbol->SetOrientation( orientation );
-
-    // If Altium has defined a library from which we have the part,
-    // use this as the designated source library.
-    if( !elem.sourcelibraryname.IsEmpty() )
-    {
-        wxFileName fn( elem.sourcelibraryname );
-        libId.SetLibNickname( fn.GetName() );
-    }
 
     symbol->SetLibId( libId );
 
@@ -2163,10 +2367,13 @@ void AdjustFieldForSymbolOrientation( SCH_FIELD* aField, const ASCH_SYMBOL& aSym
 {
     bool isHorizontal = aField->GetTextAngle().IsHorizontal();
 
-    // Altium orientation 0 (RIGHTWARDS) maps to KiCad SYM_ORIENT_90 (CCW). To compensate,
+    // Altium orientation 0 (RIGHTWARDS) maps to KiCad SYM_ORIENT_0 (identity). No rotation
+    // compensation needed.
+
+    // Altium orientation 1 (UPWARDS) maps to KiCad SYM_ORIENT_90 (CCW). To compensate,
     // apply CW 90-degree rotation to text properties. Per SCH_FIELD::Rotate(), CW rotation
     // of horizontal text flips justification; CW rotation of vertical text does not.
-    if( aSymbol.orientation == 0 )
+    if( aSymbol.orientation == 1 )
     {
         if( isHorizontal )
         {
@@ -2176,18 +2383,18 @@ void AdjustFieldForSymbolOrientation( SCH_FIELD* aField, const ASCH_SYMBOL& aSym
 
         aField->SetTextAngle( isHorizontal ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
     }
-    // Altium orientation 1 (UPWARDS) maps to KiCad SYM_ORIENT_180 (two CCW rotations). The
+    // Altium orientation 2 (LEFTWARDS) maps to KiCad SYM_ORIENT_180 (two CCW rotations). The
     // transform [-1,0,0,-1] negates both X and Y, flipping horizontal justification. Apply
     // one correction for the full 180 degrees regardless of text angle.
-    else if( aSymbol.orientation == 1 )
+    else if( aSymbol.orientation == 2 )
     {
         aField->SetHorizJustify(
                 static_cast<GR_TEXT_H_ALIGN_T>( -aField->GetHorizJustify() ) );
     }
-    // Altium orientation 2 (LEFTWARDS) maps to KiCad SYM_ORIENT_270 (CW). To compensate,
+    // Altium orientation 3 (DOWNWARDS) maps to KiCad SYM_ORIENT_270 (CW). To compensate,
     // apply CCW 90-degree rotation to text properties. Per SCH_FIELD::Rotate(), CCW rotation
     // of vertical text flips justification; CCW rotation of horizontal text does not.
-    else if( aSymbol.orientation == 2 )
+    else if( aSymbol.orientation == 3 )
     {
         if( !isHorizontal )
         {
@@ -2197,8 +2404,6 @@ void AdjustFieldForSymbolOrientation( SCH_FIELD* aField, const ASCH_SYMBOL& aSym
 
         aField->SetTextAngle( isHorizontal ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
     }
-    // Altium orientation 3 (DOWNWARDS) maps to KiCad SYM_ORIENT_0 (identity). No rotation
-    // compensation needed.
 
     // Mirror-Y in KiCad negates the X component of the bounding box, which effectively
     // flips horizontal justification. Compensate so the rendered text matches Altium.
@@ -2217,7 +2422,7 @@ void AdjustFieldForSymbolOrientation( SCH_FIELD* aField, const ASCH_SYMBOL& aSym
 // since GetRelativePosition already handles the positional component.
 void AdjustTextForSymbolOrientation( SCH_TEXT* aText, const ASCH_SYMBOL& aSymbol )
 {
-    int nRenderRotations = ( aSymbol.orientation + 1 ) % 4;
+    int nRenderRotations = aSymbol.orientation % 4;
 
     // Undo mirror first (reverse of render-time application order).
     // MirrorHorizontally on LAYER_DEVICE text flips H-justify when horizontal
@@ -4888,8 +5093,10 @@ void SCH_IO_ALTIUM::ParseImplementation( const std::map<wxString, wxString>& aPr
     if( aSymbol.size() == 0 && !elem.isCurrent )
         return;
 
-    // For IntLibs we want to use the same lib name for footprints
-    wxString libName = m_isIntLib ? m_libName : elem.libname;
+    // For IntLibs we want to use the same lib name for footprints. Otherwise the model data
+    // file names the source PcbLib as a Windows path; take its base name so the footprint id
+    // matches the nickname project import registers in the footprint library table.
+    wxString libName = m_isIntLib ? m_libName : wxFileName( elem.libname, wxPATH_WIN ).GetName();
 
     wxArrayString fpFilters;
     fpFilters.Add( wxString::Format( wxS( "*%s*" ), elem.name ) );

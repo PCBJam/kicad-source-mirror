@@ -58,6 +58,12 @@
 
 #include <wx/crt.h>
 #include <wx/log.h>
+
+#ifdef __EMSCRIPTEN__
+// pcbjam: staged-model probe for refs the resolver can't expand in the wasm
+// runtime (this TU is compiled only into the occ_service worker there).
+#include <3d_cache/pcbjam_model_fetch.h>
+#endif
 #include <wx/tokenzr.h>
 #include <core/profile.h>        // To use GetRunningMicroSecs or another profiling utility
 
@@ -271,7 +277,7 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
             const PADSTACK::DRILL_PROPS& secondaryDrill = padstack.SecondaryDrill();
             const PADSTACK::DRILL_PROPS& tertiaryDrill = padstack.TertiaryDrill();
 
-            // Process secondary drill (typically bottom backdrill)
+            // Process secondary drill slot (backdrill side is given by its own start layer)
             if( secondaryDrill.size.x > 0 )
             {
                 SHAPE_SEGMENT backdrillShape( pad->GetPosition(), pad->GetPosition(),
@@ -302,7 +308,7 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
                 }
             }
 
-            // Process tertiary drill (typically top backdrill)
+            // Process tertiary drill slot (backdrill side is given by its own start layer)
             if( tertiaryDrill.size.x > 0 )
             {
                 SHAPE_SEGMENT backdrillShape( pad->GetPosition(), pad->GetPosition(),
@@ -583,6 +589,20 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
         wxString mainPath = m_resolver->ResolvePath( fp_model.m_Filename, footprintBasePath,
                                                      embeddedFilesStack );
 
+#ifdef __EMSCRIPTEN__
+        // pcbjam: ${KICAD*_3DMODEL_DIR} refs never resolve in the wasm runtime
+        // (env expansion is broken there, and this worker has no lib files of
+        // its own) — the export request stages the board's model bodies under
+        // the shared MEMFS model root up front; probe it on a resolver miss.
+        if( mainPath.empty() || !wxFileName::FileExists( mainPath ) )
+        {
+            const wxString staged = PCBJAM_3D::FindStagedModel( fp_model.m_Filename );
+
+            if( !staged.empty() )
+                mainPath = staged;
+        }
+#endif
+
         if( mainPath.empty() || !wxFileName::FileExists( mainPath ) )
         {
             // the error path will return an empty name sometimes, at least report back the original filename
@@ -741,7 +761,7 @@ bool EXPORTER_STEP::buildTrack3DShape( PCB_TRACK* aTrack, const VECTOR2D& aOrigi
         const PADSTACK::DRILL_PROPS& secondaryDrill = padstack.SecondaryDrill();
         const PADSTACK::DRILL_PROPS& tertiaryDrill = padstack.TertiaryDrill();
 
-        // Process secondary drill (typically bottom backdrill)
+        // Process secondary drill slot (backdrill side is given by its own start layer)
         if( secondaryDrill.size.x > 0 )
         {
             SHAPE_SEGMENT backdrillShape( via->GetPosition(), via->GetPosition(),
@@ -772,7 +792,7 @@ bool EXPORTER_STEP::buildTrack3DShape( PCB_TRACK* aTrack, const VECTOR2D& aOrigi
             }
         }
 
-        // Process tertiary drill (typically top backdrill)
+        // Process tertiary drill slot (backdrill side is given by its own start layer)
         if( tertiaryDrill.size.x > 0 )
         {
             SHAPE_SEGMENT backdrillShape( via->GetPosition(), via->GetPosition(),
@@ -982,7 +1002,7 @@ bool EXPORTER_STEP::buildGraphic3DShape( BOARD_ITEM* aItem, const VECTOR2D& aOri
         }
         else
         {
-            std::vector<SHAPE*>        shapes = graphic->MakeEffectiveShapes( true );
+            std::vector<SHAPE*>        shapes = graphic->MakeEffectiveShapesForStroking();
             const PCB_PLOT_PARAMS&     plotParams = m_board->GetPlotOptions();
             KIGFX::PCB_RENDER_SETTINGS renderSettings;
 
