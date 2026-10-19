@@ -96,7 +96,10 @@ void SCH_IO_HTTP_LIB::startBackgroundRefresh()
 
 void SCH_IO_HTTP_LIB::backgroundRefreshWorker()
 {
+#ifndef __EMSCRIPTEN__
+    // bs_thread_pool's native extensions only exist on Windows, Linux and macOS
     BS::this_thread::set_os_thread_name( "httplib bg" );
+#endif
 
     while( m_refreshRunning.load() )
     {
