@@ -142,6 +142,14 @@ wxString KIPLATFORM::IO::ResolveSymlinkTarget( const wxString& aPath )
 
 bool KIPLATFORM::IO::FlushDirectory( const wxString& aDirPath )
 {
+#ifdef __EMSCRIPTEN__
+    // The in-memory filesystem has nothing to commit, and emscripten implements fsync as
+    // an async import under JSPI: it would suspend every save, and throw a SuspendError
+    // when the save didn't start from a JSPI export.
+    (void) aDirPath;
+    return true;
+#endif
+
     int fd = open( aDirPath.fn_str(), O_RDONLY
 #if defined( O_DIRECTORY )
                                           | O_DIRECTORY
