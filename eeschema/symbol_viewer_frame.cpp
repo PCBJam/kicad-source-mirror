@@ -217,8 +217,8 @@ SYMBOL_VIEWER_FRAME::SYMBOL_VIEWER_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     // Perspectives are sometimes saved with panes marked hidden, and this frame offers no way to
     // bring one back, so a single bad save would leave the browser permanently blank
-    for( const wchar_t* pane : { wxS( "Libraries" ), wxS( "Symbols" ), wxS( "MsgPanel" ),
-                                 wxS( "DrawFrame" ) } )
+    for( const wchar_t* pane : { wxT( "Libraries" ), wxT( "Symbols" ), wxT( "MsgPanel" ),
+                                 wxT( "DrawFrame" ) } )
     {
         m_auimgr.GetPane( pane ).Show( true );
     }

@@ -91,14 +91,14 @@ const wxChar* paintStateName( int aState )
 {
     switch( aState )
     {
-    case PAINT_DREW:                return wxS( "drew" );
-    case PAINT_MUTEX_HELD:          return wxS( "skipped, refresh mutex held" );
-    case PAINT_DRAWING_DISABLED:    return wxS( "skipped, drawing disabled" );
-    case PAINT_NOT_VISIBLE:         return wxS( "skipped, GAL not initialized or not visible" );
-    case PAINT_CONTEXT_LOCKED:      return wxS( "skipped, context locked" );
-    case PAINT_REENTRANT:           return wxS( "skipped, already drawing" );
-    case PAINT_CONTEXT_BIND_FAILED: return wxS( "skipped, context could not be made current" );
-    default:                        return wxS( "none yet" );
+    case PAINT_DREW:                return wxT( "drew" );
+    case PAINT_MUTEX_HELD:          return wxT( "skipped, refresh mutex held" );
+    case PAINT_DRAWING_DISABLED:    return wxT( "skipped, drawing disabled" );
+    case PAINT_NOT_VISIBLE:         return wxT( "skipped, GAL not initialized or not visible" );
+    case PAINT_CONTEXT_LOCKED:      return wxT( "skipped, context locked" );
+    case PAINT_REENTRANT:           return wxT( "skipped, already drawing" );
+    case PAINT_CONTEXT_BIND_FAILED: return wxT( "skipped, context could not be made current" );
+    default:                        return wxT( "none yet" );
     }
 }
 
