@@ -544,6 +544,11 @@ void PANEL_SYMBOL_CHOOSER::onOpenLibsTimer( wxTimerEvent& aEvent )
 
 void PANEL_SYMBOL_CHOOSER::showFootprintFor( LIB_ID const& aLibId )
 {
+    // The override belongs to the previously selected symbol. Drop it before any early
+    // return: with no preview widget (no GL context) it survived into the next symbol and
+    // populateFootprintSelector() offered it as that symbol's "[Default]".
+    m_fp_override.Empty();
+
     if( !m_fp_preview || !m_fp_preview->IsInitialized() )
         return;
 
@@ -567,7 +572,6 @@ void PANEL_SYMBOL_CHOOSER::showFootprintFor( LIB_ID const& aLibId )
     SCH_FIELD* fp_field = symbol->GetField( FIELD_T::FOOTPRINT );
     wxString   fp_name = fp_field ? fp_field->GetFullText() : wxString( "" );
 
-    m_fp_override.Empty();
     showFootprint( fp_name );
 }
 
