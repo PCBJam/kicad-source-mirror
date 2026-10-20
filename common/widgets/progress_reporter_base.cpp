@@ -28,6 +28,42 @@
 #include <thread>
 #include <widgets/progress_reporter_base.h>
 
+#ifdef __EMSCRIPTEN__
+#include <chrono>
+#include <emscripten/threading.h>
+#include <wx/utils.h>
+
+// pcbjam web shell (wasm/bindings): 0 while a file open is in flight.
+extern "C" int pcbjam_progress_may_yield() __attribute__(( weak ));
+
+namespace
+{
+// pcbjam: the browser runs this on its main thread. Long operations (DRC, zone
+// fill, ERC) join their thread-pool tasks in emscripten's busy-spin futex wait,
+// so between the refresh points below the tab could neither paint nor take
+// input. Hand the browser a turn at most every 80 ms: a main-thread nanosleep
+// suspends to the event loop (pcbjam/wasm/shims/nanosleep_yield.c); while the
+// operation is suspended the wx dispatch interlock queues input and only paints.
+void yieldToBrowser()
+{
+    using clock = std::chrono::steady_clock;
+    static clock::time_point s_lastYield;
+
+    if( !emscripten_is_main_browser_thread() )
+        return;
+
+    if( pcbjam_progress_may_yield && !pcbjam_progress_may_yield() )
+        return;
+
+    if( clock::now() - s_lastYield < std::chrono::milliseconds( 80 ) )
+        return;
+
+    wxMilliSleep( 1 );
+    s_lastYield = clock::now();
+}
+} // namespace
+#endif
+
 PROGRESS_REPORTER_BASE::PROGRESS_REPORTER_BASE( int aNumPhases ) :
     PROGRESS_REPORTER(),
     m_phase( 0 ),
@@ -51,6 +87,10 @@ void PROGRESS_REPORTER_BASE::AdvancePhase()
 {
     m_phase.fetch_add( 1 );
     m_progress.store( 0 );
+
+#ifdef __EMSCRIPTEN__
+    yieldToBrowser();
+#endif
 }
 
 
@@ -141,6 +181,10 @@ bool PROGRESS_REPORTER_BASE::KeepRefreshing( bool aWait )
             m_cancelled.store( true );
             return false;
         }
+
+#ifdef __EMSCRIPTEN__
+        yieldToBrowser();
+#endif
 
         return true;
     }
