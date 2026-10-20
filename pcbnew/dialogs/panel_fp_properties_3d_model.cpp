@@ -51,6 +51,7 @@
 #include <project_pcb.h>
 
 #include <wx/defs.h>
+#include <wx/log.h>
 #include <wx/msgdlg.h>
 
 enum MODELS_TABLE_COLUMNS
@@ -599,6 +600,11 @@ MODEL_VALIDATE_ERRORS PANEL_FP_PROPERTIES_3D_MODEL::validateModelExists( const w
     std::vector<const EMBEDDED_FILES*> embeddedFilesStack;
     embeddedFilesStack.push_back( m_filesPanel->GetLocalFiles() );
     embeddedFilesStack.push_back( m_frame->GetBoard()->GetEmbeddedFiles() );
+
+    // A probe, also run on every keystroke (GRID_CELL_TEXT_BUTTON sends CELL_CHANGING per
+    // wxEVT_TEXT): a half-typed "${KIC" must not log an expansion warning, which pops a
+    // dialog over the typing. The status icon reports the failure.
+    wxLogNull logNo;
 
     wxString fullPath = resolv->ResolvePath( aFilename, footprintBasePath, std::move( embeddedFilesStack ) );
 
