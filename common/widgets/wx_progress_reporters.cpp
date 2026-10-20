@@ -61,14 +61,6 @@ WX_PROGRESS_REPORTER::~WX_PROGRESS_REPORTER()
 
 bool WX_PROGRESS_REPORTER::updateUI()
 {
-#ifdef __EMSCRIPTEN__
-    // KiCad-WASM: wxProgressDialog::Update() pumps a nested event loop (wxYield).
-    // Mid-way through a long-running operation such as loading a schematic that
-    // hands the browser arbitrary events (and a suspension point) while the op is
-    // half-done. Skip the UI pump entirely and report "not cancelled" so the
-    // work runs straight through synchronously. No progress dialog updates in wasm.
-    return true;
-#else
     if( !shouldRefresh( m_progress.load(), m_maxProgress.load(), m_phase.load(), m_numPhases.load(),
                         m_updateThrottle ) )
     {
@@ -117,7 +109,6 @@ bool WX_PROGRESS_REPORTER::updateUI()
     m_lastUpdateResult.store( diag );
 
     return diag;
-#endif
 }
 
 
