@@ -28,6 +28,11 @@
 #include <widgets/wx_event_utils.h>
 #include <widgets/wx_progress_reporters.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam web shell (wasm/bindings): 0 while a file open is in flight.
+extern "C" int pcbjam_progress_may_yield() __attribute__(( weak ));
+#endif
+
 
 WX_PROGRESS_REPORTER::WX_PROGRESS_REPORTER( wxWindow* aParent, const wxString& aTitle,
                                             int aNumPhases, int aCanAbort,
@@ -61,6 +66,15 @@ WX_PROGRESS_REPORTER::~WX_PROGRESS_REPORTER()
 
 bool WX_PROGRESS_REPORTER::updateUI()
 {
+#ifdef __EMSCRIPTEN__
+    // pcbjam: no dialog Update() (a yield) or timer drain while a file open is in
+    // flight. A sleep in the load followed by the timer drain runs due wx timers
+    // nested inside the half-built load, which can spin the browser forever.
+    // DRC, fill and ERC never run during an open, so they keep their dialog.
+    if( pcbjam_progress_may_yield && !pcbjam_progress_may_yield() )
+        return !m_cancelled.load() && m_lastUpdateResult.load();
+#endif
+
     if( !shouldRefresh( m_progress.load(), m_maxProgress.load(), m_phase.load(), m_numPhases.load(),
                         m_updateThrottle ) )
     {
