@@ -666,6 +666,7 @@ void SCH_IO_PCBJAM_LIB::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMB
     m_loadedLibs.erase( aLibraryPath );
     m_libNames.erase( aLibraryPath );
     m_indexRows.erase( aLibraryPath );
+    m_warm.erase( aLibraryPath );
 }
 
 
@@ -688,6 +689,7 @@ void SCH_IO_PCBJAM_LIB::DeleteSymbol( const wxString& aLibraryPath, const wxStri
     m_loadedLibs.erase( aLibraryPath );
     m_libNames.erase( aLibraryPath );
     m_indexRows.erase( aLibraryPath );
+    m_warm.erase( aLibraryPath );
 }
 
 
@@ -714,6 +716,83 @@ std::shared_ptr<const std::vector<PCBJAM_SYMBOL_ROW>> SCH_IO_PCBJAM_LIB::IndexRo
     std::optional<std::string> tsv = requestOpt( "list", aLibraryPath, wxS( "index" ) );
     SetIndexAnswer( aLibraryPath, tsv ? *tsv : std::string() );
     return m_indexRows[aLibraryPath];
+}
+
+
+wxString SCH_IO_PCBJAM_LIB::NextUncachedTextVarSymbol( const wxString& aLibraryPath ) const
+{
+    auto it = m_indexRows.find( aLibraryPath );
+
+    if( it == m_indexRows.end() || !it->second )
+        return wxEmptyString;
+
+    for( const PCBJAM_SYMBOL_ROW& row : *it->second )
+    {
+        if( !row.textVars )
+            continue;
+
+        wxString name = wxString::FromUTF8( row.name );
+
+        if( !m_cache.count( aLibraryPath + wxS( "|" ) + name ) )
+            return name;
+    }
+
+    return wxEmptyString;
+}
+
+
+size_t SCH_IO_PCBJAM_LIB::WarmCursor( const wxString& aLibraryPath ) const
+{
+    auto it = m_warm.find( aLibraryPath );
+    return it == m_warm.end() ? 0 : it->second.rows.size();
+}
+
+
+SCH_IO_PCBJAM_LIB::WARM_PAGE SCH_IO_PCBJAM_LIB::AddIndexPage( const wxString& aLibraryPath,
+                                                                const std::string& aTsv )
+{
+    // Answered meanwhile (the chooser's batch fetch): nothing left to warm.
+    if( HasIndexAnswer( aLibraryPath ) )
+    {
+        m_warm.erase( aLibraryPath );
+        return WARM_PAGE::COMPLETE;
+    }
+
+    std::vector<PCBJAM_SYMBOL_ROW> rows;
+    std::string                    token;
+    long                           from = -1, total = -1;
+
+    if( !ParseSymbolIndexTsv( aTsv, rows, &token, &from, &total ) || from < 0 || total < 0 )
+    {
+        // Not an index page: the library has none, as far as the provider says.
+        m_warm.erase( aLibraryPath );
+        SetIndexAnswer( aLibraryPath, std::string() );
+        return WARM_PAGE::COMPLETE;
+    }
+
+    WARM_STATE& state = m_warm[aLibraryPath];
+
+    // The library changed between pages, or this page doesn't follow ours: the
+    // rows so far are no good. A first page of the new state starts afresh.
+    if( ( from > 0 && token != state.token ) || size_t( from ) != state.rows.size() )
+    {
+        m_warm.erase( aLibraryPath );
+        return WARM_PAGE::STALE;
+    }
+
+    const bool gotRows = !rows.empty();
+    state.token = token;
+    std::move( rows.begin(), rows.end(), std::back_inserter( state.rows ) );
+
+    // An empty page before `total` would loop forever: take what we have.
+    if( state.rows.size() < size_t( total ) && gotRows )
+        return WARM_PAGE::MORE;
+
+    m_indexRows[aLibraryPath] =
+            std::make_shared<std::vector<PCBJAM_SYMBOL_ROW>>( std::move( state.rows ) );
+    m_libraryPath = aLibraryPath;
+    m_warm.erase( aLibraryPath );
+    return WARM_PAGE::COMPLETE;
 }
 
 

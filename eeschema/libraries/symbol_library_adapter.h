@@ -182,6 +182,10 @@ public:
 
     /// pcbjam (libs 0028): debug, compare a library's index items with its real symbols.
     std::string CompareIndexedTreeItems( const wxString& aNickname );
+
+    /// pcbjam (libs 0028): one background warm-up step for one library: fetch one page of
+    /// its index rows. 0 = nothing left for it, 1 = more pages, 2 = not ready, ask later.
+    int WarmIndex( const wxString& aNickname );
 #endif
 
 protected:

@@ -135,6 +135,31 @@ public:
     /// null when the library has no index (the caller then parses it).
     std::shared_ptr<const std::vector<PCBJAM_SYMBOL_ROW>> IndexRows( const wxString& aLibraryPath );
 
+    /// Background warm-up (libs 0028 8.3): the row the next page should start at.
+    size_t WarmCursor( const wxString& aLibraryPath ) const;
+
+    enum class WARM_PAGE
+    {
+        MORE,     ///< page stored, more rows to fetch
+        COMPLETE, ///< the library's rows are now stored (or it has no index)
+        STALE     ///< the page didn't follow the stored ones; start again
+    };
+
+    /// Add one `index:<from>` page (TSV) to the library's partial rows; publishes
+    /// them as the library's index once the last page is in. Parses only: no
+    /// bridge crossing, so it is safe right after a step's suspension.
+    WARM_PAGE AddIndexPage( const wxString& aLibraryPath, const std::string& aTsv );
+
+    /// A text-variable row whose real symbol isn't cached yet (the chooser lists
+    /// those as real symbols), or empty. The warm-up loads them ahead of the click.
+    wxString NextUncachedTextVarSymbol( const wxString& aLibraryPath ) const;
+
+    /// Cache a provider "get" answer fetched outside the plugin (the warm-up).
+    void CacheItemDocument( const wxString& aLibraryPath, const std::string& aBody )
+    {
+        cacheLibDocument( aLibraryPath, aBody );
+    }
+
     /// The cache-owned master of one symbol (loaded with one "get" if needed);
     /// non-owning, like the symbols EnumerateSymbolLib hands out.
     LIB_SYMBOL* LoadMaster( const wxString& aLibraryPath, const wxString& aName )
@@ -193,6 +218,15 @@ private:
     /// libs 0028: each library's index rows; a null entry = asked, no index.
     /// Dropped with the plugin (kicadLibsInvalidate) and on SaveSymbol/DeleteSymbol.
     std::map<wxString, std::shared_ptr<const std::vector<PCBJAM_SYMBOL_ROW>>> m_indexRows;
+
+    /// Warm-up pages received so far, per library (until the last one arrives).
+    struct WARM_STATE
+    {
+        std::string                    token;
+        std::vector<PCBJAM_SYMBOL_ROW> rows;
+    };
+
+    std::map<wxString, WARM_STATE> m_warm;
 
     /// The library this instance serves (one plugin per library row), for the
     /// path-less GetAvailableSymbolFields.

@@ -61,9 +61,12 @@ struct PCBJAM_SYMBOL_ROW
 
 
 /// Parse the provider's TSV for one library. False when it isn't a schema-1
-/// symbol index. `aToken` gets the library state token from the header.
+/// symbol index. `aToken` gets the library state token from the header; for a
+/// page (`index:<from>`), `aFrom` / `aTotal` get where it starts and how many
+/// rows the library has (both -1 for a whole-library answer).
 bool ParseSymbolIndexTsv( const std::string& aTsv, std::vector<PCBJAM_SYMBOL_ROW>& aRows,
-                          std::string* aToken = nullptr );
+                          std::string* aToken = nullptr, long* aFrom = nullptr,
+                          long* aTotal = nullptr );
 
 
 /// Split the batch answer ("\x1d<uri>\n<tsv>" frames) into uri -> tsv; an empty

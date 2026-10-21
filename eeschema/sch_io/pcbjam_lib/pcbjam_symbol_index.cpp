@@ -17,17 +17,29 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <deque>
 #include <set>
 
 #include <nlohmann/json.hpp>
+#include <wx/dialog.h>
+#include <wx/evtloop.h>
+#include <wx/timer.h>
 #include <wx/tokenzr.h>
+#include <wx/toplevel.h>
 
 #include <lib_symbol.h>
 #include <string_utils.h>
 #include <template_fieldnames.h>
 #include <trace_helpers.h>
 
+#include <libraries/library_manager.h>
 #include <libraries/symbol_library_adapter.h>
+#include <pgm_base.h>
+#include <project_sch.h>
+#include <settings/settings_manager.h>
 #include <sch_io/pcbjam_lib/pcbjam_symbol_index.h>
 #include <sch_io/pcbjam_lib/sch_io_pcbjam_lib.h>
 
@@ -134,7 +146,7 @@ int toInt( const std::string& aIn, int aDefault )
 
 
 bool ParseSymbolIndexTsv( const std::string& aTsv, std::vector<PCBJAM_SYMBOL_ROW>& aRows,
-                          std::string* aToken )
+                          std::string* aToken, long* aFrom, long* aTotal )
 {
     size_t nl = aTsv.find( '\n' );
     std::string header = aTsv.substr( 0, nl );
@@ -147,6 +159,18 @@ bool ParseSymbolIndexTsv( const std::string& aTsv, std::vector<PCBJAM_SYMBOL_ROW
 
     if( aToken )
         *aToken = unescapeTsv( header.substr( 2, header.find( '\t' ) - 2 ) );
+
+    auto headerNumber = [&]( const char* aKey ) -> long
+    {
+        size_t at = header.find( aKey );
+        return at == std::string::npos ? -1 : toInt( header.substr( at + strlen( aKey ) ), -1 );
+    };
+
+    if( aFrom )
+        *aFrom = headerNumber( "\tfrom=" );
+
+    if( aTotal )
+        *aTotal = headerNumber( "\ttotal=" );
 
     if( nl == std::string::npos )
         return true;
@@ -513,6 +537,273 @@ std::string SYMBOL_LIBRARY_ADAPTER::CompareIndexedTreeItems( const wxString& aNi
     out["symbols"] = stubs.size();
     out["mismatches"] = mismatches;
     return out.dump();
+}
+
+
+int SYMBOL_LIBRARY_ADAPTER::WarmIndex( const wxString& aNickname )
+{
+    std::optional<LIB_DATA*> lib = fetchIfLoaded( aNickname );
+
+    if( !lib )
+        return 0;
+
+    auto*    plugin = dynamic_cast<SCH_IO_PCBJAM_LIB*>( schplugin( *lib ) );
+    wxString uri = getUri( ( *lib )->row );
+
+    if( !plugin || plugin->IsFatLoaded( uri ) )
+        return 0;
+
+    // Rows in: load the real symbols the chooser lists for text-variable rows,
+    // one per step, so the click needs no "get" for them either.
+    if( plugin->HasIndexAnswer( uri ) )
+    {
+        const wxString name = plugin->NextUncachedTextVarSymbol( uri );
+
+        if( name.IsEmpty() )
+            return 0;
+
+        std::optional<std::string> body = SCH_IO_PCBJAM_LIB::BridgeRequest( "get", uri, name );
+
+        lib = fetchIfLoaded( aNickname );
+        plugin = lib ? dynamic_cast<SCH_IO_PCBJAM_LIB*>( schplugin( *lib ) ) : nullptr;
+
+        if( !plugin || !body )
+            return 0;   // dropped (re-queued by the invalidation), or gone: the click loads it
+
+        plugin->CacheItemDocument( uri, *body );
+        return plugin->NextUncachedTextVarSymbol( uri ) == name ? 0 : 1;
+    }
+
+    const size_t cursor = plugin->WarmCursor( uri );
+
+    // The crossing goes through the static bridge, not the plugin: while it is
+    // parked the library can be invalidated, which deletes this LIB_DATA and its
+    // plugin (pcbjam_libs::invalidateLibrary). Look both up again afterwards.
+    std::optional<std::string> page = SCH_IO_PCBJAM_LIB::BridgeRequest(
+            "list", uri, wxString::Format( wxS( "index:%zu" ), cursor ) );
+
+    lib = fetchIfLoaded( aNickname );
+    plugin = lib ? dynamic_cast<SCH_IO_PCBJAM_LIB*>( schplugin( *lib ) ) : nullptr;
+
+    if( !plugin )
+        return 0;   // dropped: the invalidation re-queues it
+
+    if( page && *page == "~" )
+        return 2;
+
+    switch( plugin->AddIndexPage( uri, page ? *page : std::string() ) )
+    {
+    case SCH_IO_PCBJAM_LIB::WARM_PAGE::MORE:
+    case SCH_IO_PCBJAM_LIB::WARM_PAGE::STALE:
+        return 1;
+
+    case SCH_IO_PCBJAM_LIB::WARM_PAGE::COMPLETE:
+    default:
+        // Rows in; text-variable symbols (if any) follow in the next steps.
+        return plugin->NextUncachedTextVarSymbol( uri ).IsEmpty() ? 0 : 1;
+    }
+}
+
+#endif
+
+
+// ---------------------------------------------------------------- background warm-up
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/heap.h>
+
+// Defined in the wasm bindings (kicad_editor_embind.cpp) and pcbnew.cpp; weak so
+// an image without them still links.
+extern "C" int  pcbjam_progress_may_yield() __attribute__(( weak ));
+extern "C" void pcbjam_fp_index_warm() __attribute__(( weak ));
+
+namespace
+{
+/// A modal dialog is up. The wasm port has no nested event loops (a modal
+/// JSPI-suspends its opener), so this is checked on the dialogs themselves.
+bool modalShown()
+{
+    for( wxWindow* window : wxTopLevelWindows )
+    {
+        if( auto* dialog = dynamic_cast<wxDialog*>( window ); dialog && dialog->IsModal() )
+            return true;
+    }
+
+    return false;
+}
+
+
+/**
+ * libs 0028 section 8.3: after boot settles, pull the library index into the
+ * plugins one short step at a time, so Add Symbol finds every library's rows in
+ * memory and makes no crossing. Each step is one wx timer callback (a fresh
+ * browser task on the mailbox lane): one page (up to 256 rows) of one library.
+ * It pauses while an open is in flight, a modal is up or a long operation
+ * yields, and stops for good above 75 % of the maximum heap. Clicking Add Symbol
+ * before it has finished is fine: the chooser fetches the rest in one batch.
+ */
+class INDEX_WARMUP : public wxTimer
+{
+public:
+    void Begin()
+    {
+        if( m_started )
+            return;
+
+        m_started = true;
+        m_t0 = std::chrono::steady_clock::now();
+
+        for( const LIBRARY_TABLE_ROW* row : Pgm().GetLibraryManager().Rows( LIBRARY_TABLE_TYPE::SYMBOL ) )
+        {
+            if( row->Disabled() || row->Hidden() )
+                continue;
+
+            if( LIBRARY_MANAGER::GetFullURI( row, true ).StartsWith( wxS( "/mnt/pcbjam/" ) ) )
+                m_queue.push_back( row->Nickname() );
+        }
+
+        KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:start libs=%zu\n" ), m_queue.size() );
+        arm( 1 );
+    }
+
+    void Requeue( const wxString& aNickname )
+    {
+        if( !m_started || m_stopped )
+            return;
+
+        if( std::find( m_queue.begin(), m_queue.end(), aNickname ) == m_queue.end() )
+            m_queue.push_back( aNickname );
+
+        if( !m_inStep && !IsRunning() )
+            arm( 1 );
+    }
+
+    void Notify() override
+    {
+        if( m_inStep || m_stopped )
+            return;
+
+        wxEventLoopBase* loop = wxEventLoopBase::GetActive();
+
+        if( ( pcbjam_progress_may_yield && !pcbjam_progress_may_yield() ) || modalShown()
+                || ( loop && loop->IsYielding() ) )
+        {
+            arm( 250 );
+            return;
+        }
+
+        if( emscripten_get_heap_size() > emscripten_get_heap_max() / 4 * 3 )
+        {
+            KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:stopped heap=%zu\n" ),
+                      emscripten_get_heap_size() );
+            m_stopped = true;
+            return;
+        }
+
+        if( m_queue.empty() )
+        {
+            finish();
+            return;
+        }
+
+        const wxString nickname = m_queue.front();
+        m_queue.pop_front();
+
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &Pgm().GetSettingsManager().Prj() );
+
+        auto t0 = std::chrono::steady_clock::now();
+        m_inStep = true;
+        int result = adapter ? adapter->WarmIndex( nickname ) : 0;
+        m_inStep = false;
+        double ms = std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - t0 ).count();
+
+        m_steps++;
+        KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:step lib=%s result=%d ms=%.1f\n" ),
+                  nickname, result, ms );
+
+        if( result == 1 )
+        {
+            m_queue.push_front( nickname );   // its next page
+            m_notReady = 0;
+        }
+        else if( result == 2 )
+        {
+            // Its rows aren't ready on the JS side yet: try it again later, and
+            // wait a little once every queued library has said so.
+            m_queue.push_back( nickname );
+
+            if( ++m_notReady >= m_queue.size() )
+            {
+                m_notReady = 0;
+                arm( 250 );
+                return;
+            }
+        }
+        else
+        {
+            m_notReady = 0;
+        }
+
+        if( m_queue.empty() )
+        {
+            finish();
+            return;
+        }
+
+        // Back to back while steps are short, one per frame otherwise.
+        arm( ms < 4.0 ? 1 : 16 );
+    }
+
+private:
+    void arm( int aMs ) { StartOnce( aMs ); }
+
+    void finish()
+    {
+        if( !m_fpDone && pcbjam_fp_index_warm )
+        {
+            m_fpDone = true;
+            m_inStep = true;
+            pcbjam_fp_index_warm();
+            m_inStep = false;
+        }
+
+        KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:done steps=%zu total_ms=%.0f\n" ), m_steps,
+                  std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - m_t0 ).count() );
+    }
+
+    std::deque<wxString>                  m_queue;
+    std::chrono::steady_clock::time_point m_t0;
+    size_t                                m_steps = 0;
+    size_t                                m_notReady = 0;
+    bool                                  m_started = false;
+    bool                                  m_stopped = false;
+    bool                                  m_inStep = false;
+    bool                                  m_fpDone = false;
+};
+
+
+INDEX_WARMUP* s_warmup = nullptr;
+} // namespace
+
+
+/// Called by the kicadLibIndexWarmup embind export (wasm bindings) once boot settles.
+extern "C" void pcbjam_lib_index_warmup_start( const char* aKind )
+{
+    if( std::strcmp( aKind, "symbol" ) != 0 )
+        return;
+
+    if( !s_warmup )
+        s_warmup = new INDEX_WARMUP();
+
+    s_warmup->Begin();
+}
+
+
+/// Called after a library is invalidated (pcbjam_libs::invalidateLibrary): pull its rows again.
+extern "C" void pcbjam_lib_index_requeue( const char* aKind, const char* aNickname )
+{
+    if( s_warmup && std::strcmp( aKind, "symbol" ) == 0 )
+        s_warmup->Requeue( wxString::FromUTF8( aNickname ) );
 }
 
 #endif

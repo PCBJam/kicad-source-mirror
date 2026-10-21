@@ -169,6 +169,35 @@ pcbjamFpIndex( const std::vector<std::string>& aProjectLibs )
 
     return &s_index;
 }
+
+
+/// The resolved paths of the footprint table's native rows that are folders (the
+/// project's own .pretty libraries), in table order: the JS side indexes them too.
+static std::vector<std::string> pcbjamProjectFpLibs()
+{
+    std::vector<std::string> projectLibs;
+
+    for( const LIBRARY_TABLE_ROW* row : Pgm().GetLibraryManager().Rows( LIBRARY_TABLE_TYPE::FOOTPRINT ) )
+    {
+        if( row->Disabled() )
+            continue;
+
+        wxString uri = LIBRARY_MANAGER::GetFullURI( row, true );
+
+        if( !uri.IsEmpty() && !uri.StartsWith( wxS( "/mnt/pcbjam/" ) ) && wxDirExists( uri ) )
+            projectLibs.push_back( std::string( uri.utf8_str() ) );
+    }
+
+    return projectLibs;
+}
+
+
+/// pcbjam (libs 0028 8.3): the background warm-up's footprint step in a schematic
+/// session, so the first Add Symbol footprint list is answered from the cache.
+extern "C" void pcbjam_fp_index_warm()
+{
+    pcbjamFpIndex( pcbjamProjectFpLibs() );
+}
 #endif
 
 
@@ -273,19 +302,8 @@ static wxString filterFootprints( const wxString& aFilterJson )
 #ifdef __EMSCRIPTEN__
         // The project's own .pretty folders are indexed by the JS side too, so the
         // list never parses a library inside the chooser's modal pump.
-        std::vector<std::string> projectLibs;
-
-        for( const wxString& nickname : adapter->GetLibraryNames() )
-        {
-            std::optional<LIBRARY_TABLE_ROW*> row = adapter->GetRow( nickname );
-            wxString uri = row ? LIBRARY_MANAGER::GetFullURI( *row, true ) : wxString();
-
-            if( !uri.IsEmpty() && !uri.StartsWith( wxS( "/mnt/pcbjam/" ) ) && wxDirExists( uri ) )
-                projectLibs.push_back( std::string( uri.utf8_str() ) );
-        }
-
         const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>* fpIndex =
-                pcbjamFpIndex( projectLibs );
+                pcbjamFpIndex( pcbjamProjectFpLibs() );
         static std::set<wxString> s_tracedSkips;
 #endif
 
