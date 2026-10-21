@@ -31,6 +31,7 @@
 #include <wx/log.h>
 
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <pcb_io/pcbjam_fp/pcbjam_footprint_index.h>
 #include <pcb_io/pcbjam_fp/pcb_io_pcbjam_fp.h>
 
 #ifdef __EMSCRIPTEN__
@@ -599,9 +600,11 @@ void PCB_IO_PCBJAM_FP::FootprintSave( const wxString& aLibraryPath, const FOOTPR
     }
 
     // Invalidate the fat-load guard so the next enumerate refetches this lib —
-    // picking up a newly-created footprint, the edited body, or a removal.
+    // picking up a newly-created footprint, the edited body, or a removal. The
+    // index rows go too (libs 0028 phase 9).
     m_loadedLibs.erase( aLibraryPath );
     m_libNames.erase( aLibraryPath );
+    m_indexRows.erase( aLibraryPath );
 }
 
 
@@ -624,4 +627,28 @@ void PCB_IO_PCBJAM_FP::FootprintDelete( const wxString& aLibraryPath,
 
     m_loadedLibs.erase( aLibraryPath );
     m_libNames.erase( aLibraryPath );
+    m_indexRows.erase( aLibraryPath );
+}
+
+
+void PCB_IO_PCBJAM_FP::SetIndexAnswer( const wxString& aLibraryPath, const std::string& aTsv )
+{
+    auto rows = std::make_shared<std::vector<PCBJAM_FOOTPRINT_ROW>>();
+
+    if( aTsv.empty() || !ParseFootprintIndexTsv( aTsv, *rows ) )
+        m_indexRows[aLibraryPath] = nullptr;
+    else
+        m_indexRows[aLibraryPath] = std::move( rows );
+}
+
+
+std::shared_ptr<const std::vector<PCBJAM_FOOTPRINT_ROW>> PCB_IO_PCBJAM_FP::IndexRows( const wxString& aLibraryPath )
+{
+    if( auto it = m_indexRows.find( aLibraryPath ); it != m_indexRows.end() )
+        return it->second;
+
+    // One crossing; a null answer is remembered so the library isn't asked again.
+    std::optional<std::string> tsv = requestOpt( "list", aLibraryPath, wxS( "index" ) );
+    SetIndexAnswer( aLibraryPath, tsv ? *tsv : std::string() );
+    return m_indexRows[aLibraryPath];
 }

@@ -32,6 +32,8 @@
 #include <project.h>
 
 class FOOTPRINT;
+class LIB_TREE_ITEM;
+struct PCBJAM_FOOTPRINT_ROW;
 
 
 /**
@@ -185,6 +187,24 @@ public:
      * @throw IO_ERROR if no library at @a aNickname exists.
      */
     bool IsFootprintLibWritable( const wxString& aNickname );
+
+#ifdef __EMSCRIPTEN__
+    /// pcbjam (libs 0028 phase 9): tree items from the library index, without parsing the
+    /// library. False = use GetFootprints(). Stubs are owned by aStorage. Defined in
+    /// pcb_io/pcbjam_fp/pcbjam_footprint_index.cpp.
+    bool GetIndexedTreeItems( const wxString& aNickname, std::vector<LIB_TREE_ITEM*>& aItems,
+                              std::vector<std::unique_ptr<LIB_TREE_ITEM>>& aStorage );
+
+    /// pcbjam (libs 0028 phase 10): the library's index rows (CvPcb's footprint list); null
+    /// when it has none or is already parsed.
+    std::shared_ptr<const std::vector<PCBJAM_FOOTPRINT_ROW>> GetIndexRows( const wxString& aNickname );
+
+    /// pcbjam (libs 0028 phase 9): fetch the index of every listed library in one crossing.
+    void PrefetchIndex( const std::vector<wxString>& aNicknames );
+
+    /// pcbjam (libs 0028 phase 9): debug, compare a library's index items with its footprints.
+    std::string CompareIndexedTreeItems( const wxString& aNickname );
+#endif
 
 protected:
     std::map<wxString, LIB_DATA>& globalLibs() override { return GlobalLibraries.Get(); }

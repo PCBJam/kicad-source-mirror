@@ -25,6 +25,9 @@
 #include <vector>
 
 #include <pcb_io/pcb_io.h>
+#include <memory>
+
+struct PCBJAM_FOOTPRINT_ROW;
 
 class FOOTPRINT;
 
@@ -119,6 +122,16 @@ public:
     static std::optional<std::string> BridgeRequest( const std::string& aOp, const wxString& aLib,
                                                      const wxString& aArg );
 
+    /// pcbjam (libs 0028 phase 9): whether the library's index has been asked for.
+    bool HasIndexAnswer( const wxString& aLibraryPath ) const { return m_indexRows.count( aLibraryPath ) > 0; }
+
+    /// Store the provider's index answer for the library (TSV; empty = none).
+    void SetIndexAnswer( const wxString& aLibraryPath, const std::string& aTsv );
+
+    /// The library's index rows (the footprint chooser and editor tree), fetched in
+    /// one crossing when not stored yet; null when the library has no index.
+    std::shared_ptr<const std::vector<PCBJAM_FOOTPRINT_ROW>> IndexRows( const wxString& aLibraryPath );
+
 private:
     /// Perform a provider request; returns the response or throws IO_ERROR.
     std::string request( const std::string& aOp, const wxString& aLibraryPath,
@@ -156,6 +169,10 @@ private:
     /// The footprint names of each fat-loaded lib, in list order — used to answer
     /// a repeat FootprintEnumerate from cache without re-fetching.
     std::map<wxString, std::vector<wxString>> m_libNames;
+
+    /// libs 0028 phase 9: each library's index rows; a null entry = asked, no index.
+    /// Dropped with the plugin and on FootprintSave/FootprintDelete.
+    std::map<wxString, std::shared_ptr<const std::vector<PCBJAM_FOOTPRINT_ROW>>> m_indexRows;
 
     wxString m_lastError;
 };

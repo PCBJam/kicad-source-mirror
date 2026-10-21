@@ -32,6 +32,10 @@
 #include <string_utils.h>
 #include <thread_pool.h>
 
+#ifdef __EMSCRIPTEN__
+#include <pcb_io/pcbjam_fp/pcbjam_footprint_index.h>
+#endif
+
 
 void FOOTPRINT_INFO_IMPL::load()
 {
@@ -196,6 +200,14 @@ bool FOOTPRINT_LIST_IMPL::ReadFootprintFiles( FOOTPRINT_LIBRARY_ADAPTER* aAdapte
         m_progress_reporter->Report( _( "Loading footprints..." ) );
     }
 
+#ifdef __EMSCRIPTEN__
+    // pcbjam (libs 0028 phase 10): one crossing for every library's index.
+    if( aNickname )
+        aAdapter->PrefetchIndex( { *aNickname } );
+    else
+        aAdapter->PrefetchIndex( aAdapter->GetLibraryNames() );
+#endif
+
     loadFootprints();
 
     if( m_progress_reporter )
@@ -230,6 +242,26 @@ void FOOTPRINT_LIST_IMPL::loadFootprints()
 
                 if( m_cancelled || !m_queue.pop( nickname ) )
                     return 0;
+
+#ifdef __EMSCRIPTEN__
+                // pcbjam (libs 0028 phase 10): an indexed library needs no footprint
+                // parsed: every field this list keeps is in its index rows.
+                if( std::shared_ptr<const std::vector<PCBJAM_FOOTPRINT_ROW>> rows =
+                            m_adapter->GetIndexRows( nickname ) )
+                {
+                    for( const PCBJAM_FOOTPRINT_ROW& row : *rows )
+                    {
+                        queue_parsed.move_push( std::make_unique<FOOTPRINT_INFO_IMPL>(
+                                nickname, wxString::FromUTF8( row.name ), wxString::FromUTF8( row.description ),
+                                wxString::FromUTF8( row.keywords ), 0, row.padCount, row.uniquePadCount ) );
+                    }
+
+                    if( m_progress_reporter )
+                        m_progress_reporter->AdvanceProgress();
+
+                    return 1;
+                }
+#endif
 
                 std::vector<wxString> fpnames;
 

@@ -83,6 +83,11 @@ void FP_TREE_SYNCHRONIZING_ADAPTER::Sync( FOOTPRINT_LIBRARY_ADAPTER* aLibs )
     // would else validate freed rows
     ResetTreeView resetGuard( *this );
 
+#ifdef __EMSCRIPTEN__
+    // pcbjam (libs 0028 phase 9): one crossing for the index of every library.
+    m_libs->PrefetchIndex( m_libs->GetLibraryNames() );
+#endif
+
     // Process already stored libraries
     for( auto it = m_tree.m_Children.begin(); it != m_tree.m_Children.end(); )
     {
@@ -139,6 +144,21 @@ void FP_TREE_SYNCHRONIZING_ADAPTER::Sync( FOOTPRINT_LIBRARY_ADAPTER* aLibs )
         bool pinned = alg::contains( cfg->m_Session.pinned_fp_libs, libName )
                         || alg::contains( project.m_PinnedFootprintLibs, libName );
 
+#ifdef __EMSCRIPTEN__
+        // pcbjam (libs 0028 phase 9): list the library from its index, without parsing it.
+        {
+            std::vector<LIB_TREE_ITEM*>                 items;
+            std::vector<std::unique_ptr<LIB_TREE_ITEM>> storage;
+
+            if( m_libs->GetIndexedTreeItems( libName, items, storage ) )
+            {
+                DoAddLibrary( libName, ( *optRow )->Description(), items, pinned, true );
+                m_libMap.insert( libName );
+                continue;
+            }
+        }
+#endif
+
         std::vector<FOOTPRINT*> footprints = m_libs->GetFootprints( libName, true );
         std::vector<LIB_TREE_ITEM*> treeItems;
         treeItems.reserve( footprints.size() );
@@ -166,6 +186,46 @@ void FP_TREE_SYNCHRONIZING_ADAPTER::updateLibrary( LIB_TREE_NODE_LIBRARY& aLibNo
     // Re-enumerate from disk if the library has changed since it was last preloaded.
     // This picks up external modifications such as git branch switches.
     m_libs->RefreshLibraryIfChanged( aLibNode.m_Name );
+
+#ifdef __EMSCRIPTEN__
+    // pcbjam (libs 0028 phase 9): refresh the node from the library index, without
+    // parsing the library; the same steps as below, on the index items.
+    {
+        std::vector<LIB_TREE_ITEM*>                 items;
+        std::vector<std::unique_ptr<LIB_TREE_ITEM>> storage;
+
+        if( m_libs->GetIndexedTreeItems( aLibNode.m_Name, items, storage ) )
+        {
+            std::map<wxString, LIB_TREE_ITEM*> itemMap;
+
+            for( LIB_TREE_ITEM* item : items )
+                itemMap[item->GetName()] = item;
+
+            for( auto nodeIt = aLibNode.m_Children.begin(); nodeIt != aLibNode.m_Children.end(); )
+            {
+                auto itemIt = itemMap.find( ( *nodeIt )->m_Name );
+
+                if( itemIt != itemMap.end() )
+                {
+                    static_cast<LIB_TREE_NODE_ITEM*>( nodeIt->get() )->Update( itemIt->second );
+                    itemMap.erase( itemIt );
+                    ++nodeIt;
+                }
+                else
+                {
+                    nodeIt = aLibNode.m_Children.erase( nodeIt );
+                }
+            }
+
+            for( auto& [name, item] : itemMap )
+                aLibNode.AddItem( item );
+
+            aLibNode.AssignIntrinsicRanks( m_shownColumns );
+            m_libMap.insert( aLibNode.m_Name );
+            return;
+        }
+    }
+#endif
 
     std::vector<FOOTPRINT*> footprints = m_libs->GetFootprints( aLibNode.m_Name, true );
 

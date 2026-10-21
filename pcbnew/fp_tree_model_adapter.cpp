@@ -52,6 +52,11 @@ void FP_TREE_MODEL_ADAPTER::AddLibraries( EDA_BASE_FRAME* aParent )
     PROJECT_FILE&    project = aParent->Prj().GetProjectFile();
     std::vector<wxString> libNames = m_libs->GetLibraryNames();
 
+#ifdef __EMSCRIPTEN__
+    // pcbjam (libs 0028 phase 9): one crossing for the index of every library below.
+    m_libs->PrefetchIndex( libNames );
+#endif
+
     for( const wxString& libName : libNames )
     {
         if( !m_libs->HasLibrary( libName, true ) )
@@ -59,6 +64,20 @@ void FP_TREE_MODEL_ADAPTER::AddLibraries( EDA_BASE_FRAME* aParent )
 
         bool pinned = alg::contains( cfg->m_Session.pinned_fp_libs, libName )
                         || alg::contains( project.m_PinnedFootprintLibs, libName );
+
+#ifdef __EMSCRIPTEN__
+        // pcbjam (libs 0028 phase 9): list the library from its index, without parsing it.
+        {
+            std::vector<LIB_TREE_ITEM*>                 items;
+            std::vector<std::unique_ptr<LIB_TREE_ITEM>> storage;
+
+            if( m_libs->GetIndexedTreeItems( libName, items, storage ) )
+            {
+                DoAddLibrary( libName, *m_libs->GetLibraryDescription( libName ), items, pinned, true );
+                continue;
+            }
+        }
+#endif
 
         std::vector<FOOTPRINT*> footprints = m_libs->GetFootprints( libName, true );
         std::vector<LIB_TREE_ITEM*> treeItems;
