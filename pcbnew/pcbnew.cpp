@@ -318,7 +318,7 @@ static wxString filterFootprints( const wxString& aFilterJson )
                 if( pcbjamLib && !entries )
                 {
                     if( s_tracedSkips.insert( nickname ).second )
-                        wxLogTrace( wxS( "PCBJAM_FP" ), wxS( "footprint filter: no index for %s, skipped" ),
+                        KI_TRACE( wxS( "PCBJAM_FP" ), wxS( "footprint filter: no index for %s, skipped\n" ),
                                     nickname );
 
                     continue;
@@ -380,6 +380,14 @@ static wxString filterFootprints( const wxString& aFilterJson )
             if( count >= maxResults )
                 break;
         }
+
+#ifdef __EMSCRIPTEN__
+        // pcbjam: the list the selector gets (?trace=PCBJAM_FP; libs 0029 e2e). KI_TRACE,
+        // not wxLogTrace: only KI_TRACE follows KICAD_TRACE. The newline matters:
+        // TRACE_MANAGER writes none, and wasm stderr is line-buffered.
+        KI_TRACE( wxS( "PCBJAM_FP" ), wxS( "footprint filter pins=%d: %s\n" ), pinCount,
+                    wxString::FromUTF8( output.dump() ) );
+#endif
 
         return wxString::FromUTF8( output.dump() );
     }
