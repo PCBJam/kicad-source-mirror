@@ -102,15 +102,16 @@ extern "C" PyObject* PyInit__pcbnew( void );
 
 #ifdef __EMSCRIPTEN__
 /**
- * The publish-time footprint index: for every pcbjam CDN lib (keyed by the
- * /mnt/pcbjam/<id> URI tail), each footprint's name + unique electrical pad
- * count (FOOTPRINT::GetUniquePadCount( DO_NOT_INCLUDE_NPTH ), computed when the
- * libs were published).  filterFootprints() filters against this instead of
- * forcing a lazy fat-load of EVERY footprint library on the chooser's first
- * symbol selection — the same cold-cost shape the symbol side needed the
- * fat-list/parallel-parse work for, but here no bodies are needed at all.
- * Fetched over the JS bridge ONCE and cached for the session; libs absent from
- * the index (user libs) keep the load-and-parse fallback path.
+ * The footprint index: for every pcbjam library (keyed by the /mnt/pcbjam/<id>
+ * URI tail) and every project .pretty folder we asked about (keyed by its
+ * path), each footprint's name + unique electrical pad count
+ * (FOOTPRINT::GetUniquePadCount( DO_NOT_INCLUDE_NPTH )).  filterFootprints()
+ * filters against this instead of loading every footprint library on the
+ * chooser's first symbol selection; no bodies are needed at all.
+ *
+ * Asked again on every call with the version held (libs 0029): the JS side
+ * answers "=" when nothing changed, or the new index when a library or a
+ * project file did.  A failed or malformed answer keeps the last good index.
  */
 struct PCBJAM_FP_INDEX_ENTRY
 {
@@ -118,30 +119,33 @@ struct PCBJAM_FP_INDEX_ENTRY
     int      pads;
 };
 
-static const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>* pcbjamFpIndex()
+static const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>*
+pcbjamFpIndex( const std::vector<std::string>& aProjectLibs )
 {
     static std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> s_index;
+    static std::string s_version;
     static bool s_loaded = false;
 
-    if( s_loaded )
-        return &s_index;
+    nlohmann::json request = { { "v", s_version }, { "projectLibs", aProjectLibs } };
 
-    // Null = provider absent or no index published: report "no index" so the
-    // caller falls back to per-lib loads, and retry on the next call (the JS
-    // side caches a definitive miss, so the retry crossing stays cheap).
-    std::optional<std::string> raw =
-            PCB_IO_PCBJAM_FP::BridgeRequest( "index", wxS( "/mnt/pcbjam/" ), wxEmptyString );
+    std::optional<std::string> raw = PCB_IO_PCBJAM_FP::BridgeRequest(
+            "index", wxS( "/mnt/pcbjam/" ), wxString::FromUTF8( request.dump() ) );
 
+    // Null = provider absent or no index: keep the last good one, if any.
     if( !raw )
-        return nullptr;
+        return s_loaded ? &s_index : nullptr;
+
+    if( *raw == "=" && s_loaded )
+        return &s_index;
 
     try
     {
         nlohmann::json parsed = nlohmann::json::parse( *raw );
+        std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> index;
 
         for( const auto& [libId, entries] : parsed.at( "libs" ).items() )
         {
-            std::vector<PCBJAM_FP_INDEX_ENTRY>& vec = s_index[libId];
+            std::vector<PCBJAM_FP_INDEX_ENTRY>& vec = index[libId];
             vec.reserve( entries.size() );
 
             for( const auto& e : entries )
@@ -150,15 +154,19 @@ static const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>* pcbjamFp
                                  e.at( 1 ).get<int>() } );
             }
         }
+
+        s_index = std::move( index );
+        s_version = parsed.value( "v", std::string() );
+        s_loaded = true;
     }
     catch( const std::exception& )
     {
-        // Malformed index: cache the empty map — every lib falls back to the
-        // load-and-parse path; refetching the same artifact wouldn't help.
-        s_index.clear();
+        // Malformed: keep the last good index; with none, every pcbjam library is
+        // skipped and project folders take the parse path.
+        if( !s_loaded )
+            return nullptr;
     }
 
-    s_loaded = true;
     return &s_index;
 }
 #endif
@@ -263,39 +271,62 @@ static wxString filterFootprints( const wxString& aFilterJson )
         int  count = 0;
 
 #ifdef __EMSCRIPTEN__
+        // The project's own .pretty folders are indexed by the JS side too, so the
+        // list never parses a library inside the chooser's modal pump.
+        std::vector<std::string> projectLibs;
+
+        for( const wxString& nickname : adapter->GetLibraryNames() )
+        {
+            std::optional<LIBRARY_TABLE_ROW*> row = adapter->GetRow( nickname );
+            wxString uri = row ? LIBRARY_MANAGER::GetFullURI( *row, true ) : wxString();
+
+            if( !uri.IsEmpty() && !uri.StartsWith( wxS( "/mnt/pcbjam/" ) ) && wxDirExists( uri ) )
+                projectLibs.push_back( std::string( uri.utf8_str() ) );
+        }
+
         const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>* fpIndex =
-                pcbjamFpIndex();
+                pcbjamFpIndex( projectLibs );
+        static std::set<wxString> s_tracedSkips;
 #endif
 
         for( const wxString& nickname : adapter->GetLibraryNames() )
         {
 #ifdef __EMSCRIPTEN__
-            // Answer covered pcbjam libs from the publish-time index — names and
-            // pad counts only, NO body loads. A pcbjam lib NOT covered (user
-            // libs, no index published) is SKIPPED rather than fat-loaded: this
-            // filter runs inside the chooser's modal event pump, and the lazy
-            // per-lib fat-load fan-out (bridge suspend + thread-pool parse per
-            // library) would fan hundreds of suspending fetches into that modal
-            // wait (it crashed the retired asyncify pump outright). Skipping
-            // matches the pre-index behavior of the eeschema selector
-            // (default-only row). Non-pcbjam rows keep the native parse path
-            // below.
+            // Answer from the index: names and pad counts only, NO body loads.
+            // A pcbjam lib the index doesn't cover (its index can't be had) is
+            // SKIPPED rather than fat-loaded: this filter runs inside the
+            // chooser's modal event pump, and the lazy per-lib fat-load fan-out
+            // (bridge suspend + thread-pool parse per library) would fan
+            // suspending fetches into that modal wait (it crashed the retired
+            // asyncify pump outright). A project folder the index doesn't cover
+            // keeps the native parse path below (MEMFS, no bridge).
             {
                 std::optional<LIBRARY_TABLE_ROW*> row = adapter->GetRow( nickname );
                 wxString uri = row ? LIBRARY_MANAGER::GetFullURI( *row, true ) : wxString();
+                bool     pcbjamLib = uri.StartsWith( wxS( "/mnt/pcbjam/" ) );
+                std::string key = pcbjamLib
+                                          ? std::string( uri.Mid( strlen( "/mnt/pcbjam/" ) ).utf8_str() )
+                                          : std::string( uri.utf8_str() );
+                const std::vector<PCBJAM_FP_INDEX_ENTRY>* entries = nullptr;
 
-                if( uri.StartsWith( wxS( "/mnt/pcbjam/" ) ) )
+                if( fpIndex )
                 {
-                    if( !fpIndex )
-                        continue;
+                    if( auto it = fpIndex->find( key ); it != fpIndex->end() )
+                        entries = &it->second;
+                }
 
-                    auto it = fpIndex->find(
-                            std::string( uri.Mid( strlen( "/mnt/pcbjam/" ) ).utf8_str() ) );
+                if( pcbjamLib && !entries )
+                {
+                    if( s_tracedSkips.insert( nickname ).second )
+                        wxLogTrace( wxS( "PCBJAM_FP" ), wxS( "footprint filter: no index for %s, skipped" ),
+                                    nickname );
 
-                    if( it == fpIndex->end() )
-                        continue;
+                    continue;
+                }
 
-                    for( const PCBJAM_FP_INDEX_ENTRY& entry : it->second )
+                if( entries )
+                {
+                    for( const PCBJAM_FP_INDEX_ENTRY& entry : *entries )
                     {
                         // Pin count filter
                         if( pinCount > 0 && entry.pads != pinCount )
