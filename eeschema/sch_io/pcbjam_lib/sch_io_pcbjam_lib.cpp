@@ -34,6 +34,7 @@
 #include <sch_file_versions.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr_lib_cache.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr_parser.h>
+#include <sch_io/pcbjam_lib/pcbjam_symbol_index.h>
 #include <sch_io/pcbjam_lib/sch_io_pcbjam_lib.h>
 
 #ifdef __EMSCRIPTEN__
@@ -279,6 +280,17 @@ bool SCH_IO_PCBJAM_LIB::CanReadLibrary( const wxString& aFileName ) const
 std::optional<std::string> SCH_IO_PCBJAM_LIB::requestOpt( const std::string& aOp,
                                                           const wxString& aLibraryPath,
                                                           const wxString& aArg )
+{
+    if( aLibraryPath.StartsWith( wxS( "/mnt/pcbjam/" ) ) && aLibraryPath != wxS( "/mnt/pcbjam/" ) )
+        m_libraryPath = aLibraryPath;
+
+    return BridgeRequest( aOp, aLibraryPath, aArg );
+}
+
+
+std::optional<std::string> SCH_IO_PCBJAM_LIB::BridgeRequest( const std::string& aOp,
+                                                             const wxString& aLibraryPath,
+                                                             const wxString& aArg )
 {
 #ifdef __EMSCRIPTEN__
     // The bridge carries the item kind as a 4th arg (the JS provider defaults it
@@ -650,9 +662,10 @@ void SCH_IO_PCBJAM_LIB::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMB
     // Invalidate the fat-load guard so the next enumerate refetches this lib —
     // picking up a newly-created item, the edited body, or a removal (and the
     // mirror overlay for an edited origin item). Saves are user-paced, so the
-    // one extra "list" is negligible.
+    // one extra "list" is negligible. The index rows go too (libs 0028).
     m_loadedLibs.erase( aLibraryPath );
     m_libNames.erase( aLibraryPath );
+    m_indexRows.erase( aLibraryPath );
 }
 
 
@@ -674,6 +687,72 @@ void SCH_IO_PCBJAM_LIB::DeleteSymbol( const wxString& aLibraryPath, const wxStri
 
     m_loadedLibs.erase( aLibraryPath );
     m_libNames.erase( aLibraryPath );
+    m_indexRows.erase( aLibraryPath );
+}
+
+
+void SCH_IO_PCBJAM_LIB::SetIndexAnswer( const wxString& aLibraryPath, const std::string& aTsv )
+{
+    auto rows = std::make_shared<std::vector<PCBJAM_SYMBOL_ROW>>();
+
+    if( aTsv.empty() || !ParseSymbolIndexTsv( aTsv, *rows ) )
+        m_indexRows[aLibraryPath] = nullptr;
+    else
+        m_indexRows[aLibraryPath] = std::move( rows );
+
+    m_libraryPath = aLibraryPath;
+}
+
+
+std::shared_ptr<const std::vector<PCBJAM_SYMBOL_ROW>> SCH_IO_PCBJAM_LIB::IndexRows( const wxString& aLibraryPath )
+{
+    if( auto it = m_indexRows.find( aLibraryPath ); it != m_indexRows.end() )
+        return it->second;
+
+    // One crossing; a null answer (no index, ?libindex=0, an older provider) is
+    // remembered so the library isn't asked again until it changes.
+    std::optional<std::string> tsv = requestOpt( "list", aLibraryPath, wxS( "index" ) );
+    SetIndexAnswer( aLibraryPath, tsv ? *tsv : std::string() );
+    return m_indexRows[aLibraryPath];
+}
+
+
+void SCH_IO_PCBJAM_LIB::GetAvailableSymbolFields( std::vector<wxString>& aNames )
+{
+    if( m_libraryPath.IsEmpty() )
+        return;
+
+    std::set<wxString> fieldNames;
+
+    if( IsFatLoaded( m_libraryPath ) )
+    {
+        // As SCH_IO_KICAD_SEXPR: the union of every symbol's chooser fields.
+        for( const wxString& name : m_libNames[m_libraryPath] )
+        {
+            if( LIB_SYMBOL* symbol = loadOne( m_libraryPath, name ) )
+            {
+                std::map<wxString, wxString> chooserFields;
+                symbol->GetChooserFields( chooserFields );
+
+                for( const auto& [field, value] : chooserFields )
+                    fieldNames.insert( field );
+            }
+        }
+    }
+    else if( std::shared_ptr<const std::vector<PCBJAM_SYMBOL_ROW>> rows = IndexRows( m_libraryPath ) )
+    {
+        // The same union from the rows: the stubs carry the same chooser fields.
+        for( const PCBJAM_SYMBOL_ROW& row : *rows )
+        {
+            std::map<wxString, wxString> chooserFields;
+            PCBJAM_SYMBOL_STUB( row, wxEmptyString, true ).GetChooserFields( chooserFields );
+
+            for( const auto& [field, value] : chooserFields )
+                fieldNames.insert( field );
+        }
+    }
+
+    std::copy( fieldNames.begin(), fieldNames.end(), std::back_inserter( aNames ) );
 }
 
 

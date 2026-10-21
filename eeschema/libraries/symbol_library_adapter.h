@@ -30,6 +30,7 @@
 #include <sch_io/sch_io.h>
 
 class LIB_SYMBOL;
+class LIB_TREE_ITEM;
 class PROJECT;
 
 
@@ -168,6 +169,20 @@ public:
      * @return the library's modify hash, or std::nullopt if it is not loaded.
      */
     std::optional<int> GetLibraryModifyHash( const wxString& aNickname ) const;
+
+#ifdef __EMSCRIPTEN__
+    /// pcbjam (libs 0028): chooser tree items from the library index, without parsing the
+    /// library. False = use GetSymbols(). Stubs are owned by aStorage; aItems may also hold
+    /// cache-owned symbols. Defined in sch_io/pcbjam_lib/pcbjam_symbol_index.cpp.
+    bool GetIndexedTreeItems( const wxString& aNickname, bool aPowerOnly, std::vector<LIB_TREE_ITEM*>& aItems,
+                              std::vector<std::unique_ptr<LIB_TREE_ITEM>>& aStorage );
+
+    /// pcbjam (libs 0028): fetch the index of every listed library in one crossing.
+    void PrefetchIndex( const std::vector<wxString>& aNicknames );
+
+    /// pcbjam (libs 0028): debug, compare a library's index items with its real symbols.
+    std::string CompareIndexedTreeItems( const wxString& aNickname );
+#endif
 
 protected:
     std::map<wxString, LIB_DATA>& globalLibs() override { return GlobalLibraries.Get(); }

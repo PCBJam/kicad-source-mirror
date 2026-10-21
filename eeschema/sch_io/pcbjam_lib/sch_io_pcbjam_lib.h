@@ -20,13 +20,17 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 #include <sch_io/sch_io.h>
 #include <sch_io/sch_io_mgr.h>
 #include <symbol_library_common.h>
+
+struct PCBJAM_SYMBOL_ROW;
 
 /**
  * A symbol library plugin backed by a JS-side provider (globalThis.kicadLibs)
@@ -53,6 +57,11 @@
  *                                      {"name":..,"body":<kicad_symbol_lib>}
  *   request( "delete", uri, name )  -> remove one symbol (a rename is
  *                                      delete-old + save-new upstream)
+ *   request( "list", uri, "index" ) -> the library index as TSV, one row per
+ *                                      symbol (libs 0028), or null when the
+ *                                      library has none
+ *   request( "index", "/mnt/pcbjam/", json uri list ) -> several libraries'
+ *                                      indexes in one crossing (framed)
  *
  * The call suspends via the JSPI token wait on the main thread, or proxies
  * to the main thread and futex-blocks on a worker, until the provider's
@@ -101,6 +110,38 @@ public:
 
     const wxString& GetError() const override { return m_lastError; }
 
+    /// Every field name in the library, as SCH_IO_KICAD_SEXPR reports it (the
+    /// union of the symbols' chooser fields): from the real symbols once the
+    /// library is fat-loaded, otherwise from its index (libs 0028). This is what
+    /// the chooser's "Select Columns" offers.
+    void GetAvailableSymbolFields( std::vector<wxString>& aNames ) override;
+
+    /// One provider request outside a plugin instance (the batch index fetch);
+    /// nullopt when the provider yields null or there is none.
+    static std::optional<std::string> BridgeRequest( const std::string& aOp,
+                                                     const wxString& aLibraryPath,
+                                                     const wxString& aArg );
+
+    /// pcbjam (libs 0028): the library has been fat-loaded (real symbols cached).
+    bool IsFatLoaded( const wxString& aLibraryPath ) const { return m_loadedLibs.count( aLibraryPath ) > 0; }
+
+    /// Whether the index of the library has been asked for (rows or "none").
+    bool HasIndexAnswer( const wxString& aLibraryPath ) const { return m_indexRows.count( aLibraryPath ) > 0; }
+
+    /// Store the provider's index answer for the library (TSV; empty = none).
+    void SetIndexAnswer( const wxString& aLibraryPath, const std::string& aTsv );
+
+    /// The library's index rows, fetched in one crossing when not stored yet;
+    /// null when the library has no index (the caller then parses it).
+    std::shared_ptr<const std::vector<PCBJAM_SYMBOL_ROW>> IndexRows( const wxString& aLibraryPath );
+
+    /// The cache-owned master of one symbol (loaded with one "get" if needed);
+    /// non-owning, like the symbols EnumerateSymbolLib hands out.
+    LIB_SYMBOL* LoadMaster( const wxString& aLibraryPath, const wxString& aName )
+    {
+        return loadOne( aLibraryPath, aName );
+    }
+
 private:
     /// Perform a provider request; returns the response or throws IO_ERROR.
     std::string request( const std::string& aOp, const wxString& aLibraryPath,
@@ -148,6 +189,14 @@ private:
     /// The symbol names of each fat-loaded lib, in list order — used to rebuild
     /// the enumerate result from m_cache without re-fetching.
     std::map<wxString, std::vector<wxString>> m_libNames;
+
+    /// libs 0028: each library's index rows; a null entry = asked, no index.
+    /// Dropped with the plugin (kicadLibsInvalidate) and on SaveSymbol/DeleteSymbol.
+    std::map<wxString, std::shared_ptr<const std::vector<PCBJAM_SYMBOL_ROW>>> m_indexRows;
+
+    /// The library this instance serves (one plugin per library row), for the
+    /// path-less GetAvailableSymbolFields.
+    wxString m_libraryPath;
 
     wxString m_lastError;
 };

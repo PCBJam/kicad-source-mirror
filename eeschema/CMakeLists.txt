@@ -100,6 +100,7 @@ set( EESCHEMA_SCH_IO
 
     # pcbjam remote library plugin (JS bridge; only functional on WASM) — fork addition
     sch_io/pcbjam_lib/sch_io_pcbjam_lib.cpp
+    sch_io/pcbjam_lib/pcbjam_symbol_index.cpp
     )
 
 # Third-party importers and the database plugin are not built for WASM (sch_io_mgr.cpp's
