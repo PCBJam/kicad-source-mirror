@@ -154,6 +154,12 @@ public:
     /// those as real symbols), or empty. The warm-up loads them ahead of the click.
     wxString NextUncachedTextVarSymbol( const wxString& aLibraryPath ) const;
 
+    /// The symbol's master is in the cache.
+    bool IsCached( const wxString& aLibraryPath, const wxString& aName ) const
+    {
+        return m_cache.count( aLibraryPath + wxS( "|" ) + aName ) > 0;
+    }
+
     /// Cache a provider "get" answer fetched outside the plugin (the warm-up).
     void CacheItemDocument( const wxString& aLibraryPath, const std::string& aBody )
     {

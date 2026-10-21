@@ -37,6 +37,10 @@
 
 #include <libraries/library_manager.h>
 #include <libraries/symbol_library_adapter.h>
+#include <sch_edit_frame.h>
+#include <sch_sheet_path.h>
+#include <sch_symbol.h>
+#include <schematic.h>
 #include <pgm_base.h>
 #include <project_sch.h>
 #include <settings/settings_manager.h>
@@ -254,8 +258,21 @@ PCBJAM_SYMBOL_STUB::PCBJAM_SYMBOL_STUB( const PCBJAM_SYMBOL_ROW& aRow, const wxS
     m_libId.SetLibItemName( m_name );
 
     // Shown text: KiCad's EDA_TEXT unescapes {slash}-style escapes. Rows with
-    // text variables never get here (the real symbol is used for those).
-    auto shown = []( const std::string& aRaw ) { return UnescapeString( wxString::FromUTF8( aRaw ) ); };
+    // text variables never get here (the real symbol is used for those). Most
+    // text holds no escape at all: skip the per-character pass for it.
+    auto shown = []( const std::string& aRaw )
+    {
+        wxString text = wxString::FromUTF8( aRaw );
+        return aRaw.find( '{' ) == std::string::npos ? text : UnescapeString( text );
+    };
+
+    // Names every stub uses: resolved once, not per symbol.
+    static const wxString refName = GetCanonicalFieldName( FIELD_T::REFERENCE );
+    static const wxString valueName = GetCanonicalFieldName( FIELD_T::VALUE );
+    static const wxString footprintName = GetCanonicalFieldName( FIELD_T::FOOTPRINT );
+    static const wxString datasheetName = GetCanonicalFieldName( FIELD_T::DATASHEET );
+    static const wxString descriptionName = GetCanonicalFieldName( FIELD_T::DESCRIPTION );
+    static const wxString localizedKeywords = _( "Keywords" );
 
     // LIB_SYMBOL caches these at parse time, before a derived symbol is linked:
     // the description and keywords are the symbol's own, with no parent fallback.
@@ -267,16 +284,14 @@ PCBJAM_SYMBOL_STUB::PCBJAM_SYMBOL_STUB( const PCBJAM_SYMBOL_ROW& aRow, const wxS
     // Chooser fields, as LIB_SYMBOL::cacheChooserFields: every field by name with
     // its shown text (the mandatory five always exist), then "Keywords" unless a
     // field already has that name.
-    m_fields[GetCanonicalFieldName( FIELD_T::REFERENCE )] = shown( aRow.reference );
-    m_fields[GetCanonicalFieldName( FIELD_T::VALUE )] = shown( aRow.value );
-    m_fields[GetCanonicalFieldName( FIELD_T::FOOTPRINT )] = m_footprint;
-    m_fields[GetCanonicalFieldName( FIELD_T::DATASHEET )] = shown( aRow.datasheet );
-    m_fields[GetCanonicalFieldName( FIELD_T::DESCRIPTION )] = m_desc;
+    m_fields[refName] = shown( aRow.reference );
+    m_fields[valueName] = shown( aRow.value );
+    m_fields[footprintName] = m_footprint;
+    m_fields[datasheetName] = shown( aRow.datasheet );
+    m_fields[descriptionName] = m_desc;
 
     for( const auto& [name, value] : aRow.fields )
         m_fields[wxString::FromUTF8( name )] = shown( value );
-
-    const wxString localizedKeywords = _( "Keywords" );
 
     if( !m_fields.contains( localizedKeywords ) )
         m_fields[localizedKeywords] = keywords;
@@ -540,7 +555,7 @@ std::string SYMBOL_LIBRARY_ADAPTER::CompareIndexedTreeItems( const wxString& aNi
 }
 
 
-int SYMBOL_LIBRARY_ADAPTER::WarmIndex( const wxString& aNickname )
+int SYMBOL_LIBRARY_ADAPTER::WarmIndex( const wxString& aNickname, const wxString& aSymbolName )
 {
     std::optional<LIB_DATA*> lib = fetchIfLoaded( aNickname );
 
@@ -552,6 +567,24 @@ int SYMBOL_LIBRARY_ADAPTER::WarmIndex( const wxString& aNickname )
 
     if( !plugin || plugin->IsFatLoaded( uri ) )
         return 0;
+
+    // One named symbol (a placed one: the chooser's "Already Placed" group loads
+    // each), through the static bridge like every step.
+    if( !aSymbolName.IsEmpty() )
+    {
+        if( plugin->IsCached( uri, aSymbolName ) )
+            return 0;
+
+        std::optional<std::string> body = SCH_IO_PCBJAM_LIB::BridgeRequest( "get", uri, aSymbolName );
+
+        lib = fetchIfLoaded( aNickname );
+        plugin = lib ? dynamic_cast<SCH_IO_PCBJAM_LIB*>( schplugin( *lib ) ) : nullptr;
+
+        if( plugin && body )
+            plugin->CacheItemDocument( uri, *body );
+
+        return 0;
+    }
 
     // Rows in: load the real symbols the chooser lists for text-variable rows,
     // one per step, so the click needs no "get" for them either.
@@ -700,6 +733,31 @@ public:
             return;
         }
 
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &Pgm().GetSettingsManager().Prj() );
+
+        // After the libraries: the symbols placed in the open schematic, one per
+        // step, so the chooser's "Already Placed" scan finds them cached.
+        if( m_queue.empty() && !m_placedListed )
+            listPlaced();
+
+        if( m_queue.empty() && !m_placed.empty() )
+        {
+            auto [nick, name] = m_placed.front();
+            m_placed.pop_front();
+            m_inStep = true;
+            auto t0 = std::chrono::steady_clock::now();
+
+            if( adapter )
+                adapter->WarmIndex( nick, name );
+
+            m_inStep = false;
+            double ms = std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - t0 ).count();
+            m_steps++;
+            KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:placed lib=%s name=%s ms=%.1f\n" ), nick, name, ms );
+            arm( ms < 4.0 ? 1 : 16 );
+            return;
+        }
+
         if( m_queue.empty() )
         {
             finish();
@@ -708,8 +766,6 @@ public:
 
         const wxString nickname = m_queue.front();
         m_queue.pop_front();
-
-        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &Pgm().GetSettingsManager().Prj() );
 
         auto t0 = std::chrono::steady_clock::now();
         m_inStep = true;
@@ -744,18 +800,35 @@ public:
             m_notReady = 0;
         }
 
-        if( m_queue.empty() )
-        {
-            finish();
-            return;
-        }
-
         // Back to back while steps are short, one per frame otherwise.
         arm( ms < 4.0 ? 1 : 16 );
     }
 
 private:
     void arm( int aMs ) { StartOnce( aMs ); }
+
+    /// The unique library symbols placed in the open schematic (once per warm-up).
+    void listPlaced()
+    {
+        m_placedListed = true;
+        auto* frame = wxTheApp ? dynamic_cast<SCH_EDIT_FRAME*>( wxTheApp->GetTopWindow() ) : nullptr;
+
+        if( !frame )
+            return;
+
+        std::set<wxString> seen;
+
+        for( const SCH_SHEET_PATH& sheet : frame->Schematic().Hierarchy() )
+        {
+            for( SCH_ITEM* item : sheet.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                const LIB_ID& id = static_cast<SCH_SYMBOL*>( item )->GetLibId();
+
+                if( id.IsValid() && seen.insert( id.Format().wx_str() ).second )
+                    m_placed.emplace_back( id.GetLibNickname().wx_str(), id.GetLibItemName().wx_str() );
+            }
+        }
+    }
 
     void finish()
     {
@@ -779,6 +852,8 @@ private:
     bool                                  m_stopped = false;
     bool                                  m_inStep = false;
     bool                                  m_fpDone = false;
+    bool                                  m_placedListed = false;
+    std::deque<std::pair<wxString, wxString>> m_placed;
 };
 
 

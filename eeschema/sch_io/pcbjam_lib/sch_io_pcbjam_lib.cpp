@@ -585,10 +585,11 @@ void SCH_IO_PCBJAM_LIB::fatLoad( const wxString& aLibraryPath )
 LIB_SYMBOL* SCH_IO_PCBJAM_LIB::LoadSymbol( const wxString& aLibraryPath, const wxString& aAliasName,
                                            const std::map<std::string, UTF8>* aProperties )
 {
-    if( LIB_SYMBOL* master = loadOne( aLibraryPath, aAliasName ) )
-        return new LIB_SYMBOL( *master );
-
-    return nullptr;
+    // The cache-owned master, NON-owning, as SCH_IO_KICAD_SEXPR::LoadSymbol returns
+    // it: every caller treats the result as borrowed (libs 0028 8.6 checked them:
+    // the preview, the chooser's footprint list, placement, the symbol editor's
+    // buffers copy it). The copy this used to return leaked on every preview.
+    return loadOne( aLibraryPath, aAliasName );
 }
 
 
