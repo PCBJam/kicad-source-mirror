@@ -547,6 +547,7 @@ set( EESCHEMA_SRCS
     tools/sch_selection.cpp
     tools/sch_selection_tool.cpp
     tools/sch_tool_utils.cpp
+    tools/pcbjam_sch_remote_lock.cpp # pcbjam: remote soft-locks (fork addition)
     tools/symbol_editor_control.cpp
     tools/symbol_editor_drawing_tools.cpp
     tools/symbol_editor_edit_tool.cpp

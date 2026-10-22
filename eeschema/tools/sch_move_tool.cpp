@@ -37,6 +37,7 @@
 #include <tools/sch_selection_tool.h>
 #include <tools/sch_line_wire_bus_tool.h>
 #include <tools/sch_move_tool.h>
+#include <tools/pcbjam_sch_remote_lock.h> // pcbjam: remote soft-locks
 
 #include <sch_actions.h>
 #include <sch_commit.h>
@@ -689,6 +690,7 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
 
     REENTRANCY_GUARD guard( &m_inMoveTool );
 
+    PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->GetSelection(), m_selectionTool );
     preprocessBreakOrSliceSelection( aCommit, aEvent );
 
     // Prepare selection (promote pins to symbols, request selection)
@@ -1180,7 +1182,8 @@ SCH_SELECTION& SCH_MOVE_TOOL::prepareSelection( bool& aUnselect )
 
     // Be sure that there is at least one item that we can move. If there's no selection try
     // looking for the stuff under mouse cursor (i.e. KiCad old-style hover selection).
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems, true );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim(
+            m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems, true ), m_selectionTool );
     aUnselect = selection.IsHover();
 
     return selection;
@@ -2922,7 +2925,8 @@ void SCH_MOVE_TOOL::moveItem( EDA_ITEM* aItem, const VECTOR2I& aDelta )
 int SCH_MOVE_TOOL::AlignToGrid( const TOOL_EVENT& aEvent )
 {
     EE_GRID_HELPER    grid( m_toolMgr);
-    SCH_SELECTION&    selection = m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems );
+    SCH_SELECTION&    selection = PCBJAM_SCH_REMOTE_LOCK::Trim(
+            m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems ), m_selectionTool );
     GRID_HELPER_GRIDS selectionGrid = grid.GetSelectionGrid( selection );
     SCH_COMMIT        commit( m_toolMgr );
 

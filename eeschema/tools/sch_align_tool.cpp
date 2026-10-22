@@ -31,6 +31,7 @@
 #include <sch_item.h>
 #include <sch_selection.h>
 #include <sch_selection_tool.h>
+#include <tools/pcbjam_sch_remote_lock.h> // pcbjam: remote soft-locks
 #include <tool/conditional_menu.h>
 #include <tool/selection_conditions.h>
 #include <tool/tool_event.h>
@@ -115,7 +116,8 @@ template< typename T >
 size_t SCH_ALIGN_TOOL::GetSelections( std::vector<ITEM_BOX>& aItemsToAlign,
                                       std::vector<ITEM_BOX>& aLockedItems, T aCompare )
 {
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim(
+            m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems ), m_selectionTool );
 
     for( EDA_ITEM* item : selection )
     {

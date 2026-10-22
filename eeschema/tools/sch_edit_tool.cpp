@@ -26,6 +26,7 @@
 #include <tool/action_manager.h>
 #include <tool/picker_tool.h>
 #include <tools/sch_edit_tool.h>
+#include <tools/pcbjam_sch_remote_lock.h> // pcbjam: remote soft-locks
 #include <tools/sch_inspection_tool.h>
 #include <tools/sch_line_wire_bus_tool.h>
 #include <tools/sch_move_tool.h>
@@ -964,7 +965,8 @@ const std::vector<KICAD_T> SCH_EDIT_TOOL::SwappableItems = {
 int SCH_EDIT_TOOL::Rotate( const TOOL_EVENT& aEvent )
 {
     bool           clockwise = ( aEvent.Matches( SCH_ACTIONS::rotateCW.MakeEvent() ) );
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( RotatableItems, true, false );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( RotatableItems, true, false ),
+                                                              m_selectionTool );
 
     wxLogTrace( "KICAD_SCH_MOVE", "SCH_EDIT_TOOL::Rotate: start, clockwise=%d, selection size=%u", clockwise,
                 selection.GetSize() );
@@ -1294,7 +1296,8 @@ int SCH_EDIT_TOOL::Rotate( const TOOL_EVENT& aEvent )
 
 int SCH_EDIT_TOOL::Mirror( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( RotatableItems, false, false );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( RotatableItems, false, false ),
+                                                              m_selectionTool );
 
     if( selection.GetSize() == 0 )
         return 0;
@@ -1591,7 +1594,8 @@ static void swapFieldPositionsWithMatching( std::vector<SCH_FIELD>& aAFields, st
 
 int SCH_EDIT_TOOL::Swap( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION&         selection = m_selectionTool->RequestSelection( SwappableItems );
+    SCH_SELECTION&         selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( SwappableItems ),
+                                                                      m_selectionTool );
     std::vector<EDA_ITEM*> sorted = selection.GetItemsSortedBySelectionOrder();
 
     if( selection.Size() < 2 )
@@ -1769,7 +1773,8 @@ int SCH_EDIT_TOOL::SwapPins( const TOOL_EVENT& aEvent )
     if( !m_frame->eeconfig()->m_Input.allow_unconstrained_pin_swaps )
         return 0;
 
-    SCH_SELECTION&         selection = m_selectionTool->RequestSelection( { SCH_PIN_T } );
+    SCH_SELECTION&         selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( { SCH_PIN_T } ),
+                                                                      m_selectionTool );
     std::vector<EDA_ITEM*> sorted = selection.GetItemsSortedBySelectionOrder();
 
     if( selection.Size() < 2 )
@@ -1955,7 +1960,8 @@ static SCH_LABEL_BASE* findSingleNetLabelForPin( SCH_PIN* aPin, CONNECTION_GRAPH
 
 int SCH_EDIT_TOOL::SwapPinLabels( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION&         selection = m_selectionTool->RequestSelection( { SCH_PIN_T } );
+    SCH_SELECTION&         selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( { SCH_PIN_T } ),
+                                                                      m_selectionTool );
     std::vector<EDA_ITEM*> orderedPins = selection.GetItemsSortedBySelectionOrder();
 
     if( orderedPins.size() < 2 )
@@ -2008,7 +2014,8 @@ int SCH_EDIT_TOOL::SwapPinLabels( const TOOL_EVENT& aEvent )
 
 int SCH_EDIT_TOOL::SwapUnitLabels( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION&           selection = m_selectionTool->RequestSelection( { SCH_SYMBOL_T } );
+    SCH_SELECTION&           selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( { SCH_SYMBOL_T } ),
+                                                                        m_selectionTool );
     std::vector<SCH_SYMBOL*> selectedUnits = GetSameSymbolMultiUnitSelection( selection );
 
     if( selectedUnits.size() < 2 )
@@ -2223,7 +2230,8 @@ int SCH_EDIT_TOOL::RepeatDrawItem( const TOOL_EVENT& aEvent )
 int SCH_EDIT_TOOL::DoDelete( const TOOL_EVENT& aEvent )
 {
     SCH_SCREEN*           screen = m_frame->GetScreen();
-    std::deque<EDA_ITEM*> items = m_selectionTool->RequestSelection( SCH_COLLECTOR::DeletableItems ).GetItems();
+    std::deque<EDA_ITEM*> items = PCBJAM_SCH_REMOTE_LOCK::Trim(
+            m_selectionTool->RequestSelection( SCH_COLLECTOR::DeletableItems ), m_selectionTool ).GetItems();
     SCH_COMMIT            commit( m_toolMgr );
     std::vector<VECTOR2I> pts;
     bool                  updateHierarchy = false;
@@ -2460,7 +2468,8 @@ int SCH_EDIT_TOOL::EditField( const TOOL_EVENT& aEvent )
 
 int SCH_EDIT_TOOL::AutoplaceFields( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( RotatableItems );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( RotatableItems ),
+                                                              m_selectionTool );
     SCH_COMMIT     commit( m_toolMgr );
     SCH_ITEM*      head = static_cast<SCH_ITEM*>( selection.Front() );
     bool           moving = head && head->IsMoving();
@@ -2534,7 +2543,8 @@ int SCH_EDIT_TOOL::ChangeSymbols( const TOOL_EVENT& aEvent )
 
 int SCH_EDIT_TOOL::CycleBodyStyle( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( { SCH_SYMBOL_T } );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( { SCH_SYMBOL_T } ),
+                                                              m_selectionTool );
 
     if( selection.Empty() )
         return 0;
@@ -2940,9 +2950,9 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
 int SCH_EDIT_TOOL::ChangeTextType( const TOOL_EVENT& aEvent )
 {
     KICAD_T       convertTo = aEvent.Parameter<KICAD_T>();
-    SCH_SELECTION selection = m_selectionTool->RequestSelection( { SCH_LABEL_LOCATE_ANY_T,
-                                                                   SCH_TEXT_T,
-                                                                   SCH_TEXTBOX_T } );
+    SCH_SELECTION selection = PCBJAM_SCH_REMOTE_LOCK::Trim(
+            m_selectionTool->RequestSelection( { SCH_LABEL_LOCATE_ANY_T, SCH_TEXT_T, SCH_TEXTBOX_T } ),
+            m_selectionTool );
     SCH_COMMIT    localCommit( m_toolMgr );
     SCH_COMMIT*   commit = dynamic_cast<SCH_COMMIT*>( aEvent.Commit() );
 
@@ -3311,7 +3321,8 @@ int SCH_EDIT_TOOL::JustifyText( const TOOL_EVENT& aEvent )
 {
     static std::vector<KICAD_T> justifiableItems = { SCH_FIELD_T, SCH_TEXT_T, SCH_TEXTBOX_T, SCH_LABEL_T };
 
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( justifiableItems );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( justifiableItems ),
+                                                              m_selectionTool );
 
     if( selection.GetSize() == 0 )
         return 0;
@@ -3400,7 +3411,8 @@ int SCH_EDIT_TOOL::JustifyText( const TOOL_EVENT& aEvent )
 
 int SCH_EDIT_TOOL::CleanupSheetPins( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( { SCH_SHEET_T } );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->RequestSelection( { SCH_SHEET_T } ),
+                                                              m_selectionTool );
     SCH_SHEET*     sheet = (SCH_SHEET*) selection.Front();
     SCH_COMMIT     commit( m_toolMgr );
 
@@ -3527,10 +3539,11 @@ int SCH_EDIT_TOOL::DdAddImage( const TOOL_EVENT& aEvent )
 
 int SCH_EDIT_TOOL::SetAttribute( const TOOL_EVENT& aEvent )
 {
-    SCH_SELECTION& selection =
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim(
             aEvent.IsAction( &SCH_ACTIONS::setExcludeFromPosFiles )
                     ? m_selectionTool->RequestSelection( { SCH_SYMBOL_T } )
-                    : m_selectionTool->RequestSelection( { SCH_SYMBOL_T, SCH_SHEET_T, SCH_RULE_AREA_T } );
+                    : m_selectionTool->RequestSelection( { SCH_SYMBOL_T, SCH_SHEET_T, SCH_RULE_AREA_T } ),
+            m_selectionTool );
     std::set<std::pair<SCH_ITEM*, SCH_SCREEN*>> collectedItems;
 
     for( EDA_ITEM* item : selection )

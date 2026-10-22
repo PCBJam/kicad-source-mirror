@@ -35,6 +35,7 @@
 #include <sch_commit.h>
 #include <dialogs/dialog_group_properties.h>
 #include <sch_group.h>
+#include <tools/pcbjam_sch_remote_lock.h> // pcbjam: remote soft-locks
 #include <symbol.h>
 #include <wx/string.h>
 
@@ -169,7 +170,7 @@ int SCH_GROUP_TOOL::Group( const TOOL_EVENT& aEvent )
 {
     bool                isSymbolEditor = m_frame->GetFrameType() == FRAME_SCH_SYMBOL_EDITOR;
     SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
-    SCH_SELECTION       selection = selTool->RequestSelection();
+    SCH_SELECTION       selection = PCBJAM_SCH_REMOTE_LOCK::Trim( selTool->RequestSelection(), selTool );
     wxString            errorMsg;
 
     // Iterate from the back so we don't have to worry about removals.
