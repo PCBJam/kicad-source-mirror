@@ -42,9 +42,11 @@
 #include <pcb_track.h>
 #include <pcbnew_id.h>
 #include <pcb_marker.h>
+#include <pcb_point.h>
 #include <drc/drc_item.h>
 #include <layer_ids.h>
 #include <project.h>
+#include <string_utils.h>
 #include <tool/tool_manager.h>
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
@@ -85,6 +87,9 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
         &API_HANDLER_PCB::handleGetBoardEnabledLayers );
     registerHandler<SetBoardEnabledLayers, BoardEnabledLayersResponse>(
         &API_HANDLER_PCB::handleSetBoardEnabledLayers );
+    registerHandler<GetEmbeddedFiles, common::types::EmbeddedFiles>( &API_HANDLER_PCB::handleGetEmbeddedFiles );
+    registerHandler<AddEmbeddedFiles, Empty>( &API_HANDLER_PCB::handleAddEmbeddedFiles );
+    registerHandler<SetEmbeddedFiles, Empty>( &API_HANDLER_PCB::handleSetEmbeddedFiles );
     registerHandler<GetGraphicsDefaults, GraphicsDefaultsResponse>(
             &API_HANDLER_PCB::handleGetGraphicsDefaults );
     registerHandler<GetBoundingBox, GetBoundingBoxResponse>(
@@ -101,8 +106,10 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
     registerHandler<GetBoardOrigin, types::Vector2>( &API_HANDLER_PCB::handleGetBoardOrigin );
     registerHandler<SetBoardOrigin, Empty>( &API_HANDLER_PCB::handleSetBoardOrigin );
     registerHandler<GetBoardLayerName, BoardLayerNameResponse>( &API_HANDLER_PCB::handleGetBoardLayerName );
+    registerHandler<GetBoardLayerByName, BoardLayerResponse>( &API_HANDLER_PCB::handleGetBoardLayerByName );
 
     registerHandler<InteractiveMoveItems, Empty>( &API_HANDLER_PCB::handleInteractiveMoveItems );
+    registerHandler<FlipItems, FlipItemsResponse>( &API_HANDLER_PCB::handleFlipItems );
     registerHandler<GetNets, NetsResponse>( &API_HANDLER_PCB::handleGetNets );
     registerHandler<GetConnectedItems, GetItemsResponse>( &API_HANDLER_PCB::handleGetConnectedItems );
     registerHandler<GetItemsByNet, GetItemsResponse>( &API_HANDLER_PCB::handleGetItemsByNet );
@@ -127,6 +134,15 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
             &API_HANDLER_PCB::handleSetBoardEditorAppearanceSettings );
     registerHandler<InjectDrcError, InjectDrcErrorResponse>(
             &API_HANDLER_PCB::handleInjectDrcError );
+
+    registerHandler<GetVariants, VariantsResponse>( &API_HANDLER_PCB::handleGetVariants );
+    registerHandler<AddVariant, Empty>( &API_HANDLER_PCB::handleAddVariant );
+    registerHandler<DeleteVariant, Empty>( &API_HANDLER_PCB::handleDeleteVariant );
+    registerHandler<RenameVariant, Empty>( &API_HANDLER_PCB::handleRenameVariant );
+    registerHandler<CopyVariant, Empty>( &API_HANDLER_PCB::handleCopyVariant );
+    registerHandler<SetVariantDescription, Empty>( &API_HANDLER_PCB::handleSetVariantDescription );
+    registerHandler<SetCurrentVariant, Empty>( &API_HANDLER_PCB::handleSetCurrentVariant );
+    registerHandler<GetCurrentVariant, CurrentVariantResponse>( &API_HANDLER_PCB::handleGetCurrentVariant );
 }
 
 
@@ -500,7 +516,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_PCB::handleCreateUpdateItemsIntern
                 item->RunOnChildren(
                         []( BOARD_ITEM* aChild )
                         {
-                            const_cast<KIID&>( aChild->m_Uuid ) = KIID();
+                            aChild->ResetUuid();
                         },
                         RECURSE );
             }
@@ -619,6 +635,7 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItems( const HANDLER_
         }
 
         case PCB_SHAPE_T:
+        case PCB_TABLE_T:
         case PCB_TEXT_T:
         case PCB_TEXTBOX_T:
         case PCB_BARCODE_T:
@@ -692,6 +709,15 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItems( const HANDLER_
             typesInserted.insert( PCB_GROUP_T );
             break;
         }
+
+        case PCB_POINT_T:
+        {
+            handledAnything = true;
+            std::copy( board->Points().begin(), board->Points().end(), std::back_inserter( items ) );
+            typesInserted.insert( PCB_POINT_T );
+            break;
+        }
+
         default:
             break;
         }
@@ -936,11 +962,8 @@ HANDLER_RESULT<BoardStackupResponse> API_HANDLER_PCB::handleGetStackup(
         return tl::unexpected( documentValidation.error() );
 
     BoardStackupResponse  response;
-    google::protobuf::Any any;
 
-    frame()->GetBoard()->GetStackupOrDefault().Serialize( any );
-
-    any.UnpackTo( response.mutable_stackup() );
+    frame()->GetBoard()->GetStackupOrDefault().Serialize( *response.mutable_stackup() );
 
     // User-settable layer names are not stored in BOARD_STACKUP at the moment
     for( board::BoardStackupLayer& layer : *response.mutable_stackup()->mutable_layers() )
@@ -1057,6 +1080,78 @@ HANDLER_RESULT<BoardEnabledLayersResponse> API_HANDLER_PCB::handleSetBoardEnable
     board::PackLayerSet( *response.mutable_layers(), enabled );
 
     return response;
+}
+
+
+HANDLER_RESULT<common::types::EmbeddedFiles>
+API_HANDLER_PCB::handleGetEmbeddedFiles( const HANDLER_CONTEXT<GetEmbeddedFiles>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    common::types::EmbeddedFiles response;
+    board::PackEmbeddedFiles( response, *frame()->GetBoard() );
+    return response;
+}
+
+
+HANDLER_RESULT<Empty> unpackEmbeddedFiles( EMBEDDED_FILES& aOutput, const common::types::EmbeddedFiles& aProto )
+{
+    if( !board::UnpackEmbeddedFiles( aOutput, aProto ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "embedded file validation failed" );
+        return tl::unexpected( e );
+    }
+
+    return Empty();
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleAddEmbeddedFiles( const HANDLER_CONTEXT<AddEmbeddedFiles>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    EMBEDDED_FILES files;
+    HANDLER_RESULT<Empty> result = unpackEmbeddedFiles( files, aCtx.Request.files() );
+
+    if( !result.has_value() )
+        return result;
+
+    EMBEDDED_FILES* boardFiles = frame()->GetBoard()->GetEmbeddedFiles();
+
+    for( const std::shared_ptr<EMBEDDED_FILES::EMBEDDED_FILE>& file : files.EmbeddedFileMap() | std::views::values )
+    {
+        auto copy = std::make_shared<EMBEDDED_FILES::EMBEDDED_FILE>( *file );
+        boardFiles->AddFile( copy );
+    }
+
+    frame()->OnModify();
+    return result;
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSetEmbeddedFiles( const HANDLER_CONTEXT<SetEmbeddedFiles>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    HANDLER_RESULT<Empty> result = unpackEmbeddedFiles( *frame()->GetBoard()->GetEmbeddedFiles(),
+                                                        aCtx.Request.files() );
+
+    if( !result.has_value() )
+        return result;
+
+    frame()->OnModify();
+    return result;
 }
 
 
@@ -1209,6 +1304,24 @@ HANDLER_RESULT<BoardLayerNameResponse> API_HANDLER_PCB::handleGetBoardLayerName(
     PCB_LAYER_ID id = FromProtoEnum<PCB_LAYER_ID>( aCtx.Request.layer() );
 
     response.set_name( frame()->GetBoard()->GetLayerName( id ) );
+
+    return response;
+}
+
+
+HANDLER_RESULT<BoardLayerResponse> API_HANDLER_PCB::handleGetBoardLayerByName(
+            const HANDLER_CONTEXT<GetBoardLayerByName>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    BoardLayerResponse response;
+
+    PCB_LAYER_ID id = frame()->GetBoard()->GetLayerID( wxString::FromUTF8( aCtx.Request.name() ) );
+    response.set_layer( ToProtoEnum<PCB_LAYER_ID, board::types::BoardLayer>( id ) );
 
     return response;
 }
@@ -1452,6 +1565,10 @@ HANDLER_RESULT<ExpandTextVariablesResponse> API_HANDLER_PCB::handleExpandTextVar
     for( const std::string& textMsg : aCtx.Request.text() )
     {
         wxString text = ExpandTextVars( wxString::FromUTF8( textMsg ), &textResolver );
+
+        if( aCtx.Request.expand_env_vars() )
+            text = ExpandEnvVarSubstitutions( text, board->GetProject() );
+
         reply.add_text( text.ToUTF8() );
     }
 
@@ -1498,6 +1615,115 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleInteractiveMoveItems(
     mgr->PostAPIAction( PCB_ACTIONS::move, commit );
 
     return Empty();
+}
+
+
+HANDLER_RESULT<FlipItemsResponse> API_HANDLER_PCB::handleFlipItems( const HANDLER_CONTEXT<FlipItems>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    auto containerResult = validateItemHeaderDocument( aCtx.Request.header() );
+
+    if( !containerResult && containerResult.error().status() == ApiStatusCode::AS_UNHANDLED )
+    {
+        // No message needed for AS_UNHANDLED; this is an internal flag for the API server
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
+        return tl::unexpected( e );
+    }
+    else if( !containerResult )
+    {
+        return tl::unexpected( containerResult.error() );
+    }
+
+    FLIP_DIRECTION flipDirection = FromProtoEnum<FLIP_DIRECTION, BoardFlipDirection>(
+            aCtx.Request.direction() );
+
+    FlipItemsResponse response;
+    response.mutable_header()->CopyFrom( aCtx.Request.header() );
+
+    BOARD_COMMIT* commit = static_cast<BOARD_COMMIT*>( getCurrentCommit( aCtx.ClientName ) );
+
+    bool anyModified = false;
+
+    for( const types::KIID& id : aCtx.Request.items() )
+    {
+        ItemFlipResult* result = response.add_flipped_items();
+
+        std::optional<BOARD_ITEM*> optItem = getItemById( KIID( id.value() ) );
+
+        if( !optItem )
+        {
+            result->mutable_status()->set_code( ItemStatusCode::ISC_NONEXISTENT );
+            result->mutable_status()->set_error_message(
+                    fmt::format( "an item with UUID {} does not exist", id.value() ) );
+            continue;
+        }
+
+        BOARD_ITEM* boardItem = *optItem;
+
+        static const std::set<KICAD_T> flippableTypes = {
+            PCB_FOOTPRINT_T,
+            PCB_PAD_T,
+            PCB_SHAPE_T,
+            PCB_REFERENCE_IMAGE_T,
+            PCB_FIELD_T,
+            PCB_GENERATOR_T,
+            PCB_TEXT_T,
+            PCB_TEXTBOX_T,
+            PCB_TABLE_T,
+            PCB_TABLECELL_T,
+            PCB_TRACE_T,
+            PCB_VIA_T,
+            PCB_ARC_T,
+            PCB_ZONE_T,
+            PCB_GROUP_T,
+            PCB_BARCODE_T,
+            PCB_MARKER_T,
+            PCB_POINT_T,
+            PCB_TARGET_T,
+            PCB_DIM_ALIGNED_T,
+            PCB_DIM_LEADER_T,
+            PCB_DIM_CENTER_T,
+            PCB_DIM_RADIAL_T,
+            PCB_DIM_ORTHOGONAL_T,
+        };
+
+        KICAD_T itemType = boardItem->Type();
+
+        if( !flippableTypes.contains( itemType ) )
+        {
+            result->mutable_status()->set_code( ItemStatusCode::ISC_INVALID_TYPE );
+            result->mutable_status()->set_error_message(
+                    fmt::format( "items of type {} cannot be flipped",
+                                 magic_enum::enum_name( itemType ) ) );
+            continue;
+        }
+
+        commit->Modify( boardItem, nullptr, RECURSE_MODE::RECURSE );
+        boardItem->Flip( boardItem->GetPosition(), flipDirection );
+        boardItem->Normalize();
+
+        // Maybe this should be in FOOTPRINT::Normalize?
+        if( boardItem->Type() == PCB_FOOTPRINT_T )
+            static_cast<FOOTPRINT*>( boardItem )->InvalidateComponentClassCache();
+
+        anyModified = true;
+
+        google::protobuf::Any itemBuf;
+        boardItem->Serialize( itemBuf );
+        *result->mutable_item() = std::move( itemBuf );
+
+        result->mutable_status()->set_code( ItemStatusCode::ISC_OK );
+    }
+
+    response.set_status( ItemRequestStatus::IRS_OK );
+
+    if( anyModified && !m_activeClients.count( aCtx.ClientName ) )
+        pushCurrentCommit( aCtx.ClientName, _( "Flipped items via API" ) );
+
+    return response;
 }
 
 
@@ -1770,7 +1996,6 @@ HANDLER_RESULT<NetClassForNetsResponse> API_HANDLER_PCB::handleGetNetClassForNet
 
     BOARD* board = frame()->GetBoard();
     const NETINFO_LIST& nets = board->GetNetInfo();
-    google::protobuf::Any any;
 
     for( const board::types::Net& net : aCtx.Request.net() )
     {
@@ -1779,9 +2004,8 @@ HANDLER_RESULT<NetClassForNetsResponse> API_HANDLER_PCB::handleGetNetClassForNet
         if( !netInfo )
             continue;
 
-        netInfo->GetNetClass()->Serialize( any );
         auto [pair, rc] = response.mutable_classes()->insert( { net.name(), {} } );
-        any.UnpackTo( &pair->second );
+        netInfo->GetNetClass()->Serialize( pair->second );
     }
 
     return response;
@@ -2006,7 +2230,6 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSetBoardEditorAppearanceSettings(
         return tl::unexpected( *busy );
 
     PCB_DISPLAY_OPTIONS options = frame()->GetDisplayOptions();
-    KIGFX::PCB_VIEW* view = frame()->GetCanvas()->GetView();
     PCBNEW_SETTINGS* editorSettings = frame()->GetPcbNewSettings();
     const BoardEditorAppearanceSettings& newSettings = aCtx.Request.settings();
 
@@ -2014,14 +2237,7 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSetBoardEditorAppearanceSettings(
             FromProtoEnum<HIGH_CONTRAST_MODE>( newSettings.inactive_layer_display() );
     options.m_NetColorMode =
             FromProtoEnum<NET_COLOR_MODE>( newSettings.net_color_display() );
-
-    bool flip = newSettings.board_flip() == BoardFlipMode::BFM_FLIPPED_X;
-
-    if( flip != view->IsMirroredX() )
-    {
-        view->SetMirror( !view->IsMirroredX(), view->IsMirroredY() );
-        view->RecacheAllItems();
-    }
+    options.m_FlipBoardView = newSettings.board_flip() == BoardFlipMode::BFM_FLIPPED_X;
 
     editorSettings->m_Display.m_RatsnestMode =
             FromProtoEnum<RATSNEST_MODE>( newSettings.ratsnest_display() );
@@ -2072,6 +2288,278 @@ HANDLER_RESULT<InjectDrcErrorResponse> API_HANDLER_PCB::handleInjectDrcError(
 
     InjectDrcErrorResponse response;
     response.mutable_marker()->set_value( marker->GetUUID().AsStdString() );
+
+    return response;
+}
+
+
+HANDLER_RESULT<VariantsResponse> API_HANDLER_PCB::handleGetVariants( const HANDLER_CONTEXT<GetVariants>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD* board = frame()->GetBoard();
+    VariantsResponse response;
+
+    response.mutable_document()->CopyFrom( aCtx.Request.document() );
+
+    for( const wxString& name : board->GetVariantNames() )
+    {
+        types::DesignVariant* var = response.add_variants();
+        var->set_name( name.ToUTF8() );
+        var->set_description( board->GetVariantDescription( name ).ToUTF8() );
+    }
+
+    return response;
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleAddVariant( const HANDLER_CONTEXT<AddVariant>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD* board = frame()->GetBoard();
+
+    wxString name = wxString::FromUTF8( aCtx.Request.name() );
+
+    if( name.IsEmpty() || name.CmpNoCase( GetDefaultVariantName() ) == 0 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "'{}' is not a valid variant name", aCtx.Request.name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( board->HasVariant( name ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "a variant named '{}' already exists", aCtx.Request.name() ) );
+        return tl::unexpected( e );
+    }
+
+    board->AddVariant( name );
+
+    if( aCtx.Request.has_description() )
+        board->SetVariantDescription( name, wxString::FromUTF8( aCtx.Request.description() ) );
+
+    frame()->UpdateVariantSelectionCtrl();
+
+    return Empty();
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleDeleteVariant( const HANDLER_CONTEXT<DeleteVariant>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD* board = frame()->GetBoard();
+
+    wxString name = wxString::FromUTF8( aCtx.Request.name() );
+
+    if( name.IsEmpty() || name.CmpNoCase( GetDefaultVariantName() ) == 0 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "'{}' is not a valid variant name", aCtx.Request.name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( !board->HasVariant( name ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "no variant named '{}' exists", aCtx.Request.name() ) );
+        return tl::unexpected( e );
+    }
+
+    board->DeleteVariant( name );
+    frame()->UpdateVariantSelectionCtrl();
+
+    return Empty();
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRenameVariant( const HANDLER_CONTEXT<RenameVariant>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD* board = frame()->GetBoard();
+
+    wxString oldName = wxString::FromUTF8( aCtx.Request.old_name() );
+    wxString newName = wxString::FromUTF8( aCtx.Request.new_name() );
+
+    if( oldName.IsEmpty() || oldName.CmpNoCase( GetDefaultVariantName() ) == 0 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "'{}' is not a valid variant name", aCtx.Request.old_name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( newName.IsEmpty() || newName.CmpNoCase( GetDefaultVariantName() ) == 0 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "'{}' is not a valid variant name", aCtx.Request.new_name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( !board->HasVariant( oldName ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "no variant named '{}' exists", aCtx.Request.old_name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( board->HasVariant( newName ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "a variant named '{}' already exists", aCtx.Request.new_name() ) );
+        return tl::unexpected( e );
+    }
+
+    board->RenameVariant( oldName, newName );
+    frame()->UpdateVariantSelectionCtrl();
+
+    return Empty();
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleCopyVariant( const HANDLER_CONTEXT<CopyVariant>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD* board = frame()->GetBoard();
+
+    wxString oldName = wxString::FromUTF8( aCtx.Request.old_name() );
+    wxString newName = wxString::FromUTF8( aCtx.Request.new_name() );
+
+    if( oldName.IsEmpty() || oldName.CmpNoCase( GetDefaultVariantName() ) == 0 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "'{}' is not a valid variant name", aCtx.Request.old_name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( newName.IsEmpty() || newName.CmpNoCase( GetDefaultVariantName() ) == 0 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "'{}' is not a valid variant name", aCtx.Request.new_name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( !board->HasVariant( oldName ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "no variant named '{}' exists", aCtx.Request.old_name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( board->HasVariant( newName ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "a variant named '{}' already exists", aCtx.Request.new_name() ) );
+        return tl::unexpected( e );
+    }
+
+    board->CopyVariant( oldName, newName,
+                        aCtx.Request.has_new_description() ? wxString::FromUTF8( aCtx.Request.new_description() )
+                                                           : wxString() );
+    frame()->UpdateVariantSelectionCtrl();
+
+    return Empty();
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSetVariantDescription( const HANDLER_CONTEXT<SetVariantDescription>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD* board = frame()->GetBoard();
+
+    wxString name = wxString::FromUTF8( aCtx.Request.name() );
+
+    if( name.IsEmpty() || name.CmpNoCase( GetDefaultVariantName() ) == 0 || !board->HasVariant( name ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "no variant named '{}' exists", aCtx.Request.name() ) );
+        return tl::unexpected( e );
+    }
+
+    board->SetVariantDescription( name, wxString::FromUTF8( aCtx.Request.description() ) );
+
+    return Empty();
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSetCurrentVariant( const HANDLER_CONTEXT<SetCurrentVariant>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD* board = frame()->GetBoard();
+
+    if( aCtx.Request.has_name() && !aCtx.Request.name().empty() )
+    {
+        if( wxString name = wxString::FromUTF8( aCtx.Request.name() ); !board->HasVariant( name ) )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "no variant named '{}' exists", aCtx.Request.name() ) );
+            return tl::unexpected( e );
+        }
+    }
+
+    frame()->SetCurrentVariant( aCtx.Request.has_name() ? wxString::FromUTF8( aCtx.Request.name() ) : wxString() );
+
+    return Empty();
+}
+
+
+HANDLER_RESULT<CurrentVariantResponse>
+API_HANDLER_PCB::handleGetCurrentVariant( const HANDLER_CONTEXT<GetCurrentVariant>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    CurrentVariantResponse response;
+
+    if( wxString current = frame()->GetBoard()->GetCurrentVariant(); !current.IsEmpty() )
+        response.set_name( current.ToUTF8() );
 
     return response;
 }

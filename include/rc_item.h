@@ -24,6 +24,10 @@
 #ifndef RC_ITEM_H
 #define RC_ITEM_H
 
+#include <deque>
+#include <memory>
+#include <vector>
+
 #include <wx/dataview.h>
 #include <units_provider.h>
 #include <kiid.h>
@@ -246,6 +250,12 @@ public:
     NODE_TYPE                  m_Type;
     std::shared_ptr<RC_ITEM>   m_RcItem;
 
+    struct HANDLE
+    {
+        RC_TREE_NODE* m_Node = nullptr;
+    };
+
+    HANDLE*                    m_Handle = nullptr;
     RC_TREE_NODE*              m_Parent;
     std::vector<RC_TREE_NODE*> m_Children;
 };
@@ -256,12 +266,13 @@ class RC_TREE_MODEL : public wxDataViewModel, public wxEvtHandler
 public:
     static wxDataViewItem ToItem( RC_TREE_NODE const* aNode )
     {
-        return wxDataViewItem( const_cast<void*>( static_cast<void const*>( aNode ) ) );
+        return aNode && aNode->m_Handle ? wxDataViewItem( aNode->m_Handle ) : wxDataViewItem();
     }
 
     static RC_TREE_NODE* ToNode( wxDataViewItem aItem )
     {
-        return static_cast<RC_TREE_NODE*>( aItem.GetID() );
+        auto* handle = static_cast<RC_TREE_NODE::HANDLE*>( aItem.GetID() );
+        return handle ? handle->m_Node : nullptr;
     }
 
     const wxDataViewCtrl* GetView() const { return m_view; }
@@ -293,9 +304,6 @@ public:
     unsigned int GetChildren( wxDataViewItem const& aItem,
                               wxDataViewItemArray&  aChildren ) const override;
 
-    // Simple, single-text-column model
-    unsigned int GetColumnCount() const override { return 1; }
-    wxString GetColumnType( unsigned int aCol ) const override { return "string"; }
     bool HasContainerColumns( wxDataViewItem const& aItem ) const override { return true; }
 
     bool HasValue( const wxDataViewItem& item, unsigned col ) const override
@@ -341,6 +349,23 @@ public:
     void DeleteItems( bool aCurrentOnly, bool aIncludeExclusions, bool aDeep );
 
 protected:
+    RC_TREE_NODE* createNode( RC_TREE_NODE* aParent, const std::shared_ptr<RC_ITEM>& aRcItem,
+                              RC_TREE_NODE::NODE_TYPE aType );
+    void          retireNodeTree( RC_TREE_NODE* aNode );
+    void          deleteNodeTree( RC_TREE_NODE* aNode );
+
+    /**
+     * Retire and destroy every node in the tree.
+     *
+     * Retired handles are kept alive so that stale wxDataViewItems resolve to nullptr.
+     */
+    void          clearTree();
+
+    /**
+     * Repopulate the node tree from \a aProvider.  Touches no wxWidgets state.
+     */
+    void          rebuildTree( std::shared_ptr<RC_ITEMS_PROVIDER> aProvider, int aSeverities );
+
     void     rebuildModel( std::shared_ptr<RC_ITEMS_PROVIDER> aProvider, int aSeverities );
 
     EDA_DRAW_FRAME*                    m_editFrame;
@@ -348,6 +373,10 @@ protected:
     int                                m_severities;
     std::shared_ptr<RC_ITEMS_PROVIDER> m_rcItemsProvider;
 
+    /// Stable wx item IDs.  Handles are retired but never freed before the model dies because
+    /// wxDataViewCtrl hands back item IDs long after the rows they named were destroyed; the
+    /// deque keeps existing handle addresses valid as more are appended.
+    std::deque<RC_TREE_NODE::HANDLE>   m_handles;
     std::vector<RC_TREE_NODE*>         m_tree;              // I own this
 };
 

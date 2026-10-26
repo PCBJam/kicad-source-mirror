@@ -201,8 +201,17 @@ SCH_ITEM* SCH_EDITOR_CONTROL::FindSymbolAndItem( const wxString* aPath, const wx
  */
 void SCH_EDIT_FRAME::ExecuteRemoteCommand( const char* cmdline )
 {
+    // A remote command can arrive over the cross-probe socket before tools are registered
+    // or after the tool manager has been torn down while the frame is closing.
+    if( !m_toolManager )
+        return;
+
     SCH_EDITOR_CONTROL* editor = m_toolManager->GetTool<SCH_EDITOR_CONTROL>();
-    char                line[1024];
+
+    if( !editor )
+        return;
+
+    char line[1024];
 
     strncpy( line, cmdline, sizeof( line ) - 1 );
     line[ sizeof( line ) - 1 ] = '\0';
@@ -233,12 +242,11 @@ void SCH_EDIT_FRAME::ExecuteRemoteCommand( const char* cmdline )
         wxString netName = From_UTF8( text );
 
         if( auto sg = Schematic().ConnectionGraph()->FindFirstSubgraphByName( netName ) )
-            m_highlightedConn = sg->GetDriverConnection()->Name();
+            SetHighlightedConnection( sg->GetDriverConnection()->Name(), nullptr, true );
         else
-            m_highlightedConn = wxEmptyString;
+            SetHighlightedConnection( wxEmptyString, nullptr, true );
 
         GetToolManager()->RunAction( SCH_ACTIONS::updateNetHighlighting );
-        RefreshNetNavigator();
 
         SetStatusText( _( "Highlighted net:" ) + wxS( " " ) + UnescapeString( netName ) );
         return;

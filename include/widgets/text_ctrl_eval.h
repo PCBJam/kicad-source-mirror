@@ -64,6 +64,12 @@ public:
     void SetValue( const wxString& aValue ) override;
 
 protected:
+    /**
+     * Any programmatic value (ChangeValue() included) replaces the expression the
+     * evaluator remembers; otherwise the next focus would restore a stale one.
+     */
+    void DoSetValue( const wxString& aValue, int aFlags ) override;
+
     /// Numeric expression evaluator.
     NUMERIC_EVALUATOR m_eval;
 

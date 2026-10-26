@@ -122,8 +122,8 @@ void LIB_SYMBOL::cacheShownDescription()
 void LIB_SYMBOL::SetDescription( const wxString& aDescription )
 {
     GetDescriptionField().SetText( aDescription );
-    cacheSearchTerms();
     cacheShownDescription();
+    cacheSearchTerms();
 }
 
 
@@ -164,8 +164,8 @@ void LIB_SYMBOL::cacheSearchTerms()
 
     // Order matters, see SEARCH_TERM_CACHE_INDEX
     m_searchTermsCache.emplace_back( SEARCH_TERM( GetLibNickname(), 4 ) );
-    m_searchTermsCache.emplace_back( SEARCH_TERM( GetName(), 8 ) );
-    m_searchTermsCache.emplace_back( SEARCH_TERM( GetLIB_ID().Format(), 16 ) );
+    m_searchTermsCache.emplace_back( SEARCH_TERM( GetName(), 8, true ) );
+    m_searchTermsCache.emplace_back( SEARCH_TERM( GetLIB_ID().Format(), 16, true ) );
 
     wxStringTokenizer keywordTokenizer( GetShownKeyWords(), " \t\r\n", wxTOKEN_STRTOK );
 
@@ -280,7 +280,8 @@ LIB_SYMBOL::LIB_SYMBOL( const LIB_SYMBOL& aSymbol, LEGACY_SYMBOL_LIB* aLibrary, 
     m_duplicatePinNumbersAreJumpers = aSymbol.m_duplicatePinNumbersAreJumpers;
 
     m_unitDisplayNames = aSymbol.GetUnitDisplayNames();
-    m_bodyStyleNames = aSymbol.GetBodyStyleNames();
+    // Raw member, not the accessor, which would bake a root's body styles into a derived copy
+    m_bodyStyleNames = aSymbol.m_bodyStyleNames;
 
     ClearSelected();
 
@@ -333,7 +334,8 @@ const LIB_SYMBOL& LIB_SYMBOL::operator=( const LIB_SYMBOL& aSymbol )
     m_duplicatePinNumbersAreJumpers = aSymbol.m_duplicatePinNumbersAreJumpers;
 
     m_unitDisplayNames = aSymbol.GetUnitDisplayNames();
-    m_bodyStyleNames = aSymbol.GetBodyStyleNames();
+    // Raw member, not the accessor, which would bake a root's body styles into a derived copy
+    m_bodyStyleNames = aSymbol.m_bodyStyleNames;
 
     m_drawings.clear();
 
@@ -449,10 +451,33 @@ std::shared_ptr<LIB_SYMBOL> LIB_SYMBOL::GetRootSymbol() const
 }
 
 
+bool LIB_SYMBOL::UnitsLocked() const
+{
+    if( IsDerived() )
+    {
+        std::shared_ptr<LIB_SYMBOL> root = GetSafeRootSymbol( this, __FUNCTION__ );
+
+        if( root.get() != this )
+            return root->m_unitsLocked;
+    }
+
+    return m_unitsLocked;
+}
+
+
 wxString LIB_SYMBOL::GetUnitDisplayName( int aUnit, bool aLabel ) const
 {
-    if( m_unitDisplayNames.contains( aUnit ) )
-        return m_unitDisplayNames.at( aUnit );
+    const LIB_SYMBOL*           owner = this;
+    std::shared_ptr<LIB_SYMBOL> root;
+
+    if( IsDerived() )
+    {
+        root = GetSafeRootSymbol( this, __FUNCTION__ );
+        owner = root.get();
+    }
+
+    if( owner->m_unitDisplayNames.contains( aUnit ) )
+        return owner->m_unitDisplayNames.at( aUnit );
     else if( aLabel )
         return wxString::Format( _( "Unit %s" ), LIB_SYMBOL::LetterSubReference( aUnit, 'A' ) );
     else
@@ -471,8 +496,11 @@ wxString LIB_SYMBOL::GetBodyStyleDescription( int aBodyStyle, bool aLabel ) cons
     }
     else if( IsMultiBodyStyle() )
     {
-        if( aBodyStyle <= (int) m_bodyStyleNames.size() )
-            return m_bodyStyleNames[aBodyStyle - 1];
+        const std::vector<wxString>& names = GetBodyStyleNames();
+
+        // Draw items common to every body style carry a body style of 0
+        if( aBodyStyle >= BODY_STYLE::BASE && aBodyStyle <= (int) names.size() )
+            return names[aBodyStyle - 1];
     }
 
     return wxT( "?" );
@@ -1311,6 +1339,24 @@ std::vector<SCH_PIN*> LIB_SYMBOL::GetPinsByNumber( const wxString& aNumber, int 
 }
 
 
+bool LIB_SYMBOL::HasPinNumber( const wxString& aNumber ) const
+{
+    if( GetPin( aNumber ) )
+        return true;
+
+    for( const SCH_PIN* pin : GetGraphicalPins( 0, 0 ) )
+    {
+        for( const wxString& logicalNumber : pin->GetStackedPinNumbers() )
+        {
+            if( aNumber == logicalNumber )
+                return true;
+        }
+    }
+
+    return false;
+}
+
+
 bool LIB_SYMBOL::PinsConflictWith( const LIB_SYMBOL& aOtherPart, bool aTestNums, bool aTestNames, bool aTestType,
                                    bool aTestOrientation, bool aTestLength ) const
 {
@@ -1466,9 +1512,10 @@ const BOX2I LIB_SYMBOL::GetBodyBoundingBox( int aUnit, int aBodyStyle, bool aInc
 
 void LIB_SYMBOL::RefreshLibraryTreeCaches()
 {
+    // cacheSearchTerms() reads the shown-description cache, so refresh it first.
+    cacheShownDescription();
     cacheSearchTerms();
     cachePinCount();
-    cacheShownDescription();
     cacheChooserFields();
 }
 
@@ -1538,6 +1585,102 @@ void LIB_SYMBOL::CopyFields( std::vector<SCH_FIELD>& aList )
 
     for( SCH_FIELD* field : orderedFields )
         aList.emplace_back( *field );
+}
+
+
+void LIB_SYMBOL::SyncFieldsFromParent( const LIB_FIELD_SYNC_OPTIONS& aOptions )
+{
+    std::shared_ptr<LIB_SYMBOL> parent = m_parent.lock();
+
+    if( !parent )
+        return;
+
+    std::unique_ptr<LIB_SYMBOL> flattenedParent = parent->Flatten();
+
+    auto selected =
+            [&]( const wxString& aFieldName )
+            {
+                return aOptions.m_updateAllFields
+                       || aOptions.m_updateFields.count( aFieldName ) > 0;
+            };
+
+    std::vector<SCH_FIELD> fields;
+    std::vector<SCH_FIELD> result;
+    CopyFields( fields );
+
+    for( SCH_FIELD& field : fields )
+    {
+        bool       copy = true;
+        SCH_FIELD* parentField = nullptr;
+
+        if( selected( field.GetName() ) )
+        {
+            if( field.IsMandatory() )
+                parentField = flattenedParent->GetField( field.GetId() );
+            else
+                parentField = flattenedParent->GetField( field.GetName() );
+
+            if( parentField )
+            {
+                bool resetText = parentField->GetText().IsEmpty() ? aOptions.m_resetEmptyText
+                                                                  : aOptions.m_resetText;
+
+                if( resetText )
+                    field.SetText( parentField->GetText() );
+
+                if( aOptions.m_resetVisibility )
+                {
+                    field.SetVisible( parentField->IsVisible() );
+                    field.SetNameShown( parentField->IsNameShown() );
+                }
+
+                if( aOptions.m_resetEffects )
+                {
+                    // SetAttributes() also overwrites the visible bit and position, so save
+                    // and restore them here.
+                    bool     visible = field.IsVisible();
+                    VECTOR2I pos = field.GetPosition();
+
+                    field.SetAttributes( *parentField );
+
+                    field.SetVisible( visible );
+                    field.SetPosition( pos );
+                }
+
+                if( aOptions.m_resetPositions )
+                    field.SetTextPos( parentField->GetTextPos() );
+            }
+            else if( aOptions.m_removeExtraFields )
+            {
+                copy = false;
+            }
+        }
+
+        if( copy )
+            result.emplace_back( std::move( field ) );
+    }
+
+    std::vector<SCH_FIELD*> parentFields;
+
+    flattenedParent->GetFields( parentFields );
+
+    for( SCH_FIELD* parentField : parentFields )
+    {
+        if( !selected( parentField->GetName() ) )
+            continue;
+
+        if( !GetField( parentField->GetName() ) )
+        {
+            result.emplace_back( this, FIELD_T::USER );
+            SCH_FIELD* newField = &result.back();
+
+            newField->SetName( parentField->GetCanonicalName() );
+            newField->SetText( parentField->GetText() );
+            newField->SetAttributes( *parentField );   // Includes visible bit and position
+        }
+    }
+
+    SetFields( result );
 }
 
 
@@ -1910,56 +2053,94 @@ int LIB_SYMBOL::GetUnitCount() const
 }
 
 
+int LIB_SYMBOL::GetBodyStyleCount() const
+{
+    if( HasDeMorganBodyStyles() )
+        return 2;
+
+    return std::max( 1, (int) GetBodyStyleNames().size() );
+}
+
+
+bool LIB_SYMBOL::HasDeMorganBodyStyles() const
+{
+    if( IsDerived() )
+    {
+        std::shared_ptr<LIB_SYMBOL> root = GetSafeRootSymbol( this, __FUNCTION__ );
+
+        if( root.get() != this )
+            return root->m_demorgan;
+    }
+
+    return m_demorgan;
+}
+
+
+const std::vector<wxString>& LIB_SYMBOL::GetBodyStyleNames() const
+{
+    if( IsDerived() )
+    {
+        std::shared_ptr<LIB_SYMBOL> root = GetSafeRootSymbol( this, __FUNCTION__ );
+
+        if( root.get() != this )
+            return root->m_bodyStyleNames;
+    }
+
+    return m_bodyStyleNames;
+}
+
+
 void LIB_SYMBOL::SetBodyStyleCount( int aCount, bool aDuplicateDrawItems, bool aDuplicatePins )
 {
+    wxCHECK_RET( aCount >= 1,
+                 wxString::Format( wxT( "Invalid body style count %d, ignoring." ), aCount ) );
+
     int prevCount = GetBodyStyleCount();
 
-    if( prevCount == aCount )
-        return;
-
-    // Duplicate items to create the converted shape
-    if( prevCount < aCount )
+    // Populate the new body styles from the standard one
+    if( prevCount < aCount && ( aDuplicateDrawItems || aDuplicatePins ) )
     {
-        if( aDuplicateDrawItems || aDuplicatePins )
+        std::vector<SCH_ITEM*> tmp; // Adding to m_drawings while iterating it invalidates the iterator
+
+        for( SCH_ITEM& item : m_drawings )
         {
-            std::vector<SCH_ITEM*> tmp; // Temporarily store the duplicated pins here.
+            if( item.Type() != SCH_PIN_T && !aDuplicateDrawItems )
+                continue;
 
-            for( SCH_ITEM& item : m_drawings )
+            if( item.m_bodyStyle == BODY_STYLE::BASE )
             {
-                if( item.Type() != SCH_PIN_T && !aDuplicateDrawItems )
-                    continue;
-
-                if( item.m_bodyStyle == 1 )
+                for( int j = prevCount + 1; j <= aCount; j++ )
                 {
-                    for( int j = prevCount + 1; j <= aCount; j++ )
-                    {
-                        SCH_ITEM* newItem = item.Duplicate( IGNORE_PARENT_GROUP );
-                        newItem->m_bodyStyle = j;
-                        tmp.push_back( newItem );
-                    }
+                    SCH_ITEM* newItem = item.Duplicate( IGNORE_PARENT_GROUP );
+                    newItem->m_bodyStyle = j;
+                    tmp.push_back( newItem );
                 }
             }
-
-            // Transfer the new pins to the LIB_SYMBOL.
-            for( SCH_ITEM* item : tmp )
-                m_drawings.push_back( item );
         }
+
+        for( SCH_ITEM* item : tmp )
+            m_drawings.push_back( item );
+
+        m_drawings.sort();
     }
-    else
+
+    // A caller that already cleared the De Morgan flag or the body style names reports a
+    // previous count of 1, so the deletion cannot be conditional on the count dropping
+    PruneBodyStyleDrawItems( aCount );
+}
+
+
+void LIB_SYMBOL::PruneBodyStyleDrawItems( int aBodyStyleCount )
+{
+    LIB_ITEMS_CONTAINER::ITERATOR i = m_drawings.begin();
+
+    while( i != m_drawings.end() )
     {
-        // Delete converted shape items because the converted shape does not exist
-        LIB_ITEMS_CONTAINER::ITERATOR i = m_drawings.begin();
-
-        while( i != m_drawings.end() )
-        {
-            if( i->m_bodyStyle > aCount )
-                i = m_drawings.erase( i );
-            else
-                ++i;
-        }
+        if( i->m_bodyStyle > aBodyStyleCount )
+            i = m_drawings.erase( i );
+        else
+            ++i;
     }
-
-    m_drawings.sort();
 }
 
 
@@ -2190,8 +2371,15 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
 
             if( tmp == 0 )
             {
+                int fieldCompareFlags = aCompareFlags;
+
+                // SCH_FIELD::compare() injects SKIP_TST_POS for ERC, but it is bypassed
+                // by the base-class call below, so mirror it here (issue 24657).
+                if( aCompareFlags & SCH_ITEM::COMPARE_FLAGS::ERC )
+                    fieldCompareFlags |= SCH_ITEM::COMPARE_FLAGS::SKIP_TST_POS;
+
                 // Fall back to base class comparison for other properties
-                tmp = aField->SCH_ITEM::compare( *bField, aCompareFlags );
+                tmp = aField->SCH_ITEM::compare( *bField, fieldCompareFlags );
             }
 
             if( tmp != 0 )
@@ -2516,6 +2704,13 @@ void LIB_SYMBOL::EmbedFonts()
     for( KIFONT::OUTLINE_FONT* font : fonts )
     {
         auto file = GetEmbeddedFiles()->AddFile( font->GetFileName(), false );
+
+        if( !file )
+        {
+            wxLogTrace( "EMBED", "Failed to add font file: %s", font->GetFileName() );
+            continue;
+        }
+
         file->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::FONT;
     }
 }

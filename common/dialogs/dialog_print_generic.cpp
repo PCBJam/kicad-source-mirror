@@ -23,6 +23,7 @@
 #include <printout.h>
 #include <pgm_base.h>
 #include <confirm.h>
+#include <printing.h>
 
 #include <wx/print.h>
 #include <wx/printdlg.h>
@@ -97,9 +98,11 @@ DIALOG_PRINT_GENERIC::DIALOG_PRINT_GENERIC( EDA_DRAW_FRAME* aParent, PRINTOUT_SE
                             { wxID_APPLY,  _( "Print Preview" ) },
                             { wxID_CANCEL, _( "Close" )         } } );
 
-#if defined(__WXMAC__) or defined(__WXGTK__)
-    // Preview does not work well on GTK or Mac,
-    // but these platforms provide native print preview
+#if defined(__WXMAC__) or defined(__WXGTK__) or defined(__EMSCRIPTEN__)
+    // Preview does not work well on GTK, Mac, or in the browser (WASM):
+    // the in-app wxPrintPreview frame can't be shown over the modal print
+    // dialog. These platforms provide their own print preview instead (in
+    // the browser, the browser's native print dialog / PDF viewer).
     m_sdbSizer1Apply->Hide();
 #endif
 
@@ -309,6 +312,7 @@ void DIALOG_PRINT_GENERIC::onPrintButtonClick( wxCommandEvent& event )
         else
         {
             *s_printData = printer.GetPrintDialogData().GetPrintData();
+            KIPLATFORM::PRINTING::ResetPrintToFilePath( *s_printData );
         }
     }
 

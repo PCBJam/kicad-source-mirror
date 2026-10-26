@@ -208,6 +208,11 @@ void PCB_REFERENCE_IMAGE::Serialize( google::protobuf::Any& aContainer ) const
         }
     }
 
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        refImage.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+    else if( const BOARD* board = GetBoard() )
+        refImage.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
     aContainer.PackFrom( refImage );
 }
 
@@ -221,7 +226,7 @@ bool PCB_REFERENCE_IMAGE::Deserialize( const google::protobuf::Any& aContainer )
     if( !aContainer.UnpackTo( &refImage ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( refImage.id().value() );
+    SetUuidDirect( KIID( refImage.id().value() ) );
     SetLayer( FromProtoEnum<PCB_LAYER_ID, BoardLayer>( refImage.layer() ) );
     SetPosition( kiapi::common::UnpackVector2( refImage.position() ) );
     m_referenceImage.SetTransformOriginOffset( kiapi::common::UnpackVector2( refImage.transform_origin_offset() ) );
@@ -257,6 +262,13 @@ void PCB_REFERENCE_IMAGE::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDir
 void PCB_REFERENCE_IMAGE::Rotate( const VECTOR2I& aCenter, const EDA_ANGLE& aAngle )
 {
     m_referenceImage.Rotate( aCenter, aAngle );
+}
+
+
+void PCB_REFERENCE_IMAGE::Mirror( const VECTOR2I& aMirrorRef, FLIP_DIRECTION aFlipDirection )
+{
+    // Mirror the content about the axis through aMirrorRef without changing layers.
+    m_referenceImage.Flip( aMirrorRef, aFlipDirection );
 }
 
 

@@ -38,13 +38,15 @@
 #include <wx/event.h>
 
 #include <list>
+#include <cstdint>
 #include <memory>
 #include <map>
 
 class SCH_EDIT_FRAME;
 class SCH_SYMBOL;
 class SIMULATOR_FRAME_UI;
-class SIM_THREAD_REPORTER;
+class SIM_CONSOLE_REPORTER;
+class SIM_FRAME_STATE_LISTENER;
 class ACTION_TOOLBAR;
 class SPICE_SIMULATOR;
 
@@ -192,6 +194,8 @@ public:
 
     bool SimFinished() const { return m_simFinished; }
 
+    wxString TakeSimReportMessages();
+
     // Simulator doesn't host a canvas
     wxWindow* GetToolCanvas() const override { return nullptr; }
 
@@ -212,13 +216,16 @@ private:
 
     void showNetlistErrors( const WX_STRING_REPORTER& aReporter );
 
+    /// Free a tab's previous ngspice plot (and its noise companion) so reruns don't leak.
+    void destroyTabPlot( SIM_TAB* aSimTab );
+
     bool canCloseWindow( wxCloseEvent& aEvent ) override;
     void doCloseWindow() override;
 
     void onUpdateSim( wxCommandEvent& aEvent );
-    void onSimReport( wxCommandEvent& aEvent );
     void onSimStarted( wxCommandEvent& aEvent );
     void onSimFinished( wxCommandEvent& aEvent );
+    void runSimulator();
 
     void onExit( wxCommandEvent& event );
 
@@ -228,16 +235,18 @@ private:
     SIMULATOR_FRAME_UI*                  m_ui;
 
     std::shared_ptr<SPICE_SIMULATOR>     m_simulator;
-    SIM_THREAD_REPORTER*                 m_reporter;
+    SIM_CONSOLE_REPORTER*                m_consoleReporter;
+    SIM_FRAME_STATE_LISTENER*            m_stateListener;
     std::shared_ptr<SPICE_CIRCUIT_MODEL> m_circuitModel;
 
+    uint32_t                             m_simRunGeneration;
+    uint32_t                             m_lastAppliedSimRunGeneration;
     bool                                 m_simFinished;
     bool                                 m_workbookModified;
 };
 
 // Commands
 wxDECLARE_EVENT( EVT_SIM_UPDATE, wxCommandEvent );
-wxDECLARE_EVENT( EVT_SIM_REPORT, wxCommandEvent );
 
 // Notifications
 wxDECLARE_EVENT( EVT_SIM_STARTED, wxCommandEvent );

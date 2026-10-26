@@ -107,6 +107,17 @@ DIALOG_ZONE_MANAGER::DIALOG_ZONE_MANAGER( PCB_BASE_FRAME* aParent ) :
 
     if( m_modelZonesOverview->GetCount() )
         SelectZoneTableItem( m_modelZonesOverview->GetItem( 0 ) );
+    else
+        m_panelZoneProperties->SetZone( nullptr );
+
+    // Control values set before the dialog is shown may not render, so re-apply them once
+    // it is on screen (issue 24797).
+    CallAfter(
+            [this]()
+            {
+                if( m_panelZoneProperties->GetZone() )
+                    m_panelZoneProperties->TransferZoneSettingsToWindow();
+            } );
 
     Layout();
     m_MainBoxSizer->Fit( this );

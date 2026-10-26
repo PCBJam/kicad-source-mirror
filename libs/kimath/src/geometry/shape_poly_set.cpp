@@ -127,6 +127,9 @@ SHAPE_POLY_SET::SHAPE_POLY_SET( const SHAPE_POLY_SET& aOther ) :
         m_hashValid = false;
         m_triangulationValid = false;
     }
+
+    m_failedHash = aOther.m_failedHash;
+    m_failedHashValid.store( aOther.m_failedHashValid.load() );
 }
 
 
@@ -1925,7 +1928,15 @@ void SHAPE_POLY_SET::splitCollinearOutlines()
             SHAPE_LINE_CHAIN& outline = m_polys[polyIdx][0];
             intptr_t count = outline.PointCount();
 
-            RTree<intptr_t, intptr_t, 2, intptr_t> rtree;
+            // ELEMTYPEREAL must be a wide floating-point type: RectSphericalVolume's
+            // sumOfSquares grows quadratically with extents, easily exceeding 2^31 for
+            // KiCad nanometer coordinates (~10^8 per axis -> ~10^14 area). All other
+            // RTree instantiations in KiCad use `double` for that fourth argument; this
+            // one was using `intptr_t`, which silently overflowed on wasm32 (where
+            // intptr_t is 32-bit) and tripped an assertion deep in PickSeeds during
+            // PCB load. Full diagnosis trail (asyncify-era doc dir):
+            // features/fix-asyncify-O2-and-modal-promise-rejection/rtree-debug-findings.md.
+            RTree<intptr_t, intptr_t, 2, double> rtree;
 
             for( intptr_t i = 0; i < count; ++i )
             {
@@ -2040,6 +2051,60 @@ void SHAPE_POLY_SET::splitSelfTouchingOutlines()
             if( count < 4 )
                 break;
 
+            // Prefix trapezoid terms (SHAPE_LINE_CHAIN::Area()) to sign a candidate's halves
+            // in O(1).  Built on demand; most outlines never produce a candidate.
+            std::vector<double> prefix;
+
+            auto ringTerm =
+                    [&]( int aFrom, int aTo ) -> double
+                    {
+                        if( prefix.empty() )
+                        {
+                            prefix.resize( count + 1, 0.0 );
+
+                            for( int ii = 0; ii < count; ++ii )
+                            {
+                                const VECTOR2I& a = outline.CPoint( ii );
+                                const VECTOR2I& b = outline.CPoint( ( ii + 1 ) % count );
+
+                                prefix[ii + 1] = prefix[ii]
+                                                 + ( (double) a.x + b.x ) * ( (double) a.y - b.y );
+                            }
+                        }
+
+                        double term = aFrom <= aTo ? prefix[aTo] - prefix[aFrom]
+                                                   : prefix[count] - prefix[aFrom] + prefix[aTo];
+
+                        const VECTOR2I& last = outline.CPoint( aTo );
+                        const VECTOR2I& first = outline.CPoint( aFrom );
+
+                        return term + ( (double) last.x + first.x ) * ( (double) last.y - first.y );
+                    };
+
+            auto ringSize =
+                    [&]( int aFrom, int aTo )
+                    {
+                        return aFrom <= aTo ? aTo - aFrom + 1 : count - aFrom + aTo + 1;
+                    };
+
+            // Both halves of a real self-touch keep the parent winding.  An inverted half is a
+            // Fracture() corridor; splitting there returns the hole ring as an outline.
+            auto splittable =
+                    [&]( int aVertIdx, int aSegIdx )
+                    {
+                        const int start = ( aSegIdx + 1 ) % count;
+
+                        if( ringSize( start, aVertIdx ) < 3 || ringSize( aVertIdx, aSegIdx ) < 3 )
+                            return false;
+
+                        const bool   sign = ringTerm( 0, count - 1 ) > 0;
+                        const double term1 = ringTerm( start, aVertIdx );
+                        const double term2 = ringTerm( aVertIdx, aSegIdx );
+
+                        return term1 != 0.0 && term2 != 0.0 && ( term1 > 0 ) == sign
+                               && ( term2 > 0 ) == sign;
+                    };
+
             int insertSegIdx = -1;
             int insertVertIdx = -1;
 
@@ -2066,7 +2131,8 @@ void SHAPE_POLY_SET::splitSelfTouchingOutlines()
                         // segment.  Clipper2 rounds corridor-cut vertices to integer
                         // coordinates; they can land within 1nm of an endpoint but are
                         // not true pinch points.
-                        if( pt != a && pt != b && SEG( a, b ).SquaredDistance( pt ) == 0 )
+                        if( pt != a && pt != b && SEG( a, b ).SquaredDistance( pt ) == 0
+                            && splittable( vertIdx, segIdx ) )
                         {
                             insertSegIdx = segIdx;
                             insertVertIdx = vertIdx;
@@ -2108,7 +2174,8 @@ void SHAPE_POLY_SET::splitSelfTouchingOutlines()
                             // segment.  Clipper2 rounds corridor-cut vertices to integer
                             // coordinates; they can land within 1nm of an endpoint but
                             // are not true pinch points.
-                            if( pt != a && pt != b && SEG( a, b ).SquaredDistance( pt ) == 0 )
+                            if( pt != a && pt != b && SEG( a, b ).SquaredDistance( pt ) == 0
+                                && splittable( vertIdx, static_cast<int>( segIdx ) ) )
                             {
                                 insertSegIdx = segIdx;
                                 insertVertIdx = vertIdx;
@@ -2128,22 +2195,8 @@ void SHAPE_POLY_SET::splitSelfTouchingOutlines()
             // Polygon 2: vertices from insertVertIdx to insertSegIdx
 
             const int splitStart1 = ( insertSegIdx + 1 ) % count;
-
-            // Calculate sizes for each polygon
-            int size1, size2;
-
-            if( insertVertIdx >= splitStart1 )
-                size1 = insertVertIdx - splitStart1 + 1;
-            else
-                size1 = count - splitStart1 + insertVertIdx + 1;
-
-            if( insertSegIdx >= insertVertIdx )
-                size2 = insertSegIdx - insertVertIdx + 1;
-            else
-                size2 = count - insertVertIdx + insertSegIdx + 1;
-
-            if( size1 < 3 || size2 < 3 )
-                break;
+            const int size1 = ringSize( splitStart1, insertVertIdx );
+            const int size2 = ringSize( insertVertIdx, insertSegIdx );
 
             SHAPE_LINE_CHAIN poly1;
             SHAPE_LINE_CHAIN poly2;
@@ -3058,7 +3111,7 @@ SHAPE_POLY_SET &SHAPE_POLY_SET::operator=( const SHAPE_POLY_SET& aOther )
         }
 
         m_hash = aOther.m_hash;
-        m_hashValid = aOther.m_hashValid;
+        m_hashValid.store( aOther.m_hashValid.load() );
         m_triangulationValid = aOther.m_triangulationValid.load();
     }
     else
@@ -3067,6 +3120,9 @@ SHAPE_POLY_SET &SHAPE_POLY_SET::operator=( const SHAPE_POLY_SET& aOther )
         m_hashValid = false;
         m_triangulationValid = false;
     }
+
+    m_failedHash = aOther.m_failedHash;
+    m_failedHashValid.store( aOther.m_failedHashValid.load() );
 
     return *this;
 }
@@ -3167,17 +3223,22 @@ static SHAPE_POLY_SET partitionPolyIntoRegularCellGrid( const SHAPE_POLY_SET& aP
 void SHAPE_POLY_SET::cacheTriangulation( bool aPartition, bool aSimplify,
                                          std::vector<std::unique_ptr<TRIANGULATED_POLYGON>>* aHintData )
 {
+    // if( m_triangulationValid && m_hashValid && m_hash == checksum() )
+    //     return;
+    // if( m_failedHashValid && m_failedHash == checksum() )
+    //     return;
+
     std::unique_lock<std::mutex> lock( m_triangulationMutex );
 
-    if( m_triangulationValid && m_hashValid )
-    {
-        if( m_hash == checksum() )
-            return;
-    }
+    if( m_triangulationValid && m_hashValid && m_hash == checksum() )
+        return;
+    if( m_failedHashValid && m_failedHash == checksum() )
+        return;
 
     // Invalidate, in case anything goes wrong below
     m_triangulationValid = false;
     m_hashValid = false;
+    m_failedHashValid = false;
 
     auto triangulate =
             []( SHAPE_POLY_SET& polySet, int forOutline,
@@ -3266,9 +3327,6 @@ void SHAPE_POLY_SET::cacheTriangulation( bool aPartition, bool aSimplify,
             }
             else
             {
-                m_hash = checksum();
-                m_hashValid = true;
-                // Set valid flag only after everything has been updated
                 m_triangulationValid = true;
             }
         }
@@ -3287,11 +3345,19 @@ void SHAPE_POLY_SET::cacheTriangulation( bool aPartition, bool aSimplify,
         }
         else
         {
-            m_hash = checksum();
-            m_hashValid = true;
-            // Set valid flag only after everything has been updated
             m_triangulationValid = true;
         }
+    }
+
+    if( m_triangulationValid )
+    {
+        m_hash = checksum();
+        m_hashValid = true;
+    }
+    else
+    {
+        m_failedHash = checksum();
+        m_failedHashValid = true;
     }
 }
 

@@ -45,6 +45,7 @@
 class PCB_BASE_FRAME;
 class BOARD_ITEM;
 class GENERAL_COLLECTOR;
+class PAD;
 class PCB_TABLE;
 class PCB_TABLECELL;
 
@@ -163,6 +164,25 @@ public:
     bool Selectable( const BOARD_ITEM* aItem, bool checkVisibilityOnly = false ) const;
 
     /**
+     * Return the layers of @a aVisibleLayers which are actually shown.
+     *
+     * BOARD::GetVisibleLayers() keeps its bits for layers the board does not enable, so a layer
+     * the Appearance panel never offered still reads back as visible.  Masking with the enabled
+     * layers gives the same answer BOARD::IsLayerVisible() gives for a single layer.
+     *
+     * @param aVisibleLayers is the raw visible layer set.
+     * @param aEnabledLayers is the set of layers enabled on the board.
+     */
+    static LSET resolveVisibleLayers( const LSET& aVisibleLayers, const LSET& aEnabledLayers );
+
+    /**
+     * @return true if @a aPad is drawn on at least one shown layer.
+     *
+     * @param aVisibleLayers is the shown layer set, as returned by resolveVisibleLayers().
+     */
+    static bool isPadVisible( const PAD& aPad, const LSET& aVisibleLayers );
+
+    /**
      * Select all items with the given net code.
      *
      * @param aNetCode is the target net to select
@@ -220,17 +240,52 @@ public:
 
     PCB_LAYER_ID GetActiveLayer() { return m_frame->GetActiveLayer(); }
 
+    enum STOP_CONDITION
+    {
+        /**
+         * Stop at any place where more than two traces meet.
+         *
+         * Because vias are also traces, this makes selection stop at a via if there is a trace
+         * on another layer as well, but a via with only one connection will be selected.
+         */
+        STOP_AT_JUNCTION,
+        /** Stop when reaching a segment (next track/arc/via). */
+        STOP_AT_SEGMENT,
+        /** Stop when reaching a pad. */
+        STOP_AT_PAD,
+        /** Select the entire net. */
+        STOP_NEVER
+    };
+
+    /**
+     * Select connected tracks and vias.
+     *
+     * @param aStopCondition Indicates where to stop selecting more items.
+     */
+    void selectAllConnectedTracks( const std::vector<BOARD_CONNECTED_ITEM*>& aStartItems,
+                                   STOP_CONDITION                            aStopCondition );
+
     /**
      * In the PCB editor strip out any locked items unless the OverrideLocks checkbox is set.
      */
     void FilterCollectorForLockedItems( GENERAL_COLLECTOR& aCollector );
 
     /**
-     * If the most recent FilterCollectorForLockedItems call removed at least one item,
-     * show an InfoBar warning prompting the user to enable Override Locks.  No-op
-     * otherwise.
+     * @return true if a locked descendant should pin aItem in place.  Locked items inside a
+     * footprint move rigidly with it, so only descendants outside a parent footprint count
+     * (group members, see issue 6841).
      */
-    void ReportFilteredLockedItems();
+    static bool HasLockedDescendant( const BOARD_ITEM* aItem );
+
+    /// True if aItem may be selected while aEnteredGroup is entered (24967).
+    static bool isWithinEnteredGroup( BOARD_ITEM* aItem, PCB_GROUP* aEnteredGroup, bool aIsFootprintEditor );
+
+    /**
+     * If the most recent FilterCollectorForLockedItems call filtered a locked item, show an
+     * InfoBar warning prompting the user to enable Override locks and return true.  The caller
+     * should stop the action in that case.  Return false otherwise.
+     */
+    bool ReportFilteredLockedItems();
 
     /**
      * In general we don't want to select both a parent and any of it's children.  This includes
@@ -415,31 +470,6 @@ private:
      */
     int grabUnconnected( const TOOL_EVENT& aEvent );
 
-    enum STOP_CONDITION
-    {
-        /**
-         * Stop at any place where more than two traces meet.
-         *
-         * Because vias are also traces, this makes selection stop at a via if there is a trace
-         * on another layer as well, but a via with only one connection will be selected.
-         */
-        STOP_AT_JUNCTION,
-        /** Stop when reaching a segment (next track/arc/via). */
-        STOP_AT_SEGMENT,
-        /** Stop when reaching a pad. */
-        STOP_AT_PAD,
-        /** Select the entire net. */
-        STOP_NEVER
-    };
-
-    /**
-     * Select connected tracks and vias.
-     *
-     * @param aStopCondition Indicates where to stop selecting more items.
-     */
-    void selectAllConnectedTracks( const std::vector<BOARD_CONNECTED_ITEM*>& aStartItems,
-                                   STOP_CONDITION aStopCondition );
-
     /**
      * Select all non-closed shapes that are graphically connected to the given start items.
      *
@@ -539,6 +569,9 @@ private:
 
     PCB_SELECTION            m_selection;            // Current state of selection
 
+    PCB_SELECTION m_blockedSelection; // Empty selection returned when locked items
+                                      // block an action, real selection stays intact
+
     PCB_SELECTION_FILTER_OPTIONS m_filter;
 
     KICURSOR                 m_nonModifiedCursor;    // Cursor in the absence of shift/ctrl/alt
@@ -550,6 +583,10 @@ private:
     SELECTION_MODE           m_selectionMode;        // Current selection mode
 
     bool                     m_lockedItemsFiltered;
+
+    // pcbjam: peer holding the last remotely-soft-locked item filtered out
+    // (collab-presence 0007); empty = none. Feeds ReportFilteredLockedItems.
+    wxString                 m_remoteLockHolder;
 
     // Anchor cell for shift+click range selection in a PCB_TABLE
     PCB_TABLECELL*           m_previousFirstCell;

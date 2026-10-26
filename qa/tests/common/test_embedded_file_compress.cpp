@@ -216,4 +216,166 @@ BOOST_AUTO_TEST_CASE( ComputeFileHash_NonExistentFile )
 }
 
 
+// Regression test for GitLab issue #24345.  Copying an EMBEDDED_FILES collection must not
+// duplicate the underlying file payloads; multiple copies should share ownership through
+// shared_ptr so that cloning a footprint with embedded 3D models for an undo snapshot does
+// not multiply memory usage by the number of clones.
+BOOST_AUTO_TEST_CASE( CopySharesEmbeddedFilePayloads )
+{
+    EMBEDDED_FILES original;
+
+    auto* file = new EMBEDDED_FILES::EMBEDDED_FILE();
+    file->name = wxS( "shared_model.step" );
+    file->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::MODEL;
+
+    std::string payload( 1024 * 1024, 'x' );
+    file->decompressedData.assign( payload.begin(), payload.end() );
+
+    MMH3_HASH hash( EMBEDDED_FILES::Seed() );
+    hash.add( file->decompressedData );
+    file->data_hash = hash.digest().ToString();
+
+    BOOST_REQUIRE_EQUAL( EMBEDDED_FILES::CompressAndEncode( *file ),
+                         EMBEDDED_FILES::RETURN_CODE::OK );
+
+    original.AddFile( file );
+
+    EMBEDDED_FILES::EMBEDDED_FILE* originalFile = original.GetEmbeddedFile( wxS( "shared_model.step" ) );
+    BOOST_REQUIRE( originalFile );
+
+    // Copy via copy constructor; sharing means both pointers reference the same payload.
+    EMBEDDED_FILES copy1( original );
+    EMBEDDED_FILES::EMBEDDED_FILE* copy1File = copy1.GetEmbeddedFile( wxS( "shared_model.step" ) );
+    BOOST_REQUIRE( copy1File );
+    BOOST_CHECK_EQUAL( copy1File, originalFile );
+
+    // Copy via assignment operator deep-copies (assignment targets a live object that may
+    // later mutate file fields through raw pointers; aliasing would silently bleed mutations
+    // back into the source).
+    EMBEDDED_FILES copy2;
+    copy2 = original;
+    EMBEDDED_FILES::EMBEDDED_FILE* copy2File = copy2.GetEmbeddedFile( wxS( "shared_model.step" ) );
+    BOOST_REQUIRE( copy2File );
+    BOOST_CHECK_NE( copy2File, originalFile );
+    BOOST_CHECK_EQUAL( copy2File->data_hash, originalFile->data_hash );
+
+    // Destroying the original must keep the payload alive via the surviving copies.
+    {
+        EMBEDDED_FILES transient( original );
+        transient.ClearEmbeddedFiles();
+        BOOST_CHECK( !transient.HasFile( wxS( "shared_model.step" ) ) );
+    }
+
+    BOOST_CHECK( original.HasFile( wxS( "shared_model.step" ) ) );
+    BOOST_CHECK( copy1.HasFile( wxS( "shared_model.step" ) ) );
+    BOOST_CHECK( copy2.HasFile( wxS( "shared_model.step" ) ) );
+
+    // Validate the payload via one of the shared copies (round-trip).
+    BOOST_CHECK_EQUAL( EMBEDDED_FILES::DecompressAndDecode( *copy1File ),
+                       EMBEDDED_FILES::RETURN_CODE::OK );
+    BOOST_CHECK_EQUAL( std::string( copy1File->decompressedData.begin(),
+                                    copy1File->decompressedData.end() ),
+                       payload );
+}
+
+
+// Explicit deep-copy form must allocate independent EMBEDDED_FILE objects.
+BOOST_AUTO_TEST_CASE( DeepCopyAllocatesIndependentPayloads )
+{
+    EMBEDDED_FILES original;
+
+    auto* file = new EMBEDDED_FILES::EMBEDDED_FILE();
+    file->name = wxS( "deep_copy.bin" );
+    file->decompressedData.assign( { '1', '2', '3' } );
+
+    MMH3_HASH hash( EMBEDDED_FILES::Seed() );
+    hash.add( file->decompressedData );
+    file->data_hash = hash.digest().ToString();
+
+    BOOST_REQUIRE_EQUAL( EMBEDDED_FILES::CompressAndEncode( *file ),
+                         EMBEDDED_FILES::RETURN_CODE::OK );
+
+    original.AddFile( file );
+
+    EMBEDDED_FILES deep( original, /*aDeepCopy=*/true );
+    EMBEDDED_FILES::EMBEDDED_FILE* deepFile = deep.GetEmbeddedFile( wxS( "deep_copy.bin" ) );
+
+    BOOST_REQUIRE( deepFile );
+    BOOST_CHECK_NE( deepFile, file );
+    BOOST_CHECK_EQUAL( deepFile->data_hash, file->data_hash );
+}
+
+
+// A paged setup dialog commits its working copy on both page change and OK, so the commit must
+// leave the source intact.  A destructive commit wiped the board/schematic on the second pass and
+// silently dropped the embedded drawing sheet (issue 24998).
+BOOST_AUTO_TEST_CASE( AssignSharedFromIsIdempotent )
+{
+    EMBEDDED_FILES working;
+
+    auto* file = new EMBEDDED_FILES::EMBEDDED_FILE();
+    file->name = wxS( "ARTIDIS-KiCAD_HEADER.kicad_wks" );
+    file->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::WORKSHEET;
+    file->decompressedData.assign( { '1', '2', '3' } );
+
+    MMH3_HASH hash( EMBEDDED_FILES::Seed() );
+    hash.add( file->decompressedData );
+    file->data_hash = hash.digest().ToString();
+
+    BOOST_REQUIRE_EQUAL( EMBEDDED_FILES::CompressAndEncode( *file ),
+                         EMBEDDED_FILES::RETURN_CODE::OK );
+
+    working.AddFile( file );
+
+    EMBEDDED_FILES target;
+
+    target.AssignSharedFrom( working );
+    target.AssignSharedFrom( working );
+
+    // IsEmpty() gates whether the embedded_files block is written on save.
+    BOOST_CHECK( !target.IsEmpty() );
+    BOOST_CHECK( target.HasFile( wxS( "ARTIDIS-KiCAD_HEADER.kicad_wks" ) ) );
+    BOOST_CHECK( working.HasFile( wxS( "ARTIDIS-KiCAD_HEADER.kicad_wks" ) ) );
+
+    // Self-assignment must not empty the collection.
+    working.AssignSharedFrom( working );
+    BOOST_CHECK( working.HasFile( wxS( "ARTIDIS-KiCAD_HEADER.kicad_wks" ) ) );
+
+    std::set<wxString> exclude{ wxS( "ARTIDIS-KiCAD_HEADER.kicad_wks" ) };
+    working.AssignSharedFrom( working, exclude );
+    BOOST_CHECK( !working.HasFile( wxS( "ARTIDIS-KiCAD_HEADER.kicad_wks" ) ) );
+}
+
+
+// AddFile() destroys a name-duplicate, so it must hand back the entry the collection holds;
+// callers that kept using their own pointer were reading freed memory (issue 25362)
+BOOST_AUTO_TEST_CASE( AddFileReturnsTheStoredEntry )
+{
+    EMBEDDED_FILES files;
+
+    auto* first = new EMBEDDED_FILES::EMBEDDED_FILE();
+    first->name = wxS( "duplicate.step" );
+    first->decompressedData.assign( { 'k', 'e', 'p', 't' } );
+
+    BOOST_REQUIRE_EQUAL( files.AddFile( first ), first );
+
+    auto* duplicate = new EMBEDDED_FILES::EMBEDDED_FILE();
+    duplicate->name = wxS( "duplicate.step" );
+    duplicate->decompressedData.assign( { 'd', 'r', 'o', 'p', 'p', 'e', 'd' } );
+
+    EMBEDDED_FILES::EMBEDDED_FILE* stored = files.AddFile( duplicate );
+
+    BOOST_REQUIRE_EQUAL( stored, first );
+    BOOST_CHECK_EQUAL( files.EmbeddedFileMap().size(), 1 );
+
+    // The returned pointer must stay usable; the caller's own is already gone
+    BOOST_REQUIRE_EQUAL( EMBEDDED_FILES::CompressAndEncode( *stored ),
+                         EMBEDDED_FILES::RETURN_CODE::OK );
+    BOOST_CHECK( stored->Validate() );
+    BOOST_CHECK_EQUAL( std::string( stored->decompressedData.begin(),
+                                    stored->decompressedData.end() ),
+                       std::string( "kept" ) );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

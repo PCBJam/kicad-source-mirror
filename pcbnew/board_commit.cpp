@@ -47,6 +47,7 @@
 #include <pcb_board_outline.h>
 
 #include <functional>
+#include <unordered_set>
 #include <project/project_file.h>
 using namespace std::placeholders;
 
@@ -198,12 +199,16 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
     bool                itemsDeselected = false;
     bool                selectedModified = false;
 
+    std::unordered_set<EDA_ITEM*> removedItems;
+
     // Dirty flags and lists
     bool                     solderMaskDirty = false;
     bool                     autofillZones = false;
     bool                     updateBoardBoundingBox = false;
     std::vector<BOARD_ITEM*> staleTeardropPadsAndVias;
     std::set<PCB_TRACK*>     staleTeardropTracks;
+    std::vector<BOARD_ITEM*> dirtyCopper;
+    std::set<BOARD_ITEM*>    dirtyCopperSeen;
     std::vector<ZONE*>       staleZonesStorage;
     std::vector<ZONE*>*      staleZones = nullptr;
     std::vector<BOX2I>       staleRuleAreas;
@@ -247,13 +252,53 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 solderMaskDirty = true;
             }
 
-            if( boardItem->GetLayer() == Edge_Cuts )
+            BOARD_ITEM* preEditItem = nullptr;
+
+            if( entry.m_copy && entry.m_copy->IsBOARD_ITEM() )
+                preEditItem = static_cast<BOARD_ITEM*>( entry.m_copy );
+
+            if( boardItem->GetLayer() == Edge_Cuts || ( preEditItem && preEditItem->GetLayer() == Edge_Cuts ) )
             {
                 updateBoardBoundingBox = true;
             }
 
             if( !( aCommitFlags & SKIP_TEARDROPS ) )
             {
+                // Teardrops are fitted to the copper around them, so any changed copper item
+                // can invalidate one, not only what a teardrop connects to.
+                auto collectCopper =
+                        [&]( BOARD_ITEM* aItem )
+                        {
+                            // Pours are the filler's business.  Containers have no copper of
+                            // their own and their boxes sweep far more than they occupy.
+                            if( aItem->Type() == PCB_ZONE_T || aItem->Type() == PCB_FOOTPRINT_T
+                                || aItem->Type() == PCB_GROUP_T
+                                || aItem->Type() == PCB_GENERATOR_T )
+                            {
+                                return;
+                            }
+
+                            // A group and its members can both be in the commit.
+                            if( ( aItem->GetLayerSet() & LSET::AllCuMask() ).any()
+                                && dirtyCopperSeen.insert( aItem ).second )
+                            {
+                                dirtyCopper.push_back( aItem );
+                            }
+                        };
+
+                collectCopper( boardItem );
+                boardItem->RunOnChildren( collectCopper, RECURSE_MODE::RECURSE );
+
+                // boardItem already carries the edit, so it cannot show where the item was.
+                // The pre-edit clone is still ours here and answers a bounding box.
+                if( entry.m_copy && entry.m_copy->IsBOARD_ITEM() )
+                {
+                    BOARD_ITEM* copy = static_cast<BOARD_ITEM*>( entry.m_copy );
+
+                    collectCopper( copy );
+                    copy->RunOnChildren( collectCopper, RECURSE_MODE::RECURSE );
+                }
+
                 if( boardItem->Type() == PCB_FOOTPRINT_T )
                 {
                     for( PAD* pad : static_cast<FOOTPRINT*>( boardItem )->Pads() )
@@ -288,8 +333,12 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
     }
 
     // Old teardrops must be removed before connectivity is rebuilt
-    if( !staleTeardropPadsAndVias.empty() || !staleTeardropTracks.empty() )
-        teardropMgr.RemoveTeardrops( *this, &staleTeardropPadsAndVias, &staleTeardropTracks );
+    if( !staleTeardropPadsAndVias.empty() || !staleTeardropTracks.empty()
+        || !dirtyCopper.empty() )
+    {
+        teardropMgr.RemoveTeardrops( *this, &staleTeardropPadsAndVias, &staleTeardropTracks,
+                                     &dirtyCopper );
+    }
 
     auto updateComponentClasses =
             [this]( BOARD_ITEM* boardItem )
@@ -355,7 +404,8 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 
             if( !( aCommitFlags & SKIP_UNDO ) )
             {
-                ITEM_PICKER itemWrapper( nullptr, boardItem, UNDO_REDO::DELETED );
+                UNDO_REDO   status = boardItem->Type() == PCB_FIELD_T ? UNDO_REDO::CHANGED : UNDO_REDO::DELETED;
+                ITEM_PICKER itemWrapper( nullptr, boardItem, status );
                 itemWrapper.SetLink( entry.m_copy );
                 entry.m_copy = nullptr;   // We've transferred ownership to the undo list
                 undoList.PushItem( itemWrapper );
@@ -369,6 +419,8 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 itemsDeselected = true;
             }
 
+            removedItems.insert( boardItem );
+
             if( parentGroup && !( parentGroup->AsEdaItem()->GetFlags() & STRUCT_DELETED ) )
                 parentGroup->RemoveItem( boardItem );
 
@@ -379,6 +431,10 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
             {
             case PCB_FIELD_T:
                 static_cast<PCB_FIELD*>( boardItem )->SetVisible( false );
+
+                if( view )
+                    view->Update( boardItem );
+
                 break;
 
             case PCB_TEXT_T:
@@ -411,11 +467,21 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                     if( m_isFootprintEditor )
                     {
                         if( FOOTPRINT* parentFP = board->GetFirstFootprint() )
+                        {
                             parentFP->Remove( boardItem );
+                            connectivity->Remove( boardItem );
+                        }
                     }
                     else if( FOOTPRINT* parentFP = boardItem->GetParentFootprint() )
                     {
                         parentFP->Remove( boardItem );
+                        connectivity->Remove( boardItem );
+
+                        // A child-only removal mutates the footprint's content but,
+                        // unlike the board->Remove branch, never reaches a listener
+                        // vector — board listeners would otherwise not hear about
+                        // this commit at all.
+                        itemsChanged.push_back( parentFP );
                     }
                     else
                     {
@@ -437,8 +503,10 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 break;
             }
 
-            // The item has been removed from the board; it is now owned by undo/redo.
-            boardItem->SetFlags( UR_TRANSIENT );
+            // Removed items are owned by undo/redo, but a hidden field still belongs to its footprint
+            if( boardItem->Type() != PCB_FIELD_T )
+                boardItem->SetFlags( UR_TRANSIENT );
+
             break;
         }
 
@@ -492,6 +560,26 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 },
                 RECURSE_MODE::RECURSE );
     } // ... and regenerate them.
+
+    // Deselection above keys off the SELECTED flag on the removed item itself, but the selection
+    // may separately hold an owned descendant such as a pad, field or table cell.  Descendants
+    // are freed along with the removed parent, so prune them here or the selection keeps a
+    // dangling pointer that the next repaint dereferences.
+    if( selTool && !removedItems.empty() )
+    {
+        for( EDA_ITEM* selectedItem : selTool->GetSelection().GetItems() )
+        {
+            for( EDA_ITEM* ancestor = selectedItem; ancestor; ancestor = ancestor->GetParent() )
+            {
+                if( removedItems.count( ancestor ) )
+                {
+                    selTool->RemoveItemFromSel( selectedItem, true /* quiet mode */ );
+                    itemsDeselected = true;
+                    break;
+                }
+            }
+        }
+    }
 
     // Invalidate component classes
     board->GetComponentClassManager().InvalidateComponentClasses();
@@ -621,7 +709,10 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
         m_toolMgr->PostAction( PCB_ACTIONS::zoneFillDirty );
     }
 
-    m_toolMgr->PostAction( PCB_ACTIONS::rehatchShapes );
+    // Rehatching only refreshes cached view geometry (consumers regenerate it lazily), and
+    // dispatching it headlessly makes the tool manager query the platform cursor position
+    if( view )
+        m_toolMgr->PostAction( PCB_ACTIONS::rehatchShapes );
 
     if( selectedModified )
         m_toolMgr->ProcessEvent( EVENTS::SelectedItemsModified );
@@ -736,6 +827,9 @@ void BOARD_COMMIT::Revert()
                 }
             }
 
+            if( PCB_GROUP* group = dynamic_cast<PCB_GROUP*>( boardItem ) )
+                group->RemoveAll();
+
             // Defer deletion until after OnItemsCompositeUpdate so that
             // board listeners do not receive dangling pointers.
             itemsToDelete.push_back( boardItem );
@@ -753,7 +847,15 @@ void BOARD_COMMIT::Revert()
             if( m_isFootprintEditor )
             {
                 if( FOOTPRINT* parentFP = board->GetFirstFootprint() )
+                {
                     parentFP->Add( boardItem, ADD_MODE::INSERT );
+                    connectivity->Add( boardItem );
+                }
+            }
+            else if( FOOTPRINT* parentFP = boardItem->GetParentFootprint() )
+            {
+                parentFP->Add( boardItem, ADD_MODE::INSERT );
+                connectivity->Add( boardItem );
             }
             else
             {

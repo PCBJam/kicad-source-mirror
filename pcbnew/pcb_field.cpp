@@ -53,28 +53,48 @@ PCB_FIELD::PCB_FIELD( const PCB_TEXT& aText, FIELD_T aFieldId, const wxString& a
         m_ordinal( static_cast<int>( aFieldId ) ),
         m_name( aName )
 {
-    // Copy the text properties from the PCB_TEXT
-    SetText( aText.GetText() );
-    SetVisible( aText.IsVisible() );
-    SetLayer( aText.GetLayer() );
-    SetPosition( aText.GetPosition() );
-    SetAttributes( aText.GetAttributes() );
+    PCB_TEXT::operator=( aText );
+}
+
+
+void PCB_FIELD::Serialize( kiapi::board::types::Field& field ) const
+{
+    PCB_TEXT::Serialize( *field.mutable_text() );
+
+    field.set_name( GetCanonicalName().ToStdString() );
+    field.mutable_id()->set_id( (int) GetId() );
+    field.set_visible( IsVisible() );
 }
 
 
 void PCB_FIELD::Serialize( google::protobuf::Any &aContainer ) const
 {
     kiapi::board::types::Field field;
-
-    google::protobuf::Any anyText;
-    PCB_TEXT::Serialize( anyText );
-    anyText.UnpackTo( field.mutable_text() );
-
-    field.set_name( GetCanonicalName().ToStdString() );
-    field.mutable_id()->set_id( (int) GetId() );
-    field.set_visible( IsVisible() );
-
+    Serialize( field );
     aContainer.PackFrom( field );
+}
+
+
+bool PCB_FIELD::Deserialize( const kiapi::board::types::Field& field )
+{
+    if( field.has_id() )
+        setId( (FIELD_T) field.id().id() );
+
+    // Mandatory fields have a blank Name in the KiCad object
+    if( !IsMandatory() )
+        SetName( wxString( field.name().c_str(), wxConvUTF8 ) );
+
+    if( field.has_text() )
+    {
+        PCB_TEXT::Deserialize( field.text() );
+    }
+
+    SetVisible( field.visible() );
+
+    if( field.text().layer() == kiapi::board::types::BoardLayer::BL_UNKNOWN )
+        SetLayer( F_SilkS );
+
+    return true;
 }
 
 
@@ -85,26 +105,7 @@ bool PCB_FIELD::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &field ) )
         return false;
 
-    if( field.has_id() )
-        setId( (FIELD_T) field.id().id() );
-
-    // Mandatory fields have a blank Name in the KiCad object
-    if( !IsMandatory() )
-        SetName( wxString( field.name().c_str(), wxConvUTF8 ) );
-
-    if( field.has_text() )
-    {
-        google::protobuf::Any anyText;
-        anyText.PackFrom( field.text() );
-        PCB_TEXT::Deserialize( anyText );
-    }
-
-    SetVisible( field.visible() );
-
-    if( field.text().layer() == kiapi::board::types::BoardLayer::BL_UNKNOWN )
-        SetLayer( F_SilkS );
-
-    return true;
+    return Deserialize( field );
 }
 
 
@@ -272,6 +273,13 @@ double PCB_FIELD::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
 EDA_ITEM* PCB_FIELD::Clone() const
 {
     return new PCB_FIELD( *this );
+}
+
+
+void PCB_FIELD::CopyFrom( const BOARD_ITEM* aOther )
+{
+    wxCHECK( aOther && aOther->Type() == PCB_FIELD_T, /* void */ );
+    *this = *static_cast<const PCB_FIELD*>( aOther );
 }
 
 

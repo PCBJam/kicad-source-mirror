@@ -130,6 +130,8 @@ bool HISTORY_LOCK_MANAGER::acquireFileLock()
     // Ensure history directory exists
     if( !wxDirExists( m_historyPath ) )
     {
+        wxLogNull suppressSysErrorPopups;
+
         if( !wxFileName::Mkdir( m_historyPath, 0777, wxPATH_MKDIR_FULL ) )
         {
             m_lockError = wxString::Format(
@@ -316,4 +318,24 @@ void HISTORY_LOCK_MANAGER::ReleaseRepository()
         m_repo = nullptr;
         m_repoOwned = false;
     }
+}
+
+
+git_repository* HISTORY_LOCK_MANAGER::ReopenRepository()
+{
+    if( m_repo && m_index )
+        return m_repo;
+
+    ReleaseRepository();
+
+    if( !m_fileLock || !m_fileLock->Locked() )
+    {
+        m_lockError = _( "Cannot re-open history repository without the file lock" );
+        return nullptr;
+    }
+
+    if( !openRepository() || !acquireIndexLock() )
+        return nullptr;
+
+    return m_repo;
 }

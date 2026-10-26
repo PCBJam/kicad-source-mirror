@@ -90,6 +90,8 @@ PROJECT_FILE::PROJECT_FILE( const wxString& aFullPath ) :
     m_params.emplace_back( new PARAM_PATH( "pcbnew.last_paths.plot",
             &m_PcbLastPath[LAST_PATH_PLOT], "" ) );
 
+    m_params.emplace_back( new PARAM_PATH( "pcbnew.last_paths.step", &m_PcbLastPath[LAST_PATH_STEP], "" ) );
+
     m_params.emplace_back( new PARAM<wxString>( "schematic.legacy_lib_dir",
             &m_LegacyLibDir, "" ) );
 
@@ -133,7 +135,7 @@ PROJECT_FILE::PROJECT_FILE( const wxString& aFullPath ) :
             },
             [&]( const nlohmann::json& aJson )
             {
-                if( aJson.empty() || !aJson.is_object() )
+                if( !aJson.is_object() )
                     return;
 
                 m_BusAliases.clear();
@@ -164,6 +166,9 @@ PROJECT_FILE::PROJECT_FILE( const wxString& aFullPath ) :
                         m_BusAliases.emplace( name, std::move( members ) );
                 }
             }, {} ) );
+
+    // Let the save drop deleted aliases instead of merging them back in
+    m_params.back()->SetClearUnknownKeys();
 
     m_NetSettings = std::make_shared<NET_SETTINGS>( this, "net_settings" );
 
@@ -764,6 +769,26 @@ bool PROJECT_FILE::SaveToFile( const wxString& aDirectory, bool aForce )
     m_wasMigrated = false;
 
     return JSON_SETTINGS::SaveToFile( aDirectory, force );
+}
+
+
+std::string PROJECT_FILE::SerializeToString()
+{
+    wxASSERT( m_project );
+
+    Set( "meta.filename", m_project->GetProjectName() + "." + FILEEXT::ProjectFileExtension );
+
+    m_modified |= flushToStore();
+
+    try
+    {
+        return formatFileContents();
+    }
+    catch( ... )
+    {
+        wxLogTrace( traceSettings, wxT( "Error: could not serialize %s" ), GetFullFilename() );
+        return std::string();
+    }
 }
 
 

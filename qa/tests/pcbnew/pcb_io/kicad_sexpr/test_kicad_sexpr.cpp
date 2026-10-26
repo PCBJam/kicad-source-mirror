@@ -21,17 +21,23 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <pcbnew_utils/board_test_utils.h>
 #include <pcbnew_utils/board_file_utils.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include <pcbnew/pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <io/kicad/kicad_io_utils.h>
+#include <progress_reporter.h>
+#include <richio.h>
 
 #include <board.h>
 #include <board_connected_item.h>
@@ -41,7 +47,12 @@
 #include <netinfo.h>
 #include <pad.h>
 #include <pcb_shape.h>
+#include <pcb_track.h>
 #include <zone.h>
+
+
+#define CHECK_ENUM_CLASS_EQUAL( L, R )                                                      \
+    BOOST_CHECK_EQUAL( static_cast<int>( L ), static_cast<int>( R ) )
 
 
 struct KICAD_SEXPR_FIXTURE
@@ -311,6 +322,165 @@ BOOST_AUTO_TEST_CASE( Issue23752_AppendBoardPreservesStackupAndGrowsToSixCopperL
 
 
 /**
+ * Verify that appending a board into an existing one keeps the destination's layer names
+ * instead of overwriting them with the appended board's names, while still adding the
+ * extra copper layers the appended board needs.
+ *
+ * Regression test for #24642
+ */
+BOOST_AUTO_TEST_CASE( Issue24642_AppendBoardPreservesDestinationLayerNames )
+{
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir();
+
+    // four layer board with custom copper layer names
+    std::string destinationPath = dataPath + "issue3812.kicad_pcb";
+    // six layer board using the standard copper layer names
+    std::string sourcePath = dataPath + "issue18142.kicad_pcb";
+
+    std::map<std::string, UTF8> props;
+    props[PCB_IO_LOAD_PROPERTIES::APPEND_PRESERVE_DESTINATION_STACKUP] = "";
+
+    std::unique_ptr<BOARD> testBoard = std::make_unique<BOARD>();
+
+    kicadPlugin.LoadBoard( destinationPath, testBoard.get() );
+
+    BOOST_REQUIRE_EQUAL( testBoard->GetLayerName( F_Cu ), wxS( "Top_layer" ) );
+    BOOST_REQUIRE_EQUAL( testBoard->GetLayerName( In1_Cu ), wxS( "GND_layer" ) );
+    BOOST_REQUIRE_EQUAL( testBoard->GetLayerName( In2_Cu ), wxS( "VDD_layer" ) );
+    BOOST_REQUIRE_EQUAL( testBoard->GetLayerName( B_Cu ), wxS( "Bottom_layer" ) );
+
+    kicadPlugin.LoadBoard( sourcePath, testBoard.get(), &props );
+
+    // The destination layer names must survive the append
+    BOOST_CHECK_EQUAL( testBoard->GetLayerName( F_Cu ), wxS( "Top_layer" ) );
+    BOOST_CHECK_EQUAL( testBoard->GetLayerName( In1_Cu ), wxS( "GND_layer" ) );
+    BOOST_CHECK_EQUAL( testBoard->GetLayerName( In2_Cu ), wxS( "VDD_layer" ) );
+    BOOST_CHECK_EQUAL( testBoard->GetLayerName( B_Cu ), wxS( "Bottom_layer" ) );
+
+    // The two extra copper layers from the source board are still added
+    BOOST_CHECK( testBoard->IsLayerEnabled( In3_Cu ) );
+    BOOST_CHECK( testBoard->IsLayerEnabled( In4_Cu ) );
+    BOOST_CHECK_EQUAL( testBoard->GetCopperLayerCount(), 6 );
+}
+
+
+/**
+ * Verify that a registered layer-mapping handler remaps the appended board's layers onto the
+ * destination layers the handler chooses.  The same source board is appended twice, once with an
+ * identity mapping and once swapping its two inner copper layers, and the per-layer track counts
+ * must swap accordingly.
+ */
+BOOST_AUTO_TEST_CASE( Issue24642_AppendBoardRemapsLayersViaHandler )
+{
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir();
+    // four layer board with custom copper names and tracks on In2.Cu
+    std::string sourcePath = dataPath + "issue3812.kicad_pcb";
+
+    std::map<std::string, UTF8> props;
+    props[PCB_IO_LOAD_PROPERTIES::APPEND_PRESERVE_DESTINATION_STACKUP] = "";
+
+    auto countTracksOn = []( BOARD* aBoard, PCB_LAYER_ID aLayer )
+    {
+        int n = 0;
+
+        for( PCB_TRACK* track : aBoard->Tracks() )
+        {
+            if( track->GetLayer() == aLayer )
+                n++;
+        }
+
+        return n;
+    };
+
+    // Source copper user names as the handler sees them
+    const wxString fName = wxS( "Top_layer" );
+    const wxString in1Name = wxS( "GND_layer" );
+    const wxString in2Name = wxS( "VDD_layer" );
+    const wxString bName = wxS( "Bottom_layer" );
+
+    // Identity mapping: appended layers stay where they are
+    std::vector<wxString> seenNames;
+
+    kicadPlugin.RegisterCallback(
+            [&]( const std::vector<INPUT_LAYER_DESC>& aDescs ) -> std::map<wxString, PCB_LAYER_ID>
+            {
+                for( const INPUT_LAYER_DESC& desc : aDescs )
+                    seenNames.push_back( desc.Name );
+
+                return { { fName, F_Cu }, { in1Name, In1_Cu }, { in2Name, In2_Cu }, { bName, B_Cu } };
+            } );
+
+    std::unique_ptr<BOARD> identityBoard = std::make_unique<BOARD>();
+    kicadPlugin.LoadBoard( sourcePath, identityBoard.get(), &props );
+
+    // The dialog must see the source board's own layer names, not the canonical defaults
+    BOOST_CHECK( std::find( seenNames.begin(), seenNames.end(), in1Name ) != seenNames.end() );
+    BOOST_CHECK( std::find( seenNames.begin(), seenNames.end(), in2Name ) != seenNames.end() );
+
+    const int idIn1 = countTracksOn( identityBoard.get(), In1_Cu );
+    const int idIn2 = countTracksOn( identityBoard.get(), In2_Cu );
+
+    BOOST_REQUIRE_GT( idIn2, 0 ); // the source has tracks on In2.Cu
+
+    // Swap mapping: appended In1 <-> In2
+    kicadPlugin.RegisterCallback(
+            [&]( const std::vector<INPUT_LAYER_DESC>& ) -> std::map<wxString, PCB_LAYER_ID>
+            {
+                return { { fName, F_Cu }, { in1Name, In2_Cu }, { in2Name, In1_Cu }, { bName, B_Cu } };
+            } );
+
+    std::unique_ptr<BOARD> swapBoard = std::make_unique<BOARD>();
+    kicadPlugin.LoadBoard( sourcePath, swapBoard.get(), &props );
+
+    const int swIn1 = countTracksOn( swapBoard.get(), In1_Cu );
+    const int swIn2 = countTracksOn( swapBoard.get(), In2_Cu );
+
+    // The inner-copper track counts must have swapped
+    BOOST_CHECK_EQUAL( swIn1, idIn2 );
+    BOOST_CHECK_EQUAL( swIn2, idIn1 );
+}
+
+
+/**
+ * Verify the mapping dialog is only triggered when the appended layers do not already correspond
+ * to the destination by name: appending a board onto one with identical layer names must not
+ * prompt, while appending one with differently-named layers must.
+ */
+BOOST_AUTO_TEST_CASE( Issue24642_AppendBoardPromptsOnlyOnNameMismatch )
+{
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir();
+    std::string standardNames = dataPath + "issue18142.kicad_pcb"; // six layer, default names
+    std::string customNames = dataPath + "issue3812.kicad_pcb";    // four layer, custom copper names
+
+    std::map<std::string, UTF8> props;
+    props[PCB_IO_LOAD_PROPERTIES::APPEND_PRESERVE_DESTINATION_STACKUP] = "";
+
+    bool handlerCalled = false;
+
+    kicadPlugin.RegisterCallback(
+            [&]( const std::vector<INPUT_LAYER_DESC>& ) -> std::map<wxString, PCB_LAYER_ID>
+            {
+                handlerCalled = true;
+                return {};
+            } );
+
+    // Appending onto a board with identical layer names must not prompt
+    std::unique_ptr<BOARD> matchBoard = std::make_unique<BOARD>();
+    kicadPlugin.LoadBoard( standardNames, matchBoard.get() );
+    handlerCalled = false;
+    kicadPlugin.LoadBoard( standardNames, matchBoard.get(), &props );
+    BOOST_CHECK( !handlerCalled );
+
+    // Appending a board with differently-named layers must prompt
+    std::unique_ptr<BOARD> mismatchBoard = std::make_unique<BOARD>();
+    kicadPlugin.LoadBoard( standardNames, mismatchBoard.get() );
+    handlerCalled = false;
+    kicadPlugin.LoadBoard( customNames, mismatchBoard.get(), &props );
+    BOOST_CHECK( handlerCalled );
+}
+
+
+/**
  * Regression for the footprint-save SIGSEGV observed in KiCad 10.0.0 (introduced by
  * b335ce6e2c "Don't save netcodes to files", which switched PCB_SHAPE/PCB_TRACK/ZONE
  * serialization from writing the netcode to writing the netname).  If a footprint's
@@ -421,6 +591,204 @@ BOOST_AUTO_TEST_CASE( FootprintSave_OmitsNetsOnAllBoardConnectedItems )
     BOOST_CHECK_EQUAL( detachedZone->GetNet(), NETINFO_LIST::OrphanedItem() );
 
     std::filesystem::remove_all( tmpLib );
+}
+
+
+// Enumerating a footprint library that is not on disk must fail every time. The failed
+// load leaves a cache bound to the missing path carrying a zero timestamp, which is also
+// what a missing directory reports, so the cache looks current and the next enumerate
+// answers with an empty library instead of the error.
+BOOST_AUTO_TEST_CASE( MissingLibraryThrowsOnEveryEnumerate )
+{
+    std::filesystem::path libPath = std::filesystem::temp_directory_path() / "kicad_qa_no_such_library.pretty";
+
+    BOOST_REQUIRE( !std::filesystem::exists( libPath ) );
+
+    wxArrayString names;
+
+    BOOST_CHECK_THROW( kicadPlugin.FootprintEnumerate( names, libPath.string(), false ), IO_ERROR );
+
+    BOOST_CHECK_THROW( kicadPlugin.FootprintEnumerate( names, libPath.string(), false ), IO_ERROR );
+}
+
+
+/**
+ * Zone tokens at their format defaults are omitted from the file.  When appending into a
+ * live board (design block placement, paste) the parsed zone must get the format defaults,
+ * not the destination board's default zone settings.
+ *
+ * Regression test for https://gitlab.com/kicad/code/kicad/-/issues/24955
+ */
+BOOST_AUTO_TEST_CASE( Issue24955_AppendDoesNotInheritSessionZoneDefaults )
+{
+    KI_TEST::TEMPORARY_DIRECTORY tempDir( "kicad_qa_zone_defaults_append_", "" );
+    std::filesystem::path        tmpPath = tempDir.GetPath() / "thermal_zone_block.kicad_pcb";
+    std::ofstream                out( tmpPath );
+
+    // Two zones, first with every omitted-when-default token left out (thermal, polygon
+    // fill, no smoothing, unlocked), second with the explicit tokens
+    out << "(kicad_pcb (version 20260206) (generator \"test\") (generator_version \"test\")"
+        << " (general (thickness 1.6)) (paper \"A4\")"
+        << " (layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal))"
+        << " (zone (net 0) (net_name \"\") (layer \"F.Cu\") (uuid \"00000000-0000-0000-0000-000000000001\")"
+        << "       (hatch edge 0.5)"
+        << "       (connect_pads (clearance 0.5))"
+        << "       (min_thickness 0.25) (filled_areas_thickness no)"
+        << "       (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5) (island_removal_mode 0))"
+        << "       (polygon (pts (xy 0 0) (xy 5 0) (xy 5 5) (xy 0 5))))"
+        << " (zone (net 0) (net_name \"\") (layer \"F.Cu\") (uuid \"00000000-0000-0000-0000-000000000002\")"
+        << "       (locked yes)"
+        << "       (hatch edge 0.5)"
+        << "       (connect_pads yes (clearance 0.5))"
+        << "       (min_thickness 0.25) (filled_areas_thickness no)"
+        << "       (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5) (island_removal_mode 0)"
+        << "             (smoothing fillet) (radius 1))"
+        << "       (polygon (pts (xy 10 0) (xy 15 0) (xy 15 5) (xy 10 5))))"
+        << ")";
+    out.close();
+
+    // A destination board whose session zone defaults differ from the format defaults
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+
+    ZONE_SETTINGS settings = board->GetDesignSettings().GetDefaultZoneSettings();
+    settings.SetPadConnection( ZONE_CONNECTION::FULL );
+    settings.m_FillMode = ZONE_FILL_MODE::HATCH_PATTERN;
+    settings.SetCornerSmoothingType( ZONE_SETTINGS::CORNER_SMOOTHING::FILLET );
+    settings.SetCornerRadius( pcbIUScale.mmToIU( 1 ) );
+    settings.m_HatchSmoothingLevel = 2;
+    settings.m_Locked = true;
+    board->GetDesignSettings().SetDefaultZoneSettings( settings );
+
+    kicadPlugin.LoadBoard( tmpPath.string(), board.get() );
+
+    BOOST_REQUIRE_EQUAL( board->Zones().size(), 2u );
+
+    // The all-defaults zone must not pick up the board's session defaults
+    ZONE* omitted = board->Zones()[0];
+    BOOST_CHECK( omitted->GetPadConnection() == ZONE_CONNECTION::THERMAL );
+    BOOST_CHECK( omitted->GetFillMode() == ZONE_FILL_MODE::POLYGONS );
+    CHECK_ENUM_CLASS_EQUAL( omitted->GetCornerSmoothingType(), ZONE_SETTINGS::CORNER_SMOOTHING::NO_SMOOTHING );
+    BOOST_CHECK_EQUAL( omitted->GetCornerRadius(), 0 );
+    BOOST_CHECK_EQUAL( omitted->GetHatchSmoothingLevel(), 0 );
+    BOOST_CHECK( !omitted->IsLocked() );
+
+    // Explicit tokens still win
+    ZONE* explicitZone = board->Zones()[1];
+    BOOST_CHECK( explicitZone->GetPadConnection() == ZONE_CONNECTION::FULL );
+    CHECK_ENUM_CLASS_EQUAL( explicitZone->GetCornerSmoothingType(), ZONE_SETTINGS::CORNER_SMOOTHING::FILLET );
+    BOOST_CHECK_EQUAL( explicitZone->GetCornerRadius(), pcbIUScale.mmToIU( 1 ) );
+    BOOST_CHECK( explicitZone->IsLocked() );
+}
+
+
+/**
+ * Cancelling a load that appends into an existing board must not leave any partially
+ * parsed items or nets behind (issue 24911)
+ */
+BOOST_AUTO_TEST_CASE( Issue24911_CancelledAppendLeavesBoardUntouched )
+{
+    // Requests cancellation once the parse reaches the given line, then stalls long
+    // enough to open the parser 250ms cancel checkpoint window
+    class CANCEL_AT_LINE_READER : public STRING_LINE_READER
+    {
+    public:
+        CANCEL_AT_LINE_READER( const std::string& aText, unsigned aCancelLine, bool* aCancelFlag ) :
+                STRING_LINE_READER( aText, wxT( "cancel-test" ) ),
+                m_cancelLine( aCancelLine ),
+                m_cancelFlag( aCancelFlag )
+        {
+        }
+
+        char* ReadLine() override
+        {
+            if( !*m_cancelFlag && LineNumber() >= m_cancelLine )
+            {
+                *m_cancelFlag = true;
+                std::this_thread::sleep_for( std::chrono::milliseconds( 300 ) );
+            }
+
+            return STRING_LINE_READER::ReadLine();
+        }
+
+    private:
+        unsigned m_cancelLine;
+        bool*    m_cancelFlag;
+    };
+
+    class CANCELLING_REPORTER : public PROGRESS_REPORTER
+    {
+    public:
+        CANCELLING_REPORTER( bool* aCancelFlag ) :
+                m_cancelFlag( aCancelFlag )
+        {
+        }
+
+        void SetNumPhases( int ) override {}
+        void AddPhases( int ) override {}
+        void BeginPhase( int ) override {}
+        void AdvancePhase() override {}
+        void AdvancePhase( const wxString& ) override {}
+        void Report( const wxString& ) override {}
+        void SetCurrentProgress( double ) override {}
+        void SetMaxProgress( int ) override {}
+        void AdvanceProgress() override {}
+        void SetTitle( const wxString& ) override {}
+        bool IsCancelled() const override { return *m_cancelFlag; }
+        bool KeepRefreshing( bool ) override { return !*m_cancelFlag; }
+
+    private:
+        bool* m_cancelFlag;
+    };
+
+    // Source board with one net and enough tracks that the cancel lands mid-parse
+    std::unique_ptr<BOARD> source = std::make_unique<BOARD>();
+
+    NETINFO_ITEM* net = new NETINFO_ITEM( source.get(), wxT( "GHOST_NET" ), 1 );
+    source->Add( net );
+
+    for( int i = 0; i < 400; i++ )
+    {
+        PCB_TRACK* track = new PCB_TRACK( source.get() );
+        track->SetStart( VECTOR2I( i * 10000, 0 ) );
+        track->SetEnd( VECTOR2I( i * 10000, 10000 ) );
+        track->SetWidth( 200000 );
+        track->SetLayer( F_Cu );
+        track->SetNet( net );
+        source->Add( track );
+    }
+
+    STRING_FORMATTER fmt;
+    kicadPlugin.FormatBoardToFormatter( &fmt, source.get() );
+
+    // The formatter emits a single line, the parser can only be interrupted between lines
+    std::string text = fmt.GetString();
+    KICAD_FORMAT::Prettify( text );
+
+    unsigned lineCount = std::count( text.begin(), text.end(), '\n' );
+
+    // Destination board with one pre-existing track
+    std::unique_ptr<BOARD> dest = std::make_unique<BOARD>();
+
+    PCB_TRACK* existing = new PCB_TRACK( dest.get() );
+    existing->SetStart( VECTOR2I( 0, 0 ) );
+    existing->SetEnd( VECTOR2I( 5000, 0 ) );
+    existing->SetWidth( 200000 );
+    existing->SetLayer( F_Cu );
+    dest->Add( existing );
+
+    size_t   tracksBefore = dest->Tracks().size();
+    unsigned netsBefore = dest->GetNetInfo().GetNetCount();
+
+    bool cancelRequested = false;
+
+    CANCEL_AT_LINE_READER reader( text, lineCount / 2, &cancelRequested );
+    CANCELLING_REPORTER   reporter( &cancelRequested );
+
+    BOOST_CHECK_THROW( kicadPlugin.DoLoad( reader, dest.get(), nullptr, &reporter, lineCount ), IO_ERROR );
+    BOOST_CHECK( cancelRequested );
+
+    BOOST_CHECK_EQUAL( dest->Tracks().size(), tracksBefore );
+    BOOST_CHECK_EQUAL( dest->GetNetInfo().GetNetCount(), netsBefore );
 }
 
 

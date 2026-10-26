@@ -36,6 +36,7 @@
 #include <footprint.h>
 #include <pcb_field.h>
 #include <kiface_base.h>
+#include <kiway.h>
 #include <kiplatform/ui.h>
 #include <macros.h>
 #include <pcb_edit_frame.h>
@@ -75,7 +76,9 @@
 #include <pcb_draw_panel_gal.h>
 #include <drawing_sheet/ds_proxy_view_item.h>
 
+#ifdef KICAD_SCRIPTING
 #include "../scripting/python_scripting.h"
+#endif
 
 
 /* Data to build the layer pair indicator button */
@@ -348,7 +351,7 @@ std::optional<TOOLBAR_CONFIGURATION> PCB_EDIT_TOOLBAR_SETTINGS::DefaultToolbarCo
 
         config.AppendSeparator();
 
-        if( !Kiface().IsSingle() )
+        if( !Kiface().IsSingle() || KIWAY::FaceRegistered( KIWAY::FACE_SCH ) )
             config.AppendAction( ACTIONS::updatePcbFromSchematic );
         else
             config.AppendAction( PCB_ACTIONS::importNetlist );
@@ -459,7 +462,11 @@ void PCB_EDIT_FRAME::configureToolbars()
             [this]( ACTION_TOOLBAR* aToolbar )
             {
                 // Add scripting console and API plugins
+#ifdef KICAD_SCRIPTING
                 bool scriptingAvailable = SCRIPTING::IsWxAvailable();
+#else
+                bool scriptingAvailable = false;
+#endif
 
 #ifdef KICAD_IPC_API
                 bool haveApiPlugins = Pgm().GetCommonSettings()->m_Api.enable_server

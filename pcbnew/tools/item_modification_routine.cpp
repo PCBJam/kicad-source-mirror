@@ -14,11 +14,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, you may find one here:
- * http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
- * or you may search the http://www.gnu.org website for the version 2 license,
- * or you may write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "item_modification_routine.h"
@@ -30,14 +26,11 @@
 #include <geometry/shape_rect.h>
 #include <geometry/shape_utils.h>
 #include <geometry/vector_utils.h>
-#include <math.h>
 
 #include <pad.h>
 #include <pcb_track.h>
 #include <tools/pcb_tool_utils.h>
 #include <confirm.h>
-#include <board.h>
-#include <wx/log.h>
 
 namespace
 {
@@ -295,17 +288,7 @@ std::optional<wxString> DOGBONE_CORNER_ROUTINE::GetStatusMessage( int aSegmentCo
 void DOGBONE_CORNER_ROUTINE::ProcessLinePair( PCB_SHAPE& aLineA, PCB_SHAPE& aLineB )
 {
     if( aLineA.GetLength() == 0.0 || aLineB.GetLength() == 0.0 )
-    {
-        wxLogTrace( "DOGBONE", "Skip: zero-length line(s) (A len=%f, B len=%f)",
-                    aLineA.GetLength(), aLineB.GetLength() );
         return;
-    }
-
-    if( !EnsureBoardOutline() )
-    {
-        wxLogTrace( "DOGBONE", "Skip: board outline unavailable" );
-        return;
-    }
 
     SEG seg_a( aLineA.GetStart(), aLineA.GetEnd() );
     SEG seg_b( aLineB.GetStart(), aLineB.GetEnd() );
@@ -313,59 +296,12 @@ void DOGBONE_CORNER_ROUTINE::ProcessLinePair( PCB_SHAPE& aLineA, PCB_SHAPE& aLin
     auto [a_pt, b_pt] = GetSharedEndpoints( seg_a, seg_b );
 
     if( !a_pt || !b_pt )
-    {
-        wxLogTrace( "DOGBONE", "Skip: segments do not share endpoint" );
         return;
-    }
 
     // Cannot handle parallel lines
     if( seg_a.Angle( seg_b ).IsHorizontal() )
     {
-        wxLogTrace( "DOGBONE", "Skip: parallel segments" );
         AddFailure();
-        return;
-    }
-
-    // Determine if this corner points into the board outline: we construct the bisector
-    // vector (as done in ComputeDogbone) and test a point a small distance in the opposite
-    // direction (i.e. exterior). If that opposite point is INSIDE the board outline, the
-    // corner indentation points inward (needs dogbone). If the opposite test point is
-    // outside, skip.
-
-    const VECTOR2I corner = *a_pt; // shared endpoint
-    // Build vectors from corner toward other ends
-    const VECTOR2I vecA = ( seg_a.A == corner ? seg_a.B - corner : seg_a.A - corner );
-    const VECTOR2I vecB = ( seg_b.A == corner ? seg_b.B - corner : seg_b.A - corner );
-    // Normalize (resize) to common length to form bisector reliably
-    int maxLen = std::max( vecA.EuclideanNorm(), vecB.EuclideanNorm() );
-
-    if( maxLen == 0 )
-    {
-        wxLogTrace( "DOGBONE", "Skip: degenerate corner (maxLen==0)" );
-        return;
-    }
-
-    VECTOR2I vecAn = vecA.Resize( maxLen );
-    VECTOR2I vecBn = vecB.Resize( maxLen );
-    VECTOR2I bisectorOutward = vecAn + vecBn; // direction inside angle region
-
-    // If vectors are nearly opposite, no meaningful dogbone
-    if( bisectorOutward.EuclideanNorm() == 0 )
-    {
-        wxLogTrace( "DOGBONE", "Skip: bisector zero (vectors opposite)" );
-        return;
-    }
-
-    // Opposite direction of bisector (points "outside" if angle is convex, or further into
-    // material if reflex). We'll sample a point a small distance along -bisectorOutward.
-    VECTOR2I sampleDir = ( -bisectorOutward ).Resize( std::min( 1000, m_params.DogboneRadiusIU ) );
-    VECTOR2I samplePoint = corner + sampleDir; // test point opposite bisector
-
-    bool oppositeInside = m_boardOutline.Contains( samplePoint );
-
-    if( !oppositeInside )
-    {
-        wxLogTrace( "DOGBONE", "Skip: corner not inward (sample outside polygon)" );
         return;
     }
 
@@ -374,15 +310,12 @@ void DOGBONE_CORNER_ROUTINE::ProcessLinePair( PCB_SHAPE& aLineA, PCB_SHAPE& aLin
 
     if( !dogbone_result )
     {
-        wxLogTrace( "DOGBONE", "Skip: ComputeDogbone failed (radius=%d slots=%d)",
-                    m_params.DogboneRadiusIU, (int) m_params.AddSlots );
         AddFailure();
         return;
     }
 
     if( dogbone_result->m_small_arc_mouth )
     {
-        wxLogTrace( "DOGBONE", "Info: small arc mouth (slots %s)", m_params.AddSlots ? "enabled" : "disabled" );
         // The arc is too small to fit the radius
         m_haveNarrowMouths = true;
     }
@@ -426,35 +359,7 @@ void DOGBONE_CORNER_ROUTINE::ProcessLinePair( PCB_SHAPE& aLineA, PCB_SHAPE& aLin
     ModifyLineOrDeleteIfZeroLength( aLineA, dogbone_result->m_updated_seg_a );
     ModifyLineOrDeleteIfZeroLength( aLineB, dogbone_result->m_updated_seg_b );
 
-    wxLogTrace( "DOGBONE", "Success: dogbone added at (%d,%d)", corner.x, corner.y );
     AddSuccess();
-}
-
-bool DOGBONE_CORNER_ROUTINE::EnsureBoardOutline() const
-{
-    if( m_boardOutlineCached )
-        return !m_boardOutline.IsEmpty();
-
-    m_boardOutlineCached = true;
-
-    BOARD* board = dynamic_cast<BOARD*>( GetBoard() );
-
-    if( !board )
-    {
-        wxLogTrace( "DOGBONE", "EnsureBoardOutline: board cast failed" );
-        return false;
-    }
-
-    // Build outlines; ignore errors and arcs for this classification
-    if( !board->GetBoardPolygonOutlines( m_boardOutline, false ) )
-    {
-        wxLogTrace( "DOGBONE", "EnsureBoardOutline: GetBoardPolygonOutlines failed" );
-        return false;
-    }
-
-    bool ok = !m_boardOutline.IsEmpty();
-    wxLogTrace( "DOGBONE", "EnsureBoardOutline: outline %s", ok ? "ready" : "empty" );
-    return ok;
 }
 
 
@@ -914,70 +819,73 @@ void OUTSET_ROUTINE::ProcessItem( BOARD_ITEM& aItem )
     {
         const PAD& pad = static_cast<const PAD&>( aItem );
 
-        // TODO(JE) padstacks
-        const PAD_SHAPE pad_shape = pad.GetShape( PADSTACK::ALL_LAYERS );
+        pad.Padstack().ForEachUniqueLayer(
+                [&]( PCB_LAYER_ID aLayer )
+                {
+                    const PAD_SHAPE pad_shape = pad.GetShape( aLayer );
 
-        switch( pad_shape )
-        {
-        case PAD_SHAPE::RECTANGLE:
-        case PAD_SHAPE::ROUNDRECT:
-        case PAD_SHAPE::OVAL:
-        {
-            const VECTOR2I pad_size = pad.GetSize( PADSTACK::ALL_LAYERS );
+                    switch( pad_shape )
+                    {
+                    case PAD_SHAPE::RECTANGLE:
+                    case PAD_SHAPE::ROUNDRECT:
+                    case PAD_SHAPE::OVAL:
+                    {
+                        const VECTOR2I pad_size = pad.GetSize( aLayer );
 
-            BOX2I box{ pad.GetPosition() - pad_size / 2, pad_size };
-            box.Inflate( m_params.outsetDistance );
+                        BOX2I box{ pad.GetPosition() - pad_size / 2, pad_size };
+                        box.Inflate( m_params.outsetDistance );
 
-            if( box.GetWidth() <= 0 || box.GetHeight() <= 0 )
-            {
-                AddFailure();
-                break;
-            }
+                        if( box.GetWidth() <= 0 || box.GetHeight() <= 0 )
+                        {
+                            AddFailure();
+                            break;
+                        }
 
-            int radius = m_params.outsetDistance;
+                        int radius = m_params.outsetDistance;
 
-            if( pad_shape == PAD_SHAPE::ROUNDRECT )
-                radius += pad.GetRoundRectCornerRadius( PADSTACK::ALL_LAYERS );
-            else if( pad_shape == PAD_SHAPE::OVAL )
-                radius += std::min( pad_size.x, pad_size.y ) / 2;
+                        if( pad_shape == PAD_SHAPE::ROUNDRECT )
+                            radius += pad.GetRoundRectCornerRadius( aLayer );
+                        else if( pad_shape == PAD_SHAPE::OVAL )
+                            radius += std::min( pad_size.x, pad_size.y ) / 2;
 
-            radius = m_params.roundCorners ? std::max( radius, 0 ) : 0;
+                        radius = m_params.roundCorners ? std::max( radius, 0 ) : 0;
 
-            // No point doing a SHAPE_RECT as we may need to rotate it
-            ROUNDRECT      rrect( box, radius );
-            SHAPE_POLY_SET poly;
-            rrect.TransformToPolygon( poly, pad.GetMaxError() );
+                        // No point doing a SHAPE_RECT as we may need to rotate it
+                        ROUNDRECT      rrect( box, radius );
+                        SHAPE_POLY_SET poly;
+                        rrect.TransformToPolygon( poly, pad.GetMaxError() );
 
-            poly.Rotate( pad.GetOrientation(), pad.GetPosition() );
-            addPoly( poly );
-            AddSuccess();
-            break;
-        }
+                        poly.Rotate( pad.GetOrientation(), pad.GetPosition() );
+                        addPoly( poly );
+                        AddSuccess();
+                        break;
+                    }
 
-        case PAD_SHAPE::CIRCLE:
-        {
-            const int radius = pad.GetSize( PADSTACK::ALL_LAYERS ).x / 2 + m_params.outsetDistance;
+                    case PAD_SHAPE::CIRCLE:
+                    {
+                        const int radius = pad.GetSize( aLayer ).x / 2 + m_params.outsetDistance;
 
-            if( radius <= 0 )
-            {
-                AddFailure();
-                break;
-            }
+                        if( radius <= 0 )
+                        {
+                            AddFailure();
+                            break;
+                        }
 
-            const CIRCLE circle( pad.GetPosition(), radius );
-            addCircleOrRect( circle );
-            AddSuccess();
-            break;
-        }
+                        const CIRCLE circle( pad.GetPosition(), radius );
+                        addCircleOrRect( circle );
+                        AddSuccess();
+                        break;
+                    }
 
-        case PAD_SHAPE::TRAPEZOID:
-            // Not handled yet, but could use a generic convex polygon outset method.
-            break;
+                    case PAD_SHAPE::TRAPEZOID:
+                        // Not handled yet, but could use a generic convex polygon outset method.
+                        break;
 
-        default:
-            // Other pad shapes are not supported with exact outsets
-            break;
-        }
+                    default:
+                        // Other pad shapes are not supported with exact outsets
+                        break;
+                    }
+                } );
         break;
     }
     case PCB_SHAPE_T:

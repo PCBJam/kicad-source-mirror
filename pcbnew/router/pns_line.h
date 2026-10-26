@@ -237,6 +237,8 @@ public:
     void DragSegment( const VECTOR2I& aP, int aIndex, bool aFreeAngle = false );
     void DragCorner( const VECTOR2I& aP, int aIndex, bool aFreeAngle = false, DIRECTION_45 aPreferredEndingDirection = DIRECTION_45() );
 
+    void DragArc( const VECTOR2I& aP, int aIndex );
+
     void SetRank( int aRank ) override;
     int Rank() const override;
 
@@ -262,6 +264,13 @@ private:
     void dragCorner45( const VECTOR2I& aP, int aIndex, DIRECTION_45 aPreferredEndingDirection );
     void dragSegmentFree( const VECTOR2I& aP, int aIndex );
     void dragCornerFree( const VECTOR2I& aP, int aIndex );
+
+    /**
+     * Used to rebuild arcs in the walkaround since the graph only stores vertices.  This looks at
+     * points that are untouched between the output and the input and pushes the arc data back into 
+     * the path
+     */
+    void restoreUntouchedArcs( SHAPE_LINE_CHAIN& aPath, const SHAPE_LINE_CHAIN& aOriginal ) const;
 
     VECTOR2I snapToNeighbourSegments( const SHAPE_LINE_CHAIN& aPath, const VECTOR2I& aP,
                                       int aIndex ) const;

@@ -22,6 +22,9 @@
 #ifndef FOOTPRINT_LIBRARY_ADAPTER_H
 #define FOOTPRINT_LIBRARY_ADAPTER_H
 
+#include <map>
+#include <memory>
+
 #include <lib_id.h>
 #include <core/leak_at_exit.h>
 #include <libraries/library_manager.h>
@@ -29,6 +32,8 @@
 #include <project.h>
 
 class FOOTPRINT;
+class LIB_TREE_ITEM;
+struct PCBJAM_FOOTPRINT_ROW;
 
 
 /**
@@ -85,6 +90,17 @@ public:
      * @param aNickname is the library to check and potentially refresh.
      */
     void RefreshLibraryIfChanged( const wxString& aNickname );
+
+    void RefreshChangedLibraries();
+
+    /**
+     * Drop the parsed copies of one library from PreloadedFootprints (and its recorded
+     * timestamp) so the next tree access / LoadFootprint re-reads the plugin. For
+     * providers whose GetLibraryTimestamp() is a constant (network-backed libraries)
+     * RefreshLibraryIfChanged() can never notice a change; the host calls this when it
+     * knows the library moved (pcbjam wasm port: a collaborator's remote edit).
+     */
+    void InvalidatePreloaded( const wxString& aNickname );
 
     bool FootprintExists( const wxString& aNickname, const wxString& aName );
 
@@ -172,6 +188,24 @@ public:
      */
     bool IsFootprintLibWritable( const wxString& aNickname );
 
+#ifdef __EMSCRIPTEN__
+    /// pcbjam (libs 0028 phase 9): tree items from the library index, without parsing the
+    /// library. False = use GetFootprints(). Stubs are owned by aStorage. Defined in
+    /// pcb_io/pcbjam_fp/pcbjam_footprint_index.cpp.
+    bool GetIndexedTreeItems( const wxString& aNickname, std::vector<LIB_TREE_ITEM*>& aItems,
+                              std::vector<std::unique_ptr<LIB_TREE_ITEM>>& aStorage );
+
+    /// pcbjam (libs 0028 phase 10): the library's index rows (CvPcb's footprint list); null
+    /// when it has none or is already parsed.
+    std::shared_ptr<const std::vector<PCBJAM_FOOTPRINT_ROW>> GetIndexRows( const wxString& aNickname );
+
+    /// pcbjam (libs 0028 phase 9): fetch the index of every listed library in one crossing.
+    void PrefetchIndex( const std::vector<wxString>& aNicknames );
+
+    /// pcbjam (libs 0028 phase 9): debug, compare a library's index items with its footprints.
+    std::string CompareIndexedTreeItems( const wxString& aNickname );
+#endif
+
 protected:
     std::map<wxString, LIB_DATA>& globalLibs() override { return GlobalLibraries.Get(); }
     std::map<wxString, LIB_DATA>& globalLibs() const override { return GlobalLibraries.Get(); }
@@ -179,6 +213,15 @@ protected:
     std::shared_mutex& globalLibsMutex() const override { return GlobalLibraryMutex; }
 
     void enumerateLibrary( LIB_DATA* aLib, const wxString& aUri ) override;
+
+    /**
+     * Parse every footprint in one library into PreloadedFootprints.  This is the eager work
+     * that enumerateLibrary() used to do for the bulk async preload; it is now invoked lazily
+     * (GetFootprints() on first access, RefreshLibraryIfChanged() on a disk change) so the
+     * WASM port doesn't enumerate all ~222 network-backed libraries on the main thread at
+     * startup.  Idempotent: skips libraries already present in PreloadedFootprints.
+     */
+    void preloadLibrary( const LIB_DATA* aLib, const wxString& aUri );
 
     LIBRARY_RESULT<IO_BASE*> createPlugin( const LIBRARY_TABLE_ROW* row ) override;
 
@@ -195,9 +238,9 @@ private:
     static LEAK_AT_EXIT<std::map<wxString, std::vector<std::unique_ptr<FOOTPRINT>>>> PreloadedFootprints;
     static std::shared_mutex PreloadedFootprintsMutex;
 
-    /// Per-library filesystem timestamps recorded when PreloadedFootprints was last populated.
-    /// Used by RefreshLibraryIfChanged() to detect external modifications.
-    std::map<wxString, long long> m_preloadedTimestamps;
+    /// Filesystem timestamps from when PreloadedFootprints was last populated, guarded by
+    /// PreloadedFootprintsMutex.  Static so it shares the lifetime of the cache it describes.
+    static LEAK_AT_EXIT<std::map<wxString, long long>> PreloadedTimestamps;
 };
 
 #endif //FOOTPRINT_LIBRARY_ADAPTER_H

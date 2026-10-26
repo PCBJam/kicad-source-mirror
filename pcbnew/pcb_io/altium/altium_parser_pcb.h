@@ -51,6 +51,14 @@ const uint16_t ALTIUM_POLYGON_NONE = std::numeric_limits<uint16_t>::max();
 // 65534 seems to be belonging to board outline
 const uint16_t ALTIUM_POLYGON_BOARD = std::numeric_limits<uint16_t>::max() - 1;
 
+// bits of the keepout restriction mask carried by tracks, arcs, fills and regions
+const uint8_t ALTIUM_KEEPOUT_VIA = 0x01;
+const uint8_t ALTIUM_KEEPOUT_TRACK = 0x02;
+const uint8_t ALTIUM_KEEPOUT_COPPER = 0x04;
+const uint8_t ALTIUM_KEEPOUT_SMD_PAD = 0x08;
+const uint8_t ALTIUM_KEEPOUT_TH_PAD = 0x10;
+const uint8_t ALTIUM_KEEPOUT_ALL = 0x1F;
+
 
 enum class ALTIUM_UNIT
 {
@@ -108,17 +116,18 @@ enum class ALTIUM_RULE_KIND
 {
     UNKNOWN = 0,
 
-    CLEARANCE              = 1,
-    DIFF_PAIR_ROUTINGS     = 2,
-    HEIGHT                 = 3,
-    HOLE_SIZE              = 4,
-    HOLE_TO_HOLE_CLEARANCE = 5,
-    WIDTH                  = 6,
-    PASTE_MASK_EXPANSION   = 7,
-    SOLDER_MASK_EXPANSION  = 8,
-    PLANE_CLEARANCE        = 9,
-    POLYGON_CONNECT        = 10,
-    ROUTING_VIAS           = 11
+    CLEARANCE               = 1,
+    DIFF_PAIR_ROUTINGS      = 2,
+    HEIGHT                  = 3,
+    HOLE_SIZE               = 4,
+    HOLE_TO_HOLE_CLEARANCE  = 5,
+    WIDTH                   = 6,
+    PASTE_MASK_EXPANSION    = 7,
+    SOLDER_MASK_EXPANSION   = 8,
+    PLANE_CLEARANCE         = 9,
+    POLYGON_CONNECT         = 10,
+    ROUTING_VIAS            = 11,
+    BOARD_OUTLINE_CLEARANCE = 12
 };
 
 enum class ALTIUM_CONNECT_STYLE
@@ -254,6 +263,18 @@ struct ALTIUM_VERTICE
     {
     }
 };
+
+
+/**
+ * Read the VX/VY/KIND/R/SA/EA/CX/CY vertex series out of a polygon or board outline record.
+ *
+ * @param aDiscarded, when given, counts the vertices dropped because a coordinate did not fit
+ *                    the KiCad int range.  Those are clamps rather than places, and an outline
+ *                    built from one spans the whole coordinate space.
+ */
+void altium_parse_polygons( std::map<wxString, wxString>& aProps,
+                            std::vector<ALTIUM_VERTICE>& aVertices, int* aDiscarded = nullptr );
+
 
 enum class ALTIUM_LAYER : uint32_t
 {
@@ -493,6 +514,10 @@ struct ALIBRARY
 
 struct ABOARD6
 {
+    // ORIGINX/ORIGINY, the user's relative origin.  Distinct from the sheet placement below
+    VECTOR2I origin;
+
+    // SHEETX/SHEETY, the drawing sheet corner.  Not a design origin
     VECTOR2I sheetpos;
     wxSize   sheetsize;
 
@@ -501,6 +526,9 @@ struct ABOARD6
     std::set<wxString>                 layerNames;
 
     std::vector<ALTIUM_VERTICE> board_vertices;
+
+    // Vertices the file placed outside the representable coordinate range
+    int discardedVertices = 0;
 
     explicit ABOARD6( ALTIUM_BINARY_PARSER& aReader );
 };
@@ -613,6 +641,9 @@ struct APOLYGON6
 
     std::vector<ALTIUM_VERTICE> vertices;
 
+    // Vertices the file placed outside the representable coordinate range
+    int discardedVertices = 0;
+
     explicit APOLYGON6( ALTIUM_BINARY_PARSER& aReader );
 };
 
@@ -621,6 +652,7 @@ struct ARULE6
 {
     wxString name;
     int      priority = 0;
+    bool     enabled = true;
 
     ALTIUM_RULE_KIND kind = ALTIUM_RULE_KIND::UNKNOWN;
 
@@ -708,6 +740,7 @@ struct AARC6
     uint16_t     polygon;
     uint16_t     subpolyindex;
     uint8_t      keepoutrestrictions;
+    uint32_t     unionindex = 0;
 
     VECTOR2I center;
     uint32_t radius;
@@ -872,12 +905,35 @@ struct ATRACK6
     uint16_t     polygon;
     uint16_t     subpolyindex;
     uint8_t      keepoutrestrictions;
+    uint32_t     unionindex = 0;
 
     VECTOR2I start;
     VECTOR2I end;
     uint32_t width;
 
     explicit ATRACK6( ALTIUM_BINARY_PARSER& aReader );
+};
+
+// Interactive length-tuning meander, stored in the SmartUnions stream and referenced by
+// copper primitives through their union index.  Altium commits the tuned copper as ordinary
+// tracks and arcs, keeping the parametric meander definition here.
+struct ASMARTUNION6
+{
+    int      unionindex = 0;
+    bool     is_tuning = false;
+    bool     is_diffpair = false;
+
+    int      style = 0;
+    int32_t  gap = 0;
+    int32_t  amplitude = 0;
+    int32_t  minamplitude = 0;
+    double   mitterradiusratio = 0.0;
+    bool     singleside = false;
+
+    std::vector<VECTOR2I> baseline;
+    std::vector<VECTOR2I> baselinecoupled;
+
+    explicit ASMARTUNION6( ALTIUM_BINARY_PARSER& aReader );
 };
 
 struct ATEXT6
@@ -996,6 +1052,15 @@ const ARULE6* selectAltiumPolygonRule( const std::vector<ARULE6>& aRulesByPriori
  */
 bool altiumViaSideIsTented( bool aTentFlag, bool aManual, bool aFromHole, uint32_t aHoleSize,
                             int32_t aMaskExpansion, int aLandDiameter );
+
+
+/**
+ * Convert an Altium slot's independent rotation and dimensions to KiCad's cardinal drill shape.
+ *
+ * KiCad cannot rotate a drill independently of its pad.  Non-cardinal slots therefore retain
+ * their source dimensions in a horizontal approximation and set @p aRotationSupported false.
+ */
+VECTOR2I altiumSlotDrillSize( uint32_t aHoleSize, uint32_t aSlotSize, double aSlotRotation, bool& aRotationSupported );
 
 
 #endif //ALTIUM_PARSER_PCB_H

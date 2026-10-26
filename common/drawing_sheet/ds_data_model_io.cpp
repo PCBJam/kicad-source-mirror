@@ -24,6 +24,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <memory>
+
 #include <build_version.h>
 #include <string_utils.h>
 #include <locale_io.h>
@@ -90,26 +92,17 @@ class DS_DATA_MODEL_FILEIO : public DS_DATA_MODEL_IO
 public:
     DS_DATA_MODEL_FILEIO( const wxString& aFilename ) :
             DS_DATA_MODEL_IO(),
-            m_fileout( nullptr )
+            m_fileout( std::make_unique<PRETTIFIED_FILE_OUTPUTFORMATTER>( aFilename ) )
     {
-        try
-        {
-            m_fileout = new PRETTIFIED_FILE_OUTPUTFORMATTER( aFilename );
-            m_out = m_fileout;
-        }
-        catch( const IO_ERROR& ioe )
-        {
-            wxMessageBox( ioe.What(), _( "Error writing drawing sheet file" ) );
-        }
+        m_out = m_fileout.get();
     }
 
-    ~DS_DATA_MODEL_FILEIO()
-    {
-        delete m_fileout;
-    }
+    ~DS_DATA_MODEL_FILEIO() = default;
+
+    void Finish() { m_fileout->Finish(); }
 
 private:
-    PRETTIFIED_FILE_OUTPUTFORMATTER* m_fileout;
+    std::unique_ptr<PRETTIFIED_FILE_OUTPUTFORMATTER> m_fileout;
 };
 
 
@@ -150,6 +143,7 @@ void DS_DATA_MODEL::Save( const wxString& aFullFileName )
 {
     DS_DATA_MODEL_FILEIO writer( aFullFileName );
     writer.Format( this );
+    writer.Finish();
 }
 
 
@@ -250,6 +244,7 @@ void DS_DATA_MODEL_IO::Format( DS_DATA_MODEL* aSheet ) const
 void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_TEXT* aItem ) const
 {
     m_out->Print( "(tbtext %s", m_out->Quotew( aItem->m_TextBase ).c_str() );
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
 
     formatCoordinate( getTokenName( T_pos ), aItem->m_Pos );
@@ -342,6 +337,7 @@ void DS_DATA_MODEL_IO::format( DS_DATA_MODEL* aModel, DS_DATA_ITEM* aItem ) cons
     else
         m_out->Print( "(line" );
 
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
 
     formatCoordinate( getTokenName( T_start ), aItem->m_Pos );
@@ -363,6 +359,7 @@ void DS_DATA_MODEL_IO::format( DS_DATA_MODEL* aModel, DS_DATA_ITEM* aItem ) cons
 void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_POLYGONS* aItem ) const
 {
     m_out->Print( "(polygon" );
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
     formatCoordinate( "pos", aItem->m_Pos );
     formatOptions( aItem );
@@ -409,6 +406,7 @@ void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_BITMAP* aItem ) const
         return;
 
     m_out->Print( "(bitmap" );
+    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
     formatCoordinate( "pos", aItem->m_Pos );
     formatOptions( aItem );

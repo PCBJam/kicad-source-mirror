@@ -54,6 +54,7 @@
 #include <gal/graphics_abstraction_layer.h>
 #include <footprint.h>
 #include <pad.h>
+#include <netinfo.h>
 #include <layer_pairs.h>
 #include <pcb_group.h>
 #include <pcb_layer_presentation.h>
@@ -76,6 +77,8 @@
 #include <connectivity/connectivity_data.h>
 #include <core/kicad_algo.h>
 #include <dialogs/hotkey_cycle_popup.h>
+#include <dialogs/dialog_map_layers.h>
+#include <pcb_io/common/plugin_common_layer_mapping.h>
 #include <kicad_clipboard.h>
 #include <origin_viewitem.h>
 #include <pcb_edit_frame.h>
@@ -1280,6 +1283,7 @@ int PCB_CONTROL::Paste( const TOOL_EVENT& aEvent )
                 case PCB_DIM_LEADER_T:
                 case PCB_DIM_ORTHOGONAL_T:
                 case PCB_DIM_RADIAL_T:
+                case PCB_POINT_T:
                     clipDrawItem->SetParent( editorFootprint );
                     pastedItems.push_back( clipDrawItem );
                     break;
@@ -1713,10 +1717,23 @@ int PCB_CONTROL::ApplyDesignBlockLayout( const TOOL_EVENT& aEvent )
                                           .m_includeLockedItems = true,
                                           .m_anchorFp = nullptr };
 
+        // Give the appended block's auto-generated nets a private namespace so they cannot fuse by
+        // name with a different part's net on the board, which would corrupt the topology match
+        // (issue 24767). Reverted with the temporary block, so the private nets are removed below.
+        std::vector<NETINFO_ITEM*> isolatedNets =
+                MULTICHANNEL_TOOL::IsolateDesignBlockAutoNets( brd, dbRA.m_components, dbRA.m_designBlockItems );
+
         wxString repeatErr;
         int      result = mct->RepeatLayout( aEvent, dbRA, destRA, options, &sharedCommit, &repeatErr );
 
         tempCommit.Revert();
+
+        for( NETINFO_ITEM* net : isolatedNets )
+        {
+            brd->Remove( net );
+            delete net;
+        }
+
         clearFlags();
         delete dbRA.m_zone;
         delete destRA.m_zone;
@@ -1967,12 +1984,12 @@ bool PCB_CONTROL::placeBoardItems( BOARD_COMMIT* aCommit, std::vector<BOARD_ITEM
     {
         if( aIsNew )
         {
-            const_cast<KIID&>( item->m_Uuid ) = KIID();
+            item->ResetUuid();
 
             item->RunOnChildren(
                     []( BOARD_ITEM* aChild )
                     {
-                        const_cast<KIID&>( aChild->m_Uuid ) = KIID();
+                        aChild->ResetUuid();
                     },
                     RECURSE_MODE::RECURSE );
 
@@ -1988,6 +2005,15 @@ bool PCB_CONTROL::placeBoardItems( BOARD_COMMIT* aCommit, std::vector<BOARD_ITEM
             }
 
             item->SetParent( board() );
+
+            // A pasted zone must not reuse a name already on the board (issue 23131)
+            if( item->Type() == PCB_ZONE_T )
+            {
+                ZONE* zone = static_cast<ZONE*>( item );
+
+                if( !zone->GetZoneName().IsEmpty() )
+                    zone->SetZoneName( board()->GetUniqueZoneName( zone->GetZoneName() ) );
+            }
         }
 
         // Update item attributes if needed
@@ -2129,6 +2155,16 @@ int PCB_CONTROL::AppendBoard( PCB_IO& pi, const wxString& fileName, DESIGN_BLOCK
                     return dlg.ShowModal() == wxID_OK;
                 } );
 
+        // Let the user remap the appended board's layers onto this board when they do not match
+        if( LAYER_MAPPABLE_PLUGIN* mappable = dynamic_cast<LAYER_MAPPABLE_PLUGIN*>( &pi ) )
+        {
+            mappable->RegisterCallback(
+                    [editFrame]( const std::vector<INPUT_LAYER_DESC>& aLayerDescs )
+                    {
+                        return DIALOG_MAP_LAYERS::RunModal( editFrame, aLayerDescs );
+                    } );
+        }
+
         WX_PROGRESS_REPORTER progressReporter( editFrame, _( "Load PCB" ), 1, PR_CAN_ABORT );
 
         pi.SetProgressReporter( &progressReporter );
@@ -2139,7 +2175,7 @@ int PCB_CONTROL::AppendBoard( PCB_IO& pi, const wxString& fileName, DESIGN_BLOCK
         DisplayErrorMessage( editFrame, _( "Error loading board." ), ioe.What() );
         clearSkipStructOnExistingItems();
 
-        return 0;
+        return 1;
     }
 
     newProperties = brd->GetProperties();
@@ -2189,6 +2225,14 @@ int PCB_CONTROL::AppendBoard( PCB_IO& pi, const wxString& fileName, DESIGN_BLOCK
     brd->SetEnabledLayers( enabledLayers );
     brd->SetVisibleLayers( enabledLayers );
     brd->GetDesignSettings().GetStackupDescriptor().SynchronizeWithBoard( &brd->GetDesignSettings() );
+
+    if( brd->GetCopperLayerCount() != initialCopperLayerCount )
+    {
+        editFrame->GetInfoBar()->ShowMessageFor(
+                wxString::Format( _( "Board changed from %d to %d copper layers, stackup updated." ),
+                                  initialCopperLayerCount, brd->GetCopperLayerCount() ),
+                6000, wxICON_INFORMATION );
+    }
 
     int ret = 0;
 
@@ -2929,25 +2973,33 @@ int PCB_CONTROL::FlipPcbView( const TOOL_EVENT& aEvent )
 }
 
 
-void PCB_CONTROL::rehatchBoardItem( BOARD_ITEM* aItem )
+void PCB_CONTROL::rehatchBoardItem( KIGFX::VIEW* aView, BOARD_ITEM* aItem )
 {
-    if( aItem->Type() == PCB_SHAPE_T )
-    {
-        static_cast<PCB_SHAPE*>( aItem )->UpdateHatching();
+    if( aItem->Type() != PCB_SHAPE_T )
+        return;
 
-        if( view() )
-            view()->Update( aItem );
-    }
+    PCB_SHAPE* shape = static_cast<PCB_SHAPE*>( aItem );
+
+    // Re-caching every non-hatched shape on each edit stalls commits on dense boards.
+    if( !shape->IsHatchedFill() )
+        return;
+
+    shape->UpdateHatching();
+
+    if( aView )
+        aView->Update( aItem );
 }
 
 
 int PCB_CONTROL::RehatchShapes( const TOOL_EVENT& aEvent )
 {
+    KIGFX::VIEW* view = this->view();
+
     for( FOOTPRINT* footprint : board()->Footprints() )
-        footprint->RunOnChildren( std::bind( &PCB_CONTROL::rehatchBoardItem, this, _1 ), NO_RECURSE );
+        footprint->RunOnChildren( std::bind( &PCB_CONTROL::rehatchBoardItem, view, _1 ), NO_RECURSE );
 
     for( BOARD_ITEM* item : board()->Drawings() )
-        rehatchBoardItem( item );
+        rehatchBoardItem( view, item );
 
     return 0;
 }

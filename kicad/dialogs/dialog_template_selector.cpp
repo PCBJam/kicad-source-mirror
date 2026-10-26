@@ -24,6 +24,7 @@
 
 #include "dialog_template_selector.h"
 #include <bitmaps.h>
+#include <kiplatform/environment.h>
 #include <kiplatform/ui.h>
 #include <pgm_base.h>
 #include <settings/kicad_settings.h>
@@ -121,7 +122,7 @@ TEMPLATE_WIDGET::TEMPLATE_WIDGET( wxWindow* aParent, DIALOG_TEMPLATE_SELECTOR* a
 {
     m_parent = aParent;
     m_dialog = aDialog;
-    m_isUserTemplate = false;
+    m_category = CATEGORY::SYSTEM;
 
     // Set a small minimum size to allow the dialog to shrink
     // The actual size will be determined by the parent sizer
@@ -293,7 +294,8 @@ void TEMPLATE_WIDGET::onRightClick( wxMouseEvent& event )
     }
 
     wxMenu menu;
-    menu.Append( wxID_EDIT, m_isUserTemplate ? _( "Edit Template" ) : _( "Open Template (Read-Only)" ) );
+    menu.Append( wxID_EDIT,
+                 m_category == CATEGORY::USER ? _( "Edit Template" ) : _( "Open Template (Read-Only)" ) );
     menu.Append( wxID_OPEN, _( "Open Template Folder" ) );
     menu.Append( wxID_COPY, _( "Duplicate Template" ) );
 
@@ -302,7 +304,7 @@ void TEMPLATE_WIDGET::onRightClick( wxMouseEvent& event )
                {
                    if( evt.GetId() == wxID_EDIT )
                        onEditTemplate( evt );
-                   if( evt.GetId() == wxID_OPEN )
+                   else if( evt.GetId() == wxID_OPEN )
                        onOpenFolder( evt );
                    else if( evt.GetId() == wxID_COPY )
                        onDuplicateTemplate( evt );
@@ -481,33 +483,45 @@ void TEMPLATE_WIDGET::onDuplicateTemplate( wxCommandEvent& event )
 DIALOG_TEMPLATE_SELECTOR::DIALOG_TEMPLATE_SELECTOR( wxWindow* aParent, const wxPoint& aPos,
                                                     const wxSize& aSize, const wxString& aUserTemplatesPath,
                                                     const wxString& aSystemTemplatesPath,
-                                                    const std::vector<wxString>& aRecentTemplates ) :
+                                                    const wxString& aDefaultTemplatesPath,
+                                                    const std::vector<wxString>& aRecentTemplates,
+                                                    const wxString& aBrowsedTemplatesPath ) :
         DIALOG_TEMPLATE_SELECTOR_BASE( aParent, wxID_ANY, _( "Project Template Selector" ), aPos, aSize ),
         m_state( DialogState::Initial ),
         m_selectedWidget( nullptr ),
         m_selectedTemplate( nullptr ),
         m_userTemplatesPath( aUserTemplatesPath ),
         m_systemTemplatesPath( aSystemTemplatesPath ),
+        m_defaultTemplatesPath( aDefaultTemplatesPath ),
+        m_browsedTemplatesPath( aBrowsedTemplatesPath ),
         m_recentTemplates( aRecentTemplates ),
         m_searchTimer( this ),
         m_refreshTimer( this ),
         m_watcher( nullptr ),
         m_webviewPanel( nullptr ),
-        m_loadingExternalHtml( false )
+        m_loadingExternalHtml( false ),
+        m_previewSashPos( 0 )
 {
+    // Validate the persisted browsed path: drop it silently if the directory
+    // no longer exists so the dialog never points at a stale location.
+    if( !m_browsedTemplatesPath.IsEmpty() && !wxDirExists( m_browsedTemplatesPath ) )
+        m_browsedTemplatesPath.clear();
     // The base class now provides the UI structure via wxFormBuilder.
     // Configure the scrolled windows.
     m_scrolledMRU->SetScrollRate( 0, 25 );
     m_scrolledTemplates->SetScrollRate( 0, 25 );
     m_scrolledTemplates->SetBackgroundColour( wxSystemSettings::GetColour( wxSYS_COLOUR_BTNFACE ) );
 
-    // Override minimum sizes to allow dialog shrinking (base class Fit() sets large sizes)
-    m_scrolledTemplates->SetMinSize( FromDIP( wxSize( 300, 300 ) ) );
-    m_panelTemplates->SetMinSize( FromDIP( wxSize( 500, 500 ) ) );
+    m_scrolledTemplates->SetMinSize( FromDIP( wxSize( 200, 200 ) ) );
 
     // Configure the search control
     m_searchCtrl->ShowSearchButton( true );
     m_searchCtrl->ShowCancelButton( true );
+
+    // The browsed-path label shrinks below its text width and ellipsizes, using the smaller
+    // info font; neither is expressible in the form so they are applied to the base widget here.
+    m_browsedPathLabel->SetFont( KIUI::GetInfoFont( this ) );
+    m_browsedPathLabel->SetMinSize( wxSize( 0, -1 ) );
 
     Bind( wxEVT_TIMER, &DIALOG_TEMPLATE_SELECTOR::OnSearchTimer, this, m_searchTimer.GetId() );
     Bind( wxEVT_TIMER, &DIALOG_TEMPLATE_SELECTOR::OnRefreshTimer, this, m_refreshTimer.GetId() );
@@ -532,6 +546,12 @@ DIALOG_TEMPLATE_SELECTOR::DIALOG_TEMPLATE_SELECTOR( wxWindow* aParent, const wxP
         m_filterChoice->SetSelection( 0 );
     }
 
+    // If the persisted browsed path was discarded (directory missing) avoid landing on the
+    // now-empty "Other Templates" filter.
+    if( m_browsedTemplatesPath.IsEmpty() && m_filterChoice->GetSelection() == 3 )
+        m_filterChoice->SetSelection( 0 );
+
+    updateBrowsedPathLabel();
     BuildMRUList();
     BuildTemplateList();
     SetupFileWatcher();
@@ -563,6 +583,24 @@ DIALOG_TEMPLATE_SELECTOR::~DIALOG_TEMPLATE_SELECTOR()
 }
 
 
+void DIALOG_TEMPLATE_SELECTOR::EnsurePreviewSplit()
+{
+    if( m_splitter->IsSplit() )
+        return;
+
+    int sashPos = m_previewSashPos;
+
+    // Fall back to a third of the available width the first time the preview is shown
+    if( sashPos <= 0 )
+    {
+        int width = m_splitter->GetClientSize().GetWidth();
+        sashPos = width > 0 ? width / 3 : FromDIP( 300 );
+    }
+
+    m_splitter->SplitVertically( m_panelTemplates, m_panelPreview, sashPos );
+}
+
+
 void DIALOG_TEMPLATE_SELECTOR::SetState( DialogState aState )
 {
     m_state = aState;
@@ -571,20 +609,27 @@ void DIALOG_TEMPLATE_SELECTOR::SetState( DialogState aState )
     {
     case DialogState::Initial:
         m_panelMRU->Show();
-        m_panelPreview->Hide();
         m_btnBack->Enable( false );
+
+        if( m_splitter->IsSplit() )
+        {
+            // Remember the sash so reselecting a template restores the user's layout
+            m_previewSashPos = m_splitter->GetSashPosition();
+            m_splitter->Unsplit( m_panelPreview );
+        }
+
         break;
 
     case DialogState::Preview:
         m_panelMRU->Hide();
-        m_panelPreview->Show();
         m_btnBack->Enable( true );
+        EnsurePreviewSplit();
         break;
 
     case DialogState::MRUWithPreview:
         m_panelMRU->Show();
-        m_panelPreview->Show();
         m_btnBack->Enable( true );
+        EnsurePreviewSplit();
         break;
     }
 
@@ -661,7 +706,7 @@ void DIALOG_TEMPLATE_SELECTOR::BuildTemplateList()
     m_templates.clear();
 
     auto scanDirectory =
-            [this]( const wxString& aPath, bool aIsUser )
+            [this]( const wxString& aPath, TEMPLATE_WIDGET::CATEGORY aCategory )
             {
                 if( aPath.IsEmpty() )
                     return;
@@ -671,7 +716,8 @@ void DIALOG_TEMPLATE_SELECTOR::BuildTemplateList()
                 if( !dir.Open( aPath ) )
                     return;
 
-                wxLogTrace( traceTemplateSelector, "Scanning directory: %s (user=%d)", aPath, aIsUser );
+                wxLogTrace( traceTemplateSelector, "Scanning directory: %s (category=%d)", aPath,
+                            static_cast<int>( aCategory ) );
 
                 if( dir.HasSubDirs( "meta" ) )
                 {
@@ -682,7 +728,7 @@ void DIALOG_TEMPLATE_SELECTOR::BuildTemplateList()
                     TEMPLATE_WIDGET* widget = new TEMPLATE_WIDGET( m_scrolledTemplates, this );
                     widget->SetTemplate( templ.get() );
                     widget->SetDescription( description );
-                    widget->SetIsUserTemplate( aIsUser );
+                    widget->SetCategory( aCategory );
 
                     m_templates.push_back( std::move( templ ) );
                     m_templateWidgets.push_back( widget );
@@ -713,7 +759,7 @@ void DIALOG_TEMPLATE_SELECTOR::BuildTemplateList()
                                     new TEMPLATE_WIDGET( m_scrolledTemplates, this );
                             widget->SetTemplate( templ.get() );
                             widget->SetDescription( description );
-                            widget->SetIsUserTemplate( aIsUser );
+                            widget->SetCategory( aCategory );
 
                             m_templates.push_back( std::move( templ ) );
                             m_templateWidgets.push_back( widget );
@@ -724,8 +770,16 @@ void DIALOG_TEMPLATE_SELECTOR::BuildTemplateList()
                 }
             };
 
-    scanDirectory( m_userTemplatesPath, true );
-    scanDirectory( m_systemTemplatesPath, false );
+    scanDirectory( m_userTemplatesPath, TEMPLATE_WIDGET::CATEGORY::USER );
+    scanDirectory( m_systemTemplatesPath, TEMPLATE_WIDGET::CATEGORY::SYSTEM );
+
+    if( !browsedPathIsDuplicate() )
+        scanDirectory( m_browsedTemplatesPath, TEMPLATE_WIDGET::CATEGORY::BROWSED );
+
+    // The built-in "default" template lives in the stable default user templates path.  It is
+    // always scanned so that the default remains available even when KICAD_USER_TEMPLATE_DIR
+    // points at a custom location.  Treated as a built-in, not a user template.
+    scanDirectory( m_defaultTemplatesPath, TEMPLATE_WIDGET::CATEGORY::SYSTEM );
 
     // Sort alphabetically with "Default" first
     std::sort( m_templateWidgets.begin(), m_templateWidgets.end(),
@@ -773,10 +827,14 @@ void DIALOG_TEMPLATE_SELECTOR::ApplyFilter()
     for( TEMPLATE_WIDGET* widget : m_templateWidgets )
     {
         bool matchesFilter = true;
+        TEMPLATE_WIDGET::CATEGORY cat = widget->GetCategory();
 
-        if( filterChoice == 1 && !widget->IsUserTemplate() )
+        // 0 = All, 1 = User, 2 = System, 3 = Browsed / Other
+        if( filterChoice == 1 && cat != TEMPLATE_WIDGET::CATEGORY::USER )
             matchesFilter = false;
-        else if( filterChoice == 2 && widget->IsUserTemplate() )
+        else if( filterChoice == 2 && cat != TEMPLATE_WIDGET::CATEGORY::SYSTEM )
+            matchesFilter = false;
+        else if( filterChoice == 3 && cat != TEMPLATE_WIDGET::CATEGORY::BROWSED )
             matchesFilter = false;
 
         bool matchesSearch = true;
@@ -1001,29 +1059,63 @@ void DIALOG_TEMPLATE_SELECTOR::SetupFileWatcher()
 
     wxLogNull logNo;
 
-    if( !m_userTemplatesPath.IsEmpty() )
-    {
-        wxFileName userDir;
-        userDir.AssignDir( m_userTemplatesPath );
+    auto watchDir =
+            [this]( const wxString& aPath, const char* aLabel )
+            {
+                if( aPath.IsEmpty() )
+                    return;
 
-        if( userDir.DirExists() )
-        {
-            m_watcher->Add( userDir );
-            wxLogTrace( traceTemplateSelector, "Watching user templates: %s", m_userTemplatesPath );
-        }
-    }
+                wxFileName dir;
+                dir.AssignDir( aPath );
 
-    if( !m_systemTemplatesPath.IsEmpty() )
-    {
-        wxFileName systemDir;
-        systemDir.AssignDir( m_systemTemplatesPath );
+                // wxMSW frees a watch before SMB completes its pending read, which then corrupts the heap
+                if( KIPLATFORM::ENV::IsNetworkPath( dir.GetPath() ) )
+                {
+                    wxLogTrace( traceTemplateSelector, "Network path, not watching %s templates: %s", aLabel,
+                                aPath );
+                    return;
+                }
 
-        if( systemDir.DirExists() )
-        {
-            m_watcher->Add( systemDir );
-            wxLogTrace( traceTemplateSelector, "Watching system templates: %s", m_systemTemplatesPath );
-        }
-    }
+                if( dir.DirExists() )
+                {
+                    m_watcher->Add( dir );
+                    wxLogTrace( traceTemplateSelector, "Watching %s templates: %s", aLabel, aPath );
+                }
+            };
+
+    watchDir( m_userTemplatesPath, "user" );
+    watchDir( m_systemTemplatesPath, "system" );
+    watchDir( m_defaultTemplatesPath, "default" );
+
+    if( !browsedPathIsDuplicate() )
+        watchDir( m_browsedTemplatesPath, "browsed" );
+}
+
+
+bool DIALOG_TEMPLATE_SELECTOR::browsedPathIsDuplicate() const
+{
+    if( m_browsedTemplatesPath.IsEmpty() )
+        return true;
+
+    auto sameDir =
+            []( const wxString& a, const wxString& b )
+            {
+                if( a.IsEmpty() || b.IsEmpty() )
+                    return false;
+
+                wxFileName lhs;
+                lhs.AssignDir( a );
+                lhs.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS );
+
+                wxFileName rhs;
+                rhs.AssignDir( b );
+                rhs.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS );
+
+                return lhs.SameAs( rhs );
+            };
+
+    return sameDir( m_browsedTemplatesPath, m_userTemplatesPath )
+           || sameDir( m_browsedTemplatesPath, m_systemTemplatesPath );
 }
 
 
@@ -1240,4 +1332,71 @@ wxString DIALOG_TEMPLATE_SELECTOR::ExtractDescription( const wxFileName& aHtmlFi
 PROJECT_TEMPLATE* DIALOG_TEMPLATE_SELECTOR::GetSelectedTemplate()
 {
     return m_selectedTemplate;
+}
+
+
+void DIALOG_TEMPLATE_SELECTOR::onBrowseClicked( wxCommandEvent& aEvent )
+{
+    wxString startPath = m_browsedTemplatesPath;
+
+    if( startPath.IsEmpty() )
+        startPath = m_userTemplatesPath;
+
+    wxDirDialog dirDialog( this, _( "Select Templates Directory" ), startPath,
+                           wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST );
+
+    if( dirDialog.ShowModal() != wxID_OK )
+        return;
+
+    wxFileName dirName = wxFileName::DirName( dirDialog.GetPath() );
+    dirName.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS );
+    m_browsedTemplatesPath = dirName.GetFullPath();
+
+    updateBrowsedPathLabel();
+
+    // Make sure the user can actually see the templates that just got pulled in by
+    // jumping to the Other Templates category whenever the filter is currently set
+    // to something that would hide them.
+    int filterChoice = m_filterChoice->GetSelection();
+
+    if( filterChoice != 0 && filterChoice != 3 )
+        m_filterChoice->SetSelection( 3 );
+
+    SetupFileWatcher();
+    RefreshTemplateList();
+}
+
+
+void DIALOG_TEMPLATE_SELECTOR::onClearBrowsedClicked( wxCommandEvent& aEvent )
+{
+    if( m_browsedTemplatesPath.IsEmpty() )
+        return;
+
+    m_browsedTemplatesPath.clear();
+    updateBrowsedPathLabel();
+
+    // If we were filtered to Other Templates, drop back to All so the list isn't empty.
+    if( m_filterChoice->GetSelection() == 3 )
+        m_filterChoice->SetSelection( 0 );
+
+    SetupFileWatcher();
+    RefreshTemplateList();
+}
+
+
+void DIALOG_TEMPLATE_SELECTOR::updateBrowsedPathLabel()
+{
+    if( !m_browsedPathLabel )
+        return;
+
+    if( m_browsedTemplatesPath.IsEmpty() )
+        m_browsedPathLabel->SetLabel( _( "(no other directory)" ) );
+    else
+        m_browsedPathLabel->SetLabel( m_browsedTemplatesPath );
+
+    if( m_clearBrowseButton )
+        m_clearBrowseButton->Enable( !m_browsedTemplatesPath.IsEmpty() );
+
+    if( wxSizer* parentSizer = m_browsedPathLabel->GetContainingSizer() )
+        parentSizer->Layout();
 }

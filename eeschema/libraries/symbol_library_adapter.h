@@ -23,12 +23,14 @@
 #define SYMBOL_LIBRARY_MANAGER_ADAPTER_H
 
 #include <future>
+#include <optional>
 #include <lib_id.h>
 #include <core/leak_at_exit.h>
 #include <libraries/library_manager.h>
 #include <sch_io/sch_io.h>
 
 class LIB_SYMBOL;
+class LIB_TREE_ITEM;
 class PROJECT;
 
 
@@ -63,6 +65,8 @@ public:
     /// Loads or reloads the given library, if it exists
     std::optional<LIB_STATUS> LoadOne( LIB_DATA* aLib ) override;
 
+    std::optional<LIB_STATUS> CheckLibrary( LIB_DATA* aLib ) override;
+
     /// Loads or reloads the given library, if it exists
     std::optional<LIB_STATUS> LoadOne( const wxString& aNickname );
 
@@ -75,7 +79,7 @@ public:
 
     bool SupportsConfigurationDialog( const wxString& aNickname ) const override;
 
-    void ShowConfigurationDialog( const wxString& aNickname, wxWindow* aParent ) const override;
+    int ShowConfigurationDialog( const wxString& aNickname, wxWindow* aParent ) const override;
 
     enum class SYMBOL_TYPE
     {
@@ -153,6 +157,37 @@ public:
     bool IsSymbolLibWritable( const wxString& aNickname );
 
     int GetModifyHash() const;
+
+    /**
+     * Return the modify hash of a single library if it is currently loaded.
+     *
+     * Unlike GetModifyHash(), which sums the hashes of every loaded library, this reports just the
+     * named library so callers can react to changes in a specific dependency without being disturbed
+     * by unrelated (for example asynchronously loading) libraries.
+     *
+     * @param aNickname is the library nickname in the symbol library table.
+     * @return the library's modify hash, or std::nullopt if it is not loaded.
+     */
+    std::optional<int> GetLibraryModifyHash( const wxString& aNickname ) const;
+
+#ifdef __EMSCRIPTEN__
+    /// pcbjam (libs 0028): chooser tree items from the library index, without parsing the
+    /// library. False = use GetSymbols(). Stubs are owned by aStorage; aItems may also hold
+    /// cache-owned symbols. Defined in sch_io/pcbjam_lib/pcbjam_symbol_index.cpp.
+    bool GetIndexedTreeItems( const wxString& aNickname, bool aPowerOnly, std::vector<LIB_TREE_ITEM*>& aItems,
+                              std::vector<std::unique_ptr<LIB_TREE_ITEM>>& aStorage );
+
+    /// pcbjam (libs 0028): fetch the index of every listed library in one crossing.
+    void PrefetchIndex( const std::vector<wxString>& aNicknames );
+
+    /// pcbjam (libs 0028): debug, compare a library's index items with its real symbols.
+    std::string CompareIndexedTreeItems( const wxString& aNickname );
+
+    /// pcbjam (libs 0028): one background warm-up step for one library: fetch one page of
+    /// its index rows (or, with aSymbolName, that symbol's body into the plugin's cache).
+    /// 0 = nothing left for it, 1 = more pages, 2 = not ready, ask later.
+    int WarmIndex( const wxString& aNickname, const wxString& aSymbolName = wxEmptyString );
+#endif
 
 protected:
     std::map<wxString, LIB_DATA>& globalLibs() override { return GlobalLibraries.Get(); }

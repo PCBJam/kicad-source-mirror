@@ -18,21 +18,25 @@
  */
 
 #include <api/api_enums.h>
-#include <import_export.h>
+#include <kicommon.h>
 #include <api/common/types/enums.pb.h>
+#include <api/common/types/embedded_files.pb.h>
 #include <api/board/board_types.pb.h>
+#include <api/board/board_commands.pb.h>
 #include <api/schematic/schematic_types.pb.h>
 
+#include <core/mirror.h>
 #include <core/typeinfo.h>
 #include <font/text_attributes.h>
 #include <layer_ids.h>
 #include <pin_type.h>
 #include <stroke_params.h>
+#include <embedded_files.h>
 
 using namespace kiapi;
 using namespace kiapi::common;
 
-template<>
+template<> KICOMMON_API
 KICAD_T FromProtoEnum( types::KiCadObjectType aValue )
 {
     switch( aValue )
@@ -55,6 +59,7 @@ KICAD_T FromProtoEnum( types::KiCadObjectType aValue )
     case types::KiCadObjectType::KOT_PCB_DIMENSION:         return PCB_DIMENSION_T;
     case types::KiCadObjectType::KOT_PCB_ZONE:              return PCB_ZONE_T;
     case types::KiCadObjectType::KOT_PCB_GROUP:             return PCB_GROUP_T;
+    case types::KiCadObjectType::KOT_PCB_POINT:             return PCB_POINT_T;
     case types::KiCadObjectType::KOT_SCH_GROUP:             return SCH_GROUP_T;
     case types::KiCadObjectType::KOT_SCH_MARKER:            return SCH_MARKER_T;
     case types::KiCadObjectType::KOT_SCH_JUNCTION:          return SCH_JUNCTION_T;
@@ -93,7 +98,7 @@ KICAD_T FromProtoEnum( types::KiCadObjectType aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 types::KiCadObjectType ToProtoEnum( KICAD_T aValue )
 {
     switch( aValue )
@@ -145,6 +150,7 @@ types::KiCadObjectType ToProtoEnum( KICAD_T aValue )
     case WSG_TEXT_T:             return types::KiCadObjectType::KOT_WSG_TEXT;
     case WSG_BITMAP_T:           return types::KiCadObjectType::KOT_WSG_BITMAP;
     case WSG_PAGE_T:             return types::KiCadObjectType::KOT_WSG_PAGE;
+    case PCB_POINT_T:            return types::KiCadObjectType::KOT_PCB_POINT;
     default:
         wxCHECK_MSG( false, types::KiCadObjectType::KOT_UNKNOWN,
                      "Unhandled case in ToProtoEnum<KICAD_T>");
@@ -152,7 +158,7 @@ types::KiCadObjectType ToProtoEnum( KICAD_T aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 PCB_LAYER_ID FromProtoEnum( board::types::BoardLayer aValue )
 {
     switch( aValue )
@@ -264,7 +270,7 @@ PCB_LAYER_ID FromProtoEnum( board::types::BoardLayer aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 board::types::BoardLayer ToProtoEnum( PCB_LAYER_ID aValue )
 {
     switch( aValue )
@@ -374,7 +380,7 @@ board::types::BoardLayer ToProtoEnum( PCB_LAYER_ID aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 SCH_LAYER_ID FromProtoEnum( schematic::types::SchematicLayer aValue )
 {
     switch( aValue )
@@ -387,7 +393,7 @@ SCH_LAYER_ID FromProtoEnum( schematic::types::SchematicLayer aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 schematic::types::SchematicLayer ToProtoEnum( SCH_LAYER_ID aValue )
 {
     switch( aValue )
@@ -400,7 +406,7 @@ schematic::types::SchematicLayer ToProtoEnum( SCH_LAYER_ID aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 GR_TEXT_H_ALIGN_T FromProtoEnum( types::HorizontalAlignment aValue )
 {
     switch( aValue )
@@ -418,7 +424,7 @@ GR_TEXT_H_ALIGN_T FromProtoEnum( types::HorizontalAlignment aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 types::HorizontalAlignment ToProtoEnum( GR_TEXT_H_ALIGN_T aValue )
 {
     switch( aValue )
@@ -434,7 +440,7 @@ types::HorizontalAlignment ToProtoEnum( GR_TEXT_H_ALIGN_T aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 GR_TEXT_V_ALIGN_T FromProtoEnum( types::VerticalAlignment aValue )
 {
     switch( aValue )
@@ -452,7 +458,7 @@ GR_TEXT_V_ALIGN_T FromProtoEnum( types::VerticalAlignment aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 types::VerticalAlignment ToProtoEnum( GR_TEXT_V_ALIGN_T aValue )
 {
     switch( aValue )
@@ -468,7 +474,7 @@ types::VerticalAlignment ToProtoEnum( GR_TEXT_V_ALIGN_T aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 LINE_STYLE FromProtoEnum( types::StrokeLineStyle aValue )
 {
     switch( aValue )
@@ -487,7 +493,7 @@ LINE_STYLE FromProtoEnum( types::StrokeLineStyle aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 types::StrokeLineStyle ToProtoEnum( LINE_STYLE aValue )
 {
     switch( aValue )
@@ -505,7 +511,7 @@ types::StrokeLineStyle ToProtoEnum( LINE_STYLE aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 ELECTRICAL_PINTYPE FromProtoEnum( types::ElectricalPinType aValue )
 {
     switch( aValue )
@@ -530,7 +536,7 @@ ELECTRICAL_PINTYPE FromProtoEnum( types::ElectricalPinType aValue )
 }
 
 
-template<>
+template<> KICOMMON_API
 types::ElectricalPinType ToProtoEnum( ELECTRICAL_PINTYPE aValue )
 {
     switch( aValue )
@@ -553,4 +559,65 @@ types::ElectricalPinType ToProtoEnum( ELECTRICAL_PINTYPE aValue )
         wxCHECK_MSG( false, types::ElectricalPinType::EPT_UNKNOWN,
                      "Unhandled case in ToProtoEnum<ELECTRICAL_PINTYPE>");
     }
+}
+
+
+template<> KICOMMON_API
+FLIP_DIRECTION FromProtoEnum( board::commands::BoardFlipDirection aValue )
+{
+    switch( aValue )
+    {
+    case board::commands::BoardFlipDirection::BFD_LEFT_RIGHT: return FLIP_DIRECTION::LEFT_RIGHT;
+
+    default:
+    case board::commands::BoardFlipDirection::BFD_UNKNOWN:
+    case board::commands::BoardFlipDirection::BFD_TOP_BOTTOM: return FLIP_DIRECTION::TOP_BOTTOM;
+    }
+}
+
+
+template<> KICOMMON_API
+board::commands::BoardFlipDirection ToProtoEnum( FLIP_DIRECTION aValue )
+{
+    switch( aValue )
+    {
+    case FLIP_DIRECTION::LEFT_RIGHT: return board::commands::BoardFlipDirection::BFD_LEFT_RIGHT;
+    case FLIP_DIRECTION::TOP_BOTTOM: return board::commands::BoardFlipDirection::BFD_TOP_BOTTOM;
+    }
+
+    wxCHECK_MSG( false, board::commands::BoardFlipDirection::BFD_UNKNOWN,
+                 "Unhandled case in ToProtoEnum<FLIP_DIRECTION>" );
+}
+
+
+template<> KICOMMON_API
+EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE FromProtoEnum( common::types::EmbeddedFileType aValue )
+{
+    switch( aValue )
+    {
+    case common::types::EFT_FONT:      return EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::FONT;
+    case common::types::EFT_MODEL:     return EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::MODEL;
+    case common::types::EFT_WORKSHEET: return EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::WORKSHEET;
+    case common::types::EFT_DATASHEET: return EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::DATASHEET;
+    default:
+    case common::types::EFT_UNKNOWN:
+    case common::types::EFT_OTHER:     return EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::OTHER;
+    }
+}
+
+
+template<> KICOMMON_API
+common::types::EmbeddedFileType ToProtoEnum( EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE aValue )
+{
+    switch( aValue )
+    {
+    case EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::FONT:      return common::types::EFT_FONT;
+    case EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::MODEL:     return common::types::EFT_MODEL;
+    case EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::WORKSHEET: return common::types::EFT_WORKSHEET;
+    case EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::DATASHEET: return common::types::EFT_DATASHEET;
+    case EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::OTHER:     return common::types::EFT_OTHER;
+    }
+
+    wxCHECK_MSG( false, common::types::EFT_UNKNOWN,
+                 "Unhandled case in ToProtoEnum<EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE>" );
 }

@@ -36,6 +36,7 @@
 #include <widgets/msgpanel.h>
 #include <memory>
 #include <mutex>
+#include <chrono>
 
 #include <gal/cursors.h>
 
@@ -161,6 +162,19 @@ public:
     void RequestRefresh();
 
     /**
+     * Resize the GAL to the current client size of this panel.
+     *
+     * This must be used in preference to calling GAL::ResizeScreen() directly: it holds the
+     * GL context lock while the compositor buffers are reallocated, clamps degenerate sizes
+     * and invalidates the view.
+     *
+     * @param aForce reallocates even when the client size is unchanged, which is required
+     *               after a display scale factor change because the buffers are sized in
+     *               native pixels rather than client units.
+     */
+    void ResizeGal( bool aForce = false );
+
+    /**
      * Set a dispatcher that processes events and forwards them to tools.
      *
      * #DRAW_PANEL_GAL does not take over the ownership. Passing NULL disconnects all event
@@ -282,12 +296,19 @@ protected:
 
     bool recoverFromGalError( const std::exception& aErr );
 
+    /// Trace why DoRePaint drew or skipped, only when the reason changes so a stuck canvas stands out
+    void tracePaintState( int aState );
+
+    /// Canvas pointer and owning window title, to tell canvases apart in traces
+    wxString traceName() const;
+
+
     wxWindow*                m_parent;           ///< Pointer to the parent window
     EDA_DRAW_FRAME*          m_edaFrame;         ///< Parent EDA_DRAW_FRAME (if available)
 
-    wxLongLong               m_lastRepaintStart; ///< Timestamp of the last repaint start
-    wxLongLong               m_lastRepaintEnd;   ///< Timestamp of the last repaint end
-    wxTimer                  m_refreshTimer;     ///< Timer to prevent too-frequent refreshing
+    std::chrono::steady_clock::time_point m_lastRepaintStart; ///< Timestamp of the last repaint start
+    std::chrono::steady_clock::time_point m_lastRepaintEnd;   ///< Timestamp of the last repaint end
+    wxTimer                               m_refreshTimer;     ///< Timer to prevent too-frequent refreshing
 
     std::mutex               m_refreshMutex;     ///< Blocks multiple calls to the draw
 
@@ -328,6 +349,19 @@ protected:
 
     /// Set after an OpenGL recovery attempt to prevent infinite retry loops
     bool                     m_glRecoveryAttempted;
+
+    /// Consecutive frames dropped because the GL context could not be made current
+    int                      m_contextBindFailures;
+
+    /// Set when a size change could not be applied because the GL context was unavailable
+    bool                     m_pendingResize;
+
+    /// Last paint state reported by tracePaintState() and how many times it has repeated
+    int                      m_tracedPaintState;
+    int                      m_tracedPaintRepeats;
+
+    /// Refresh timer retries while the GAL is not yet initialized
+    int                      m_enableRetries;
 
     /// Flag to indicate whether the panel should take focus at certain times (when moused over,
     /// and on various mouse/key events)

@@ -146,10 +146,16 @@ private:
     SCH_SHEET* findTargetSheet( const SCH_SELECTION& aSelection, const VECTOR2I& aCursorPos,
                                 bool aHasSheetPins, bool aIsGraphicsOnly, bool aCtrlDown );
 
+    ///< True when dropping the selection into aTargetSheet would make a sheet its own descendant
+    bool dropWouldRecurse( const SCH_SELECTION& aSelection, const SCH_SHEET* aTargetSheet );
+
     ///< Perform the actual move of items by delta, handling split moves and orthogonal dragging
     void performItemMove( SCH_SELECTION& aSelection, const VECTOR2I& aDelta,
                           SCH_COMMIT* aCommit, int& aXBendCount, int& aYBendCount,
                           const EE_GRID_HELPER& aGrid );
+
+    ///< Slide a group of dragged sheet pins along the sheet border so they keep their spacing.
+    void spreadMovingSheetPinGroups( const SCH_SELECTION& aSelection );
 
     ///< Handle tool action events during the move operation
     bool handleMoveToolActions( const TOOL_EVENT* aEvent, SCH_COMMIT* aCommit,
@@ -157,6 +163,13 @@ private:
 
     ///< Update stored positions after transformations (rotation, mirroring, etc.) during move
     void updateStoredPositions( const SCH_SELECTION& aSelection );
+
+    ///< Hide the junction dots that the pending edit will make redundant, noting the line end
+    ///< each one marks
+    void recordRedundantJunctions( SCH_SELECTION& aSelection );
+
+    ///< Move those junction dots to wherever the line end they marked has ended up
+    void migrateHiddenJunctions( SCH_COMMIT* aCommit );
 
     ///< Finalize the move operation, updating junctions and cleaning up
     void finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT* aCommit, bool aUnselect,
@@ -179,7 +192,14 @@ private:
     ///< Lines changed by drag algorithm that weren't selected
     std::unordered_set<SCH_LINE*>       m_changedDragLines;
     ///< Junctions that were hidden during the move
-    std::vector<SCH_JUNCTION*>           m_hiddenJunctions;
+    struct HIDDEN_JUNCTION
+    {
+        SCH_JUNCTION* m_junction;
+        KIID          m_lineId;
+        bool          m_atLineStart;
+    };
+
+    std::vector<HIDDEN_JUNCTION> m_hiddenJunctions;
 
     VECTOR2I              m_moveOffset;
 
@@ -197,6 +217,9 @@ private:
     // A map of sheet pins to the line-endings (true == start) they're connected to.  Sheet
     // pins are constrained in their movement so their attached lines must be too.
     std::map<SCH_SHEET_PIN*, std::pair<SCH_LINE*, bool>> m_specialCaseSheetPins;
+
+    // Each dragged sheet pin's distance along its sheet border at drag start.
+    std::map<SCH_SHEET_PIN*, long long> m_sheetPinDragArc;
 };
 
 #endif //KICAD_SCH_MOVE_TOOL_H

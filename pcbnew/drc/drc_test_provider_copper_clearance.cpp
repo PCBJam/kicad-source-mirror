@@ -281,17 +281,21 @@ bool DRC_TEST_PROVIDER_COPPER_CLEARANCE::testSingleLayerItemAgainstItem( BOARD_I
 
         if( itemShape->Collide( otherShape, sub_e( clearance ), &actual, &pos ) )
         {
-            if( itemNet && m_drcEngine->IsNetTieExclusion( itemNet->GetNetCode(), layer, pos, other ) )
+            if( ( itemNet && m_drcEngine->IsNetTieExclusion( itemNet->GetNetCode(), layer, pos, other ) )
+                || ( otherNet && m_drcEngine->IsNetTieExclusion( otherNet->GetNetCode(), layer, pos, item ) ) )
             {
-                // Collision occurred as track was entering a pad marked as a net-tie.  We
-                // allow these.
+                // Collision occurred as a copper item entered a pad marked as a net-tie.  We allow
+                // these regardless of which side DRC happened to test first.
             }
             else if( actual == 0 && otherNet && testShorting )
             {
+                int itemNetCode = itemNet ? itemNet->GetNetCode() : 0;
+                int otherNetCode = otherNet ? otherNet->GetNetCode() : 0;
+
                 std::shared_ptr<DRC_ITEM> drcItem = DRC_ITEM::Create( DRCE_SHORTING_ITEMS );
                 drcItem->SetErrorDetail( wxString::Format( _( "(nets %s and %s)" ),
-                                                           itemNet ? itemNet->GetNetname() : _( "<no net>" ),
-                                                           otherNet ? otherNet->GetNetname() : _( "<no net>" ) ) );
+                                                           itemNetCode ? itemNet->GetNetname() : _( "<no net>" ),
+                                                           otherNetCode ? otherNet->GetNetname() : _( "<no net>" ) ) );
                 drcItem->SetItems( item, other );
                 reportTwoPointGeometry( drcItem, pos, pos, pos, layer );
                 has_error = true;
@@ -579,10 +583,14 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testKnockoutTextAgainstZone( BOARD_ITEM
 
             if( testShorts && actual == 0 && *aInheritedNet )
             {
+                int             inheritedNetCode = ( *aInheritedNet )->GetNetCode();
+                const wxString& inheritedNetname = ( *aInheritedNet )->GetNetname();
+                int             zoneNetCode = aZone->GetNetCode();
+
                 drcItem = DRC_ITEM::Create( DRCE_SHORTING_ITEMS );
                 drcItem->SetErrorDetail( wxString::Format( _( "(nets %s and %s)" ),
-                                                           ( *aInheritedNet )->GetNetname(),
-                                                           aZone->GetNetname() ) );
+                                                           inheritedNetCode ? inheritedNetname : _( "<no net>" ),
+                                                           zoneNetCode ? aZone->GetNetname() : _( "<no net>" ) ) );
             }
             else
             {
@@ -632,14 +640,13 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testTrackClearances()
                                     return false;
                                 }
 
-                                // For track-vs-track pairs, use pointer ordering to ensure each
-                                // pair is tested exactly once across all threads, eliminating the
-                                // need for a shared checkedPairs mutex.
+                                // Dedup on UUID, not heap address, so that exclusion checking
+                                // against previously-generated violations will work
                                 KICAD_T otherType = other->Type();
 
                                 if( ( otherType == PCB_TRACE_T || otherType == PCB_ARC_T
                                             || otherType == PCB_VIA_T )
-                                        && static_cast<void*>( track ) > static_cast<void*>( other ) )
+                                        && track->m_Uuid > other->m_Uuid )
                                 {
                                     return false;
                                 }
@@ -820,8 +827,9 @@ bool DRC_TEST_PROVIDER_COPPER_CLEARANCE::testPadAgainstItem( PAD* pad, SHAPE* pa
 
             std::shared_ptr<DRC_ITEM> drcItem = DRC_ITEM::Create( DRCE_SHORTING_ITEMS );
             drcItem->SetErrorDetail( wxString::Format( _( "(nets %s and %s)" ),
-                                                       pad->GetNetname(),
-                                                       otherPad->GetNetname() ) );
+                                                       padNet ? pad->GetNetname() : _( "<no net>" ),
+                                                       otherNet ? otherPad->GetNetname() : _( "<no net>" ) ) );
+
             drcItem->SetItems( pad, otherPad );
             reportViolation( drcItem, otherPad->GetPosition(), aLayer );
             has_error = true;
@@ -848,8 +856,8 @@ bool DRC_TEST_PROVIDER_COPPER_CLEARANCE::testPadAgainstItem( PAD* pad, SHAPE* pa
                 {
                     std::shared_ptr<DRC_ITEM> drcItem = DRC_ITEM::Create( DRCE_SHORTING_ITEMS );
                     drcItem->SetErrorDetail( wxString::Format( _( "(nets %s and %s)" ),
-                                                               pad->GetNetname(),
-                                                               otherCItem->GetNetname() ) );
+                                                               padNet ? pad->GetNetname() : _( "<no net>" ),
+                                                               otherNet ? otherPad->GetNetname() : _( "<no net>" ) ) );
                     drcItem->SetItems( pad, other );
                     reportTwoPointGeometry( drcItem, pos, pos, pos, aLayer );
                     has_error = true;
@@ -906,7 +914,7 @@ bool DRC_TEST_PROVIDER_COPPER_CLEARANCE::testPadAgainstItem( PAD* pad, SHAPE* pa
             doTestHole( pad, padShape, otherPad, otherPad->GetEffectiveHoleShape().get(), clearance );
     }
 
-    // Pad pairs are deduplicated by pointer order in testPadClearances.
+    // Pad pairs are deduplicated by UUID order in testPadClearances.
     // Run the swapped direction so we don't miss any violations.
     if( testHoles && pad->HasHole() && otherPad && otherPad->FlashLayer( aLayer ) )
     {
@@ -956,11 +964,9 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testPadClearances( )
                                 // Filter:
                                 [&]( BOARD_ITEM* other ) -> bool
                                 {
-                                    // For pad-vs-pad pairs, use pointer ordering to ensure
-                                    // each pair is tested only once across all threads.
-                                    if( other->Type() == PCB_PAD_T
-                                            && static_cast<void*>( pad )
-                                                       > static_cast<void*>( other ) )
+                                    // Dedup on UUID, not heap address, so that exclusion
+                                    // checking against previously-generated violations will work
+                                    if( other->Type() == PCB_PAD_T && pad->m_Uuid > other->m_Uuid )
                                     {
                                         return false;
                                     }
@@ -1007,20 +1013,21 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testGraphicClearances()
     std::atomic<size_t> done( 1 );
 
     for( FOOTPRINT* footprint : m_board->Footprints() )
-        count += footprint->GraphicalItems().size();
+        count += footprint->GraphicalItems().size() + footprint->GetFields().size();
 
     REPORT_AUX( wxString::Format( wxT( "Testing %d graphics..." ), count ) );
 
     auto isKnockoutText =
             []( BOARD_ITEM* item )
             {
-                return item->Type() == PCB_TEXT_T && static_cast<PCB_TEXT*>( item )->IsKnockout();
+                return ( item->Type() == PCB_TEXT_T || item->Type() == PCB_FIELD_T )
+                        && static_cast<PCB_TEXT*>( item )->IsKnockout();
             };
 
     auto testGraphicAgainstZone =
             [this, isKnockoutText]( BOARD_ITEM* item )
             {
-                if( item->Type() == PCB_REFERENCE_IMAGE_T )
+                if( item->Type() == PCB_REFERENCE_IMAGE_T || isInvisibleText( item ) )
                     return;
 
                 if( !IsCopperLayer( item->GetLayer() ) )
@@ -1079,12 +1086,12 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testGraphicClearances()
                             if( graphicNet && graphicNet == otherNet )
                                 return false;
 
-                            // For graphic-graphic pairs, use pointer ordering for dedup
+                            // Dedup on UUID, not heap address, so that exclusion checking
+                            // against previously-generated violations will work
                             if( ( other->Type() == PCB_SHAPE_T
                                         || other->Type() == PCB_TEXTBOX_T
                                         || other->Type() == PCB_BARCODE_T )
-                                    && static_cast<void*>( graphic )
-                                               > static_cast<void*>( other ) )
+                                    && graphic->m_Uuid > other->m_Uuid )
                             {
                                 return false;
                             }
@@ -1102,32 +1109,18 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testGraphicClearances()
                         m_board->m_DRCMaxClearance );
             };
 
-    for( BOARD_ITEM* item : m_board->Drawings() )
+    BS::multi_future<void> graphic_futures;
+
+    // Reserving up front keeps push_back() from discarding a future whose task is already queued
+    // and still holds done by reference.  submit_task() can throw, hence the drain below.
+    graphic_futures.reserve( m_board->Drawings().size() + m_board->Footprints().size() );
+
+    try
     {
-        (void)tp.submit_task(
-                [this, item, &done, testGraphicAgainstZone, testCopperGraphic]()
-                {
-                    if( !m_drcEngine->IsCancelled() )
-                    {
-                        testGraphicAgainstZone( item );
-
-                        if( ( item->Type() == PCB_SHAPE_T || item->Type() == PCB_BARCODE_T )
-                                && item->IsOnCopperLayer() )
-                        {
-                            testCopperGraphic( static_cast<PCB_SHAPE*>( item ) );
-                        }
-
-                        done.fetch_add( 1 );
-                    }
-                } );
-    }
-
-    for( FOOTPRINT* footprint : m_board->Footprints() )
-    {
-        (void)tp.submit_task(
-                [this, footprint, &done, testGraphicAgainstZone, testCopperGraphic]()
-                {
-                    for( BOARD_ITEM* item : footprint->GraphicalItems() )
+        for( BOARD_ITEM* item : m_board->Drawings() )
+        {
+            graphic_futures.push_back( tp.submit_task(
+                    [this, item, &done, testGraphicAgainstZone, testCopperGraphic]()
                     {
                         if( !m_drcEngine->IsCancelled() )
                         {
@@ -1141,19 +1134,57 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testGraphicClearances()
 
                             done.fetch_add( 1 );
                         }
-                    }
-                } );
+                    } ) );
+        }
+
+        for( FOOTPRINT* footprint : m_board->Footprints() )
+        {
+            graphic_futures.push_back( tp.submit_task(
+                    [this, footprint, &done, testGraphicAgainstZone, testCopperGraphic]()
+                    {
+                        for( BOARD_ITEM* item : footprint->GraphicalItems() )
+                        {
+                            if( !m_drcEngine->IsCancelled() )
+                            {
+                                testGraphicAgainstZone( item );
+
+                                if( ( item->Type() == PCB_SHAPE_T || item->Type() == PCB_BARCODE_T )
+                                        && item->IsOnCopperLayer() )
+                                {
+                                    testCopperGraphic( static_cast<PCB_SHAPE*>( item ) );
+                                }
+
+                                done.fetch_add( 1 );
+                            }
+                        }
+
+                        // Fields (reference, value, etc.) live in their own list but render as real
+                        // copper when placed on a copper layer, so they must be tested too.
+                        for( PCB_FIELD* field : footprint->GetFields() )
+                        {
+                            if( !m_drcEngine->IsCancelled() )
+                            {
+                                testGraphicAgainstZone( field );
+                                done.fetch_add( 1 );
+                            }
+                        }
+                    } ) );
+        }
+    }
+    catch( ... )
+    {
+        graphic_futures.wait();
+        throw;
     }
 
-    while( true )
+    // Wait on our own futures, not the pool; the tasks hold done by reference until they return.
+    // reportProgress() pumps the dialog and latches a Cancel click, so run it even when ready.
+    for( std::future<void>& future : graphic_futures )
     {
-        reportProgress( done, count );
-
-        if( m_drcEngine->IsCancelled() )
-            break;
-
-        if( tp.wait_for( std::chrono::milliseconds( 250 ) ) )
-            break;
+        do
+        {
+            reportProgress( done, count );
+        } while( future.wait_for( std::chrono::milliseconds( 250 ) ) != std::future_status::ready );
     }
 }
 
@@ -1203,9 +1234,20 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
     std::vector<std::map<PCB_LAYER_ID, std::vector<SEG>>> poly_segments;
     poly_segments.resize( m_board->m_DRCCopperZones.size() );
 
-    thread_pool&        tp = GetKiCadThreadPool();
-    std::atomic<size_t> done( 0 );
-    size_t              count = 0;
+    thread_pool&           tp = GetKiCadThreadPool();
+    std::atomic<size_t>    done( 0 );
+    size_t                 count = 0;
+    BS::multi_future<void> zone_futures;
+
+    struct ZONE_PAIR
+    {
+        size_t       m_a;
+        size_t       m_b;
+        bool         m_sameNet;
+        PCB_LAYER_ID m_layer;
+    };
+
+    std::vector<ZONE_PAIR> jobs;
 
     auto reportZoneZoneViolation =
             [this]( ZONE* zoneA, ZONE* zoneB, VECTOR2I& pt, int actual, const DRC_CONSTRAINT& constraint,
@@ -1237,6 +1279,9 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
             [this, testClearance, testIntersects, reportZoneZoneViolation, &poly_segments, &done]
             ( int zoneA_idx, int zoneB_idx, bool sameNet, PCB_LAYER_ID layer ) -> void
             {
+                if( m_drcEngine->IsCancelled() )
+                    return;
+
                 ZONE*    zoneA = m_board->m_DRCCopperZones[zoneA_idx];
                 ZONE*    zoneB = m_board->m_DRCCopperZones[zoneB_idx];
                 int      actual = 0;
@@ -1266,6 +1311,10 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
                         // Iterate through all the segments in zoneA
                         for( SEG& refSegment : refSegments )
                         {
+                            // A single zone pair can be a long scan on a dense board.
+                            if( m_drcEngine->IsCancelled() )
+                                return;
+
                             // Iterate through all the segments in zoneB
                             for( SEG& testSegment : testSegments )
                             {
@@ -1395,25 +1444,42 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
                         || !polyA->BBoxFromCaches().Intersects( polyB->BBoxFromCaches() ) )
                     continue;
 
-                count++;
-                (void)tp.submit_task(
-                        [checkZones, ia, ia2, sameNet, layer]()
-                        {
-                            checkZones( ia, ia2, sameNet, layer );
-                        } );
+                jobs.push_back( { ia, ia2, sameNet, layer } );
             }
         }
     }
 
-    while( true )
+    count = jobs.size();
+
+    // Reserving up front keeps push_back() from discarding a future whose task is already queued
+    // and still holds done and poly_segments.  submit_task() can throw, hence the drain below.
+    zone_futures.reserve( count );
+
+    try
     {
-        reportProgress( done, count );
+        for( const ZONE_PAIR& job : jobs )
+        {
+            zone_futures.push_back( tp.submit_task(
+                    [checkZones, job]()
+                    {
+                        checkZones( job.m_a, job.m_b, job.m_sameNet, job.m_layer );
+                    } ) );
+        }
+    }
+    catch( ... )
+    {
+        zone_futures.wait();
+        throw;
+    }
 
-        if( m_drcEngine->IsCancelled() )
-            break;
-
-        if( tp.wait_for( std::chrono::milliseconds( 250 ) ) )
-            break;
+    // Wait on our own futures, not the pool; checkZones holds done and poly_segments by reference.
+    // reportProgress() pumps the dialog and latches a Cancel click, so run it even when ready.
+    for( std::future<void>& future : zone_futures )
+    {
+        do
+        {
+            reportProgress( done, count );
+        } while( future.wait_for( std::chrono::milliseconds( 250 ) ) != std::future_status::ready );
     }
 }
 

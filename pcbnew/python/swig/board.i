@@ -79,6 +79,14 @@ HANDLE_EXCEPTIONS(BOARD::TracksInNetBetweenPoints)
 %ignore BOARD::m_IntersectsBCourtyardCache;
 %ignore BOARD::m_IntersectsAreaCache;
 %ignore BOARD::m_EnclosedByAreaCache;
+%ignore BOARD::m_IntersectsCourtyardResultCache;
+%ignore BOARD::m_IntersectsFCourtyardResultCache;
+%ignore BOARD::m_IntersectsBCourtyardResultCache;
+%ignore BOARD::m_IntersectsAreaResultCache;
+%ignore BOARD::m_EnclosedByAreaResultCache;
+%ignore BOARD::m_ItemFieldCache;
+%ignore BOARD::GetFootprintCourtyardIndex;
+%ignore BOARD::m_footprintCourtyardIndex;
 %ignore BOARD::m_LayerExpressionCache;
 %ignore BOARD::m_CopperZoneRTreeCache;
 %ignore BOARD::m_CopperItemRTreeCache;
@@ -103,7 +111,7 @@ HANDLE_EXCEPTIONS(BOARD::TracksInNetBetweenPoints)
             it = self.iterator()
             try:
                 while True:
-                    item = it.next()  # throws StopIteration when iterator reached the end.
+                    item = next(it)  # throws StopIteration when iterator reached the end.
                     yield item.Cast()
             except StopIteration:
                 return
@@ -117,7 +125,7 @@ HANDLE_EXCEPTIONS(BOARD::TracksInNetBetweenPoints)
             it = self.iterator()
             try:
                 while True:
-                    item = it.next()  # throws StopIteration when iterator reached the end.
+                    item = next(it)  # throws StopIteration when iterator reached the end.
                     yield item.Cast()
             except StopIteration:
                 return

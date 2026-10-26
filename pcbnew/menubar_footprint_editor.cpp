@@ -50,7 +50,10 @@ void FOOTPRINT_EDIT_FRAME::doReCreateMenuBar()
     fileMenu->Add( ACTIONS::newLibrary );
     fileMenu->Add( ACTIONS::addLibrary );
     fileMenu->Add( PCB_ACTIONS::newFootprint );
+#ifndef __EMSCRIPTEN__
+    // No footprint wizards in the wasm build (they are Python; libs 0020 P15).
     fileMenu->Add( PCB_ACTIONS::createFootprint );
+#endif
     fileMenu->Add( PCB_ACTIONS::editLibFpInFpEditor );
 
     fileMenu->AppendSeparator();

@@ -161,6 +161,8 @@ GERBVIEW_FRAME::GERBVIEW_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_auimgr.SetManagedWindow( this );
 
+    CreateInfoBar();
+
     m_auimgr.AddPane( m_tbTopMain, EDA_PANE().HToolbar().Name( "TopMainToolbar" ).Top().Layer( 6 ) );
     m_auimgr.AddPane( m_tbTopAux, EDA_PANE().HToolbar().Name( "TopAuxToolbar" ).Top().Layer(4) );
     m_auimgr.AddPane( m_messagePanel, EDA_PANE().Messages().Name( "MsgPanel" ).Bottom().Layer( 6 ) );
@@ -545,8 +547,13 @@ void GERBVIEW_FRAME::RemapLayers( const std::unordered_map<int, int>& remapping 
 
     for( const std::pair<const int, int>& entry : remapping )
     {
-        view_remapping[ GERBER_DRAW_LAYER( entry.first ) ] = GERBER_DRAW_LAYER( entry.second );
-        view_remapping[ GERBER_DCODE_LAYER( entry.first ) ] = GERBER_DCODE_LAYER( entry.second );
+        // GERBER_DCODE_LAYER() takes a draw layer id, not a graphic layer index, the same way
+        // GERBER_DRAW_ITEM::ViewGetLayers() builds it
+        int from = GERBER_DRAW_LAYER( entry.first );
+        int to = GERBER_DRAW_LAYER( entry.second );
+
+        view_remapping[from] = to;
+        view_remapping[GERBER_DCODE_LAYER( from )] = GERBER_DCODE_LAYER( to );
     }
 
     GetCanvas()->GetView()->ReorderLayerData( view_remapping );
@@ -1067,9 +1074,14 @@ void GERBVIEW_FRAME::ActivateGalCanvas()
 
         m_spaceMouse->SetCanvas( galCanvas );
     }
-    catch( const std::system_error& e )
+    catch( const std::exception& e )
     {
-        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), e.what() );
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), wxS( "%s" ), e.what() );
+    }
+    catch( ... )
+    {
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ),
+                    wxT( "Unknown exception during SpaceMouse initialization" ) );
     }
 }
 

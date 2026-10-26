@@ -45,6 +45,16 @@ void TEXT_CTRL_EVAL::SetValue( const wxString& aValue )
 }
 
 
+void TEXT_CTRL_EVAL::DoSetValue( const wxString& aValue, int aFlags )
+{
+    // ChangeValue() bypasses SetValue(): a dialog that refills the control (the 3D
+    // model panel when another model is selected) would otherwise get the old
+    // model's text back from onTextFocusGet.
+    m_eval.Clear();
+    wxTextCtrl::DoSetValue( aValue, aFlags );
+}
+
+
 void TEXT_CTRL_EVAL::onTextFocusGet( wxFocusEvent& aEvent )
 {
     wxString oldStr = m_eval.OriginalText();

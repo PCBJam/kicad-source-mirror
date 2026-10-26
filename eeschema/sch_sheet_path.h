@@ -94,6 +94,10 @@ public:
 
     void InitializeAttributes( const SCH_SYMBOL& aSymbol );
 
+    /// Return true if the variant carries any differential against the base symbol values,
+    /// a variant without differentials resolves identically to no variant at all.
+    bool HasDifferentials( const SCH_SYMBOL& aSymbol ) const;
+
     virtual ~SCH_SYMBOL_VARIANT() = default;
 };
 
@@ -148,6 +152,9 @@ public:
     virtual ~SCH_SHEET_VARIANT() = default;
 
     void InitializeAttributes( const SCH_SHEET& aSheet );
+
+    /// Return true if the variant carries any differential against the base sheet values.
+    bool HasDifferentials( const SCH_SHEET& aSheet ) const;
 };
 
 
@@ -279,7 +286,12 @@ public:
 
     std::vector<SCH_SHEET*>::iterator erase( std::vector<SCH_SHEET*>::const_iterator aPosition )
     {
-        return m_sheets.erase( aPosition );
+        std::vector<SCH_SHEET*>::iterator ret = m_sheets.erase( aPosition );
+
+        // Rehash to keep m_current_hash and the cached path consistent with the shortened list.
+        Rehash();
+
+        return ret;
     }
 
     void Rehash();
@@ -539,6 +551,8 @@ protected:
 
     size_t                  m_current_hash;
     mutable wxString        m_cached_page_number;
+    mutable bool            m_cached_path_valid = false;
+    mutable KIID_PATH       m_cached_path;
 
     int m_virtualPageNumber;           ///< Page numbers are maintained by the sheet load order.
 
@@ -798,6 +812,23 @@ public:
      * the implementation of user definable sheet page numbers.
      */
     void SetInitialPageNumbers();
+
+    /**
+     * @return the next available page number in this hierarchy
+     */
+    wxString GetNextPageNumber() const;
+
+    /**
+     * Assign valid page numbers to sheet paths whose stored page number is missing or collides
+     * with an earlier sheet.
+     *
+     * Existing, unique numeric page numbers and any non-numeric page numbers are preserved so
+     * user-chosen numbering is respected.  Blank sheets and the second and subsequent sheets
+     * sharing a number are reassigned to the next unused positive integer.
+     *
+     * @return true if any page number was changed.
+     */
+    bool RepairPageNumbers();
 
     /**
      * Attempt to add new symbol instances for all symbols in this list of sheet paths prefixed

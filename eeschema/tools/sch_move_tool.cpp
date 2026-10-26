@@ -28,6 +28,7 @@
 #include <optional>
 #include <set>
 #include <wx/log.h>
+#include <wx/utils.h>
 #include <trigo.h>
 #include <gal/graphics_abstraction_layer.h>
 #include <tool/tool_manager.h>
@@ -36,6 +37,7 @@
 #include <tools/sch_selection_tool.h>
 #include <tools/sch_line_wire_bus_tool.h>
 #include <tools/sch_move_tool.h>
+#include <tools/pcbjam_sch_remote_lock.h> // pcbjam: remote soft-locks
 
 #include <sch_actions.h>
 #include <sch_commit.h>
@@ -79,6 +81,70 @@ static bool isGraphicItemForDrop( const SCH_ITEM* aItem )
         return static_cast<const SCH_LINE*>( aItem )->IsGraphicLine();
     default:
         return false;
+    }
+}
+
+
+// Distance of a point along a sheet border, clockwise from the top-left corner.
+static long long sheetBorderArc( const SCH_SHEET* aSheet, SHEET_SIDE aSide, const VECTOR2I& aPos )
+{
+    long long left = aSheet->GetPosition().x;
+    long long top = aSheet->GetPosition().y;
+    long long w = aSheet->GetSize().x;
+    long long h = aSheet->GetSize().y;
+    long long right = left + w;
+    long long bot = top + h;
+
+    switch( aSide )
+    {
+    case SHEET_SIDE::TOP: return aPos.x - left;
+    case SHEET_SIDE::RIGHT: return w + ( aPos.y - top );
+    case SHEET_SIDE::BOTTOM: return w + h + ( right - aPos.x );
+    case SHEET_SIDE::LEFT: return 2 * w + h + ( bot - aPos.y );
+    default: return 0;
+    }
+}
+
+
+// Inverse of sheetBorderArc(), turns a border distance back into a point and edge.
+static void sheetBorderPos( const SCH_SHEET* aSheet, long long aArc, VECTOR2I& aPos, SHEET_SIDE& aSide )
+{
+    long long left = aSheet->GetPosition().x;
+    long long top = aSheet->GetPosition().y;
+    long long w = aSheet->GetSize().x;
+    long long h = aSheet->GetSize().y;
+    long long right = left + w;
+    long long bot = top + h;
+    long long perimeter = 2 * ( w + h );
+
+    if( perimeter <= 0 )
+    {
+        aPos = VECTOR2I( (int) left, (int) top );
+        aSide = SHEET_SIDE::TOP;
+        return;
+    }
+
+    aArc = ( ( aArc % perimeter ) + perimeter ) % perimeter;
+
+    if( aArc <= w )
+    {
+        aSide = SHEET_SIDE::TOP;
+        aPos = VECTOR2I( (int) ( left + aArc ), (int) top );
+    }
+    else if( aArc <= w + h )
+    {
+        aSide = SHEET_SIDE::RIGHT;
+        aPos = VECTOR2I( (int) right, (int) ( top + ( aArc - w ) ) );
+    }
+    else if( aArc <= 2 * w + h )
+    {
+        aSide = SHEET_SIDE::BOTTOM;
+        aPos = VECTOR2I( (int) ( right - ( aArc - w - h ) ), (int) bot );
+    }
+    else
+    {
+        aSide = SHEET_SIDE::LEFT;
+        aPos = VECTOR2I( (int) left, (int) ( bot - ( aArc - 2 * w - h ) ) );
     }
 }
 
@@ -170,6 +236,7 @@ void SCH_MOVE_TOOL::Reset( RESET_REASON aReason )
             m_changedDragLines.clear();
             m_specialCaseLabels.clear();
             m_specialCaseSheetPins.clear();
+            m_sheetPinDragArc.clear();
             m_hiddenJunctions.clear();
 
             // Clear any preview
@@ -623,6 +690,7 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
 
     REENTRANCY_GUARD guard( &m_inMoveTool );
 
+    PCBJAM_SCH_REMOTE_LOCK::Trim( m_selectionTool->GetSelection(), m_selectionTool );
     preprocessBreakOrSliceSelection( aCommit, aEvent );
 
     // Prepare selection (promote pins to symbols, request selection)
@@ -657,6 +725,21 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
     }
 
     bool lastCtrlDown = false;
+
+    // When items are pasted via Ctrl+V, the Ctrl key is still held when the move tool
+    // starts. Ctrl disables grid snapping, so the pasted items would track off-grid.
+    // The synthetic move action event carries no modifier bits, so query the live
+    // keyboard state and ignore Ctrl until the user releases and re-presses it.
+    bool pasteHoldingCtrl = false;
+
+    for( EDA_ITEM* item : selection )
+    {
+        if( item->HasFlag( IS_PASTED ) )
+        {
+            pasteHoldingCtrl = wxGetKeyState( WXK_CONTROL );
+            break;
+        }
+    }
 
     Activate();
 
@@ -698,9 +781,21 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
 
         m_frame->GetCanvas()->SetCurrentCursor( currentCursor );
         grid.SetSnap( !evt->Modifier( MD_SHIFT ) );
-        grid.SetUseGrid( getView()->GetGAL()->GetGridSnapping() && !evt->DisableGridSnapping() );
 
         bool ctrlDown = evt->Modifier( MD_CTRL );
+
+        // Only real input events carry modifier state; the synthetic move action does not.
+        bool hasModifierState = evt->Category() == TC_MOUSE || evt->Category() == TC_KEYBOARD;
+
+        if( pasteHoldingCtrl && hasModifierState && !ctrlDown )
+            pasteHoldingCtrl = false;
+
+        // The paste-held Ctrl only masks grid snapping.  Ctrl also forces a graphics-only drop
+        // into a sheet, and that gesture must still honor a physically-held key.
+        bool gridSnapDisabled = ctrlDown && !pasteHoldingCtrl;
+
+        grid.SetUseGrid( getView()->GetGAL()->GetGridSnapping() && !gridSnapDisabled );
+
         lastCtrlDown = ctrlDown;
 
         if( evt->IsAction( &SCH_ACTIONS::restartMove )
@@ -782,12 +877,23 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
             else if( axisLock == AXIS_LOCK::VERTICAL )
                 m_cursor.x = prevPos.x;
 
-            // Find potential target sheet for dropping
-            SCH_SHEET* sheet = findTargetSheet( selection, m_cursor, selectionHasSheetPins,
-                                                selectionIsGraphicsOnly, ctrlDown );
+            // Find potential target sheet for dropping.  This relocation is only meaningful for a
+            // plain move; drag/break/slice reshape existing connections in place and must never
+            // pull items onto a sub-sheet's screen.
+            SCH_SHEET* sheet = nullptr;
+
+            if( m_mode == MOVE )
+                sheet = findTargetSheet( selection, m_cursor, selectionHasSheetPins, selectionIsGraphicsOnly,
+                                         ctrlDown );
 
             if( sheet != hoverSheet )
             {
+                if( hoverSheet )
+                {
+                    hoverSheet->ClearFlags( BRIGHTENED );
+                    m_frame->UpdateItem( hoverSheet, false );
+                }
+
                 hoverSheet = sheet;
 
                 if( hoverSheet )
@@ -978,6 +1084,9 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
 
     if( restore_state )
     {
+        for( const HIDDEN_JUNCTION& hidden : m_hiddenJunctions )
+            m_view->Hide( hidden.m_junction, false );
+
         m_selectionTool->RemoveItemsFromSel( &m_dragAdditions, QUIET_MODE );
 
         // Clear the split-segment selection that preprocessBreakOrSliceSelection() built
@@ -1073,7 +1182,8 @@ SCH_SELECTION& SCH_MOVE_TOOL::prepareSelection( bool& aUnselect )
 
     // Be sure that there is at least one item that we can move. If there's no selection try
     // looking for the stuff under mouse cursor (i.e. KiCad old-style hover selection).
-    SCH_SELECTION& selection = m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems, true );
+    SCH_SELECTION& selection = PCBJAM_SCH_REMOTE_LOCK::Trim(
+            m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems, true ), m_selectionTool );
     aUnselect = selection.IsHover();
 
     return selection;
@@ -1210,6 +1320,7 @@ void SCH_MOVE_TOOL::initializeMoveOperation( const TOOL_EVENT& aEvent, SCH_SELEC
     m_dragAdditions.clear();
     m_specialCaseLabels.clear();
     m_specialCaseSheetPins.clear();
+    m_sheetPinDragArc.clear();
     aInternalPoints.clear();
     clearNewDragLines();
 
@@ -1224,41 +1335,7 @@ void SCH_MOVE_TOOL::initializeMoveOperation( const TOOL_EVENT& aEvent, SCH_SELEC
     setupItemsForDrag( aSelection, aCommit );
     setupItemsForMove( aSelection, aInternalPoints );
 
-    // Hide junctions connected to line endpoints that are not selected
-    m_hiddenJunctions.clear();
-
-    for( EDA_ITEM* item : aSelection )
-        item->SetFlags( STRUCT_DELETED );
-
-    for( EDA_ITEM* edaItem : aSelection )
-    {
-        if( edaItem->Type() != SCH_LINE_T )
-            continue;
-
-        SCH_LINE* line = static_cast<SCH_LINE*>( edaItem );
-
-        for( const VECTOR2I& pt : line->GetConnectionPoints() )
-        {
-            SCH_JUNCTION* jct = static_cast<SCH_JUNCTION*>( m_frame->GetScreen()->GetItem( pt, 0, SCH_JUNCTION_T ) );
-
-            if( jct && !jct->IsSelected()
-                && std::find( m_hiddenJunctions.begin(), m_hiddenJunctions.end(), jct ) == m_hiddenJunctions.end() )
-            {
-                JUNCTION_HELPERS::POINT_INFO info = JUNCTION_HELPERS::AnalyzePoint( m_frame->GetScreen()->Items(),
-                                                                                    pt, false );
-
-                if( !info.isJunction )
-                {
-                    jct->SetFlags( STRUCT_DELETED );
-                    m_frame->RemoveFromScreen( jct, m_frame->GetScreen() );
-                    aCommit->Removed( jct, m_frame->GetScreen() );
-                }
-            }
-        }
-    }
-
-    for( EDA_ITEM* item : aSelection )
-        item->ClearFlags( STRUCT_DELETED );
+    recordRedundantJunctions( aSelection );
 
     // Generic setup
     aSnapLayer = grid.GetSelectionGrid( aSelection );
@@ -1307,6 +1384,12 @@ void SCH_MOVE_TOOL::initializeMoveOperation( const TOOL_EVENT& aEvent, SCH_SELEC
                 RECURSE_MODE::RECURSE );
 
         schItem->SetStoredPos( schItem->GetPosition() );
+
+        if( schItem->Type() == SCH_SHEET_PIN_T && schItem->GetParent() && !schItem->GetParent()->IsSelected() )
+        {
+            SCH_SHEET_PIN* pin = static_cast<SCH_SHEET_PIN*>( schItem );
+            m_sheetPinDragArc[pin] = sheetBorderArc( pin->GetParent(), pin->GetSide(), pin->GetPosition() );
+        }
     }
 
     // Set up the starting position and move/drag offset
@@ -1461,6 +1544,9 @@ SCH_SHEET* SCH_MOVE_TOOL::findTargetSheet( const SCH_SELECTION& aSelection, cons
         }
     }
 
+    if( sheet && dropWouldRecurse( aSelection, sheet ) )
+        sheet = nullptr;
+
     bool dropAllowedBySelection = !aHasSheetPins;
     bool dropAllowedByModifiers = !aIsGraphicsOnly || aCtrlDown;
 
@@ -1468,6 +1554,38 @@ SCH_SHEET* SCH_MOVE_TOOL::findTargetSheet( const SCH_SELECTION& aSelection, cons
         sheet = nullptr;
 
     return sheet;
+}
+
+
+bool SCH_MOVE_TOOL::dropWouldRecurse( const SCH_SELECTION& aSelection, const SCH_SHEET* aTargetSheet )
+{
+    SCH_SCREEN* destScreen = aTargetSheet->GetScreen();
+
+    if( !destScreen || destScreen->GetFileName().IsEmpty() )
+        return false;
+
+    std::vector<SCH_SHEET*> movedSheets;
+
+    for( EDA_ITEM* item : aSelection )
+    {
+        if( item->Type() == SCH_SHEET_T )
+            movedSheets.push_back( static_cast<SCH_SHEET*>( item ) );
+    }
+
+    if( movedSheets.empty() )
+        return false;
+
+    SCH_SHEET_LIST hierarchy = m_frame->Schematic().Hierarchy();
+
+    for( SCH_SHEET* movedSheet : movedSheets )
+    {
+        SCH_SHEET_LIST movedHierarchy( movedSheet );
+
+        if( hierarchy.TestForRecursion( movedHierarchy, destScreen->GetFileName() ) )
+            return true;
+    }
+
+    return false;
 }
 
 
@@ -1624,8 +1742,87 @@ void SCH_MOVE_TOOL::performItemMove( SCH_SELECTION& aSelection, const VECTOR2I& 
         }
     }
 
+    spreadMovingSheetPinGroups( aSelection );
+
     if( aSelection.HasReferencePoint() )
         aSelection.SetReferencePoint( aSelection.GetReferencePoint() + aDelta );
+}
+
+
+void SCH_MOVE_TOOL::spreadMovingSheetPinGroups( const SCH_SELECTION& aSelection )
+{
+    // Slide pins dragged together by one distance along the border, so they keep their spacing
+    // and wrap around corners instead of collapsing onto a shared point on a perpendicular edge.
+    std::map<SCH_SHEET*, std::vector<SCH_SHEET_PIN*>> groups;
+
+    for( EDA_ITEM* item : aSelection )
+    {
+        if( item->Type() != SCH_SHEET_PIN_T )
+            continue;
+
+        SCH_SHEET_PIN* pin = static_cast<SCH_SHEET_PIN*>( item );
+
+        if( SCH_SHEET* sheet = pin->GetParent(); sheet && !sheet->IsSelected() && m_sheetPinDragArc.count( pin ) )
+        {
+            groups[sheet].push_back( pin );
+        }
+    }
+
+    for( auto& [sheet, pins] : groups )
+    {
+        if( pins.size() < 2 )
+            continue;
+
+        // Only slide as a group when the pins started on the same edge. A mix of edges would
+        // move in opposite directions (the border runs one way), so leave those to the normal
+        // per-pin constraint.
+        auto startSide = [&]( SCH_SHEET_PIN* aPin )
+        {
+            VECTOR2I   pos;
+            SHEET_SIDE side;
+            sheetBorderPos( sheet, m_sheetPinDragArc[aPin], pos, side );
+            return side;
+        };
+
+        SCH_SHEET_PIN* ref = pins.front();
+        SHEET_SIDE     refStartSide = startSide( ref );
+        bool           sameEdge = true;
+
+        for( SCH_SHEET_PIN* pin : pins )
+            sameEdge &= ( startSide( pin ) == refStartSide );
+
+        if( !sameEdge )
+            continue;
+
+        // The reference pin is already on its edge, its border travel drives the group slide.
+        long long refArc = sheetBorderArc( sheet, ref->GetSide(), ref->GetPosition() );
+        long long slide = refArc - m_sheetPinDragArc[ref];
+
+        for( SCH_SHEET_PIN* pin : pins )
+        {
+            VECTOR2I   pos;
+            SHEET_SIDE side;
+            sheetBorderPos( sheet, m_sheetPinDragArc[pin] + slide, pos, side );
+
+            pin->SetSide( side );
+
+            if( side == SHEET_SIDE::LEFT || side == SHEET_SIDE::RIGHT )
+                pin->SetTextY( pos.y );
+            else
+                pin->SetTextX( pos.x );
+
+            updateItem( pin, false );
+        }
+    }
+
+    // Pull attached lines back to the moved pins.
+    for( const auto& [pin, lineEnd] : m_specialCaseSheetPins )
+    {
+        if( lineEnd.second && lineEnd.first->HasFlag( STARTPOINT ) )
+            lineEnd.first->SetStartPoint( pin->GetPosition() );
+        else if( !lineEnd.second && lineEnd.first->HasFlag( ENDPOINT ) )
+            lineEnd.first->SetEndPoint( pin->GetPosition() );
+    }
 }
 
 
@@ -1775,6 +1972,15 @@ void SCH_MOVE_TOOL::updateStoredPositions( const SCH_SELECTION& aSelection )
         VECTOR2I newPos = schItem->GetPosition();
         schItem->SetStoredPos( newPos );
 
+        // Re-baseline the pin's border distance after a transform (e.g. rotation).
+        if( schItem->Type() == SCH_SHEET_PIN_T )
+        {
+            SCH_SHEET_PIN* pin = static_cast<SCH_SHEET_PIN*>( schItem );
+
+            if( m_sheetPinDragArc.count( pin ) )
+                m_sheetPinDragArc[pin] = sheetBorderArc( pin->GetParent(), pin->GetSide(), pin->GetPosition() );
+        }
+
         wxLogTrace( traceSchMove, "  item[%d] type=%d: stored pos updated (%d,%d) -> (%d,%d)",
                     itemCount++, (int) schItem->Type(), oldPos.x, oldPos.y, newPos.x, newPos.y );
 
@@ -1794,6 +2000,75 @@ void SCH_MOVE_TOOL::updateStoredPositions( const SCH_SELECTION& aSelection )
     }
 
     wxLogTrace( traceSchMove, "updateStoredPositions: complete, updated %d items", itemCount );
+}
+
+
+void SCH_MOVE_TOOL::recordRedundantJunctions( SCH_SELECTION& aSelection )
+{
+    m_hiddenJunctions.clear();
+
+    for( EDA_ITEM* item : aSelection )
+        item->SetFlags( STRUCT_DELETED );
+
+    for( EDA_ITEM* edaItem : aSelection )
+    {
+        if( edaItem->Type() != SCH_LINE_T )
+            continue;
+
+        SCH_LINE* line = static_cast<SCH_LINE*>( edaItem );
+
+        for( const VECTOR2I& pt : line->GetConnectionPoints() )
+        {
+            SCH_JUNCTION* jct = static_cast<SCH_JUNCTION*>( m_frame->GetScreen()->GetItem( pt, 0, SCH_JUNCTION_T ) );
+
+            if( jct && !jct->IsSelected()
+                && std::none_of( m_hiddenJunctions.begin(), m_hiddenJunctions.end(),
+                                 [jct]( const HIDDEN_JUNCTION& aHidden )
+                                 {
+                                     return aHidden.m_junction == jct;
+                                 } ) )
+            {
+                JUNCTION_HELPERS::POINT_INFO info =
+                        JUNCTION_HELPERS::AnalyzePoint( m_frame->GetScreen()->Items(), pt, false );
+
+                if( !info.isJunction )
+                {
+                    m_hiddenJunctions.push_back( { jct, line->m_Uuid, pt == line->GetStartPoint() } );
+                    m_view->Hide( jct, true );
+                }
+            }
+        }
+    }
+
+    for( EDA_ITEM* item : aSelection )
+        item->ClearFlags( STRUCT_DELETED );
+}
+
+
+void SCH_MOVE_TOOL::migrateHiddenJunctions( SCH_COMMIT* aCommit )
+{
+    SCH_SCREEN* screen = m_frame->GetScreen();
+
+    for( const HIDDEN_JUNCTION& hidden : m_hiddenJunctions )
+    {
+        m_view->Hide( hidden.m_junction, false );
+
+        SCH_LINE* line = dynamic_cast<SCH_LINE*>( m_frame->Schematic().ResolveItem( hidden.m_lineId, nullptr, true ) );
+
+        if( !line )
+            continue;
+
+        VECTOR2I newPos = hidden.m_atLineStart ? line->GetStartPoint() : line->GetEndPoint();
+
+        if( newPos != hidden.m_junction->GetPosition()
+            && !screen->IsExplicitJunction( hidden.m_junction->GetPosition() )
+            && screen->IsExplicitJunctionNeeded( newPos ) )
+        {
+            aCommit->Modify( hidden.m_junction, screen );
+            hidden.m_junction->SetPosition( newPos );
+            m_frame->UpdateItem( hidden.m_junction, false, true );
+        }
+    }
 }
 
 
@@ -1859,6 +2134,9 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
         selectionCopy.Add( line );
 
     lwbTool->TrimOverLappingWires( aCommit, &selectionCopy );
+
+    migrateHiddenJunctions( aCommit );
+
     lwbTool->AddJunctionsIfNeeded( aCommit, &selectionCopy );
 
     // This needs to run prior to `RecalculateConnections` because we need to identify the
@@ -2647,7 +2925,8 @@ void SCH_MOVE_TOOL::moveItem( EDA_ITEM* aItem, const VECTOR2I& aDelta )
 int SCH_MOVE_TOOL::AlignToGrid( const TOOL_EVENT& aEvent )
 {
     EE_GRID_HELPER    grid( m_toolMgr);
-    SCH_SELECTION&    selection = m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems );
+    SCH_SELECTION&    selection = PCBJAM_SCH_REMOTE_LOCK::Trim(
+            m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems ), m_selectionTool );
     GRID_HELPER_GRIDS selectionGrid = grid.GetSelectionGrid( selection );
     SCH_COMMIT        commit( m_toolMgr );
 
@@ -2700,11 +2979,14 @@ int SCH_MOVE_TOOL::AlignToGrid( const TOOL_EVENT& aEvent )
                 updateItem( aItem, true );
             };
 
+    recordRedundantJunctions( selection );
+
     std::vector<EDA_ITEM*> items( selection.begin(), selection.end() );
     AlignSchematicItemsToGrid( m_frame->GetScreen(), items, grid, selectionGrid, callbacks );
 
     SCH_LINE_WIRE_BUS_TOOL* lwbTool = m_toolMgr->GetTool<SCH_LINE_WIRE_BUS_TOOL>();
     lwbTool->TrimOverLappingWires( &commit, &selection );
+    migrateHiddenJunctions( &commit );
     lwbTool->AddJunctionsIfNeeded( &commit, &selection );
 
     m_toolMgr->PostEvent( EVENTS::SelectedItemsMoved );

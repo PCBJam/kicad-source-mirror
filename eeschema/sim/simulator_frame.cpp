@@ -55,56 +55,182 @@
 #include <sim/simulator_frame_ui.h>
 #include <sim/sim_plot_tab.h>
 #include <sim/spice_simulator.h>
-#include <sim/simulator_reporter.h>
+#include <reporter.h>
 #include <eeschema_settings.h>
 #include <advanced_config.h>
 #include <sim/toolbars_simulator_frame.h>
 #include <settings/settings_manager.h>
 
+#include <atomic>
 #include <memory>
+
+#ifdef __EMSCRIPTEN__
+#include <algorithm>
+#include <emscripten.h>
+#include <pcbjam_editor_events.h>
+
+// wasm/stubs/sharedspice_client.cpp — the browser harness's final-refresh
+// receipt (findings E-7).
+extern "C" void pcbjam_sim_run_applied( uint32_t aGeneration );
+
+// pcbjam WASM addition (overlay-system 0006): tell the page what the simulator shows, so a guided
+// tour can follow a simulation lesson — a run finished (with the time axis's length when nothing
+// is plotted yet), or the plot's traces changed (a probe click, the signals list: no simulator
+// calls then).
+static void pcbjamNotifySimulation( SIMULATOR_FRAME* aFrame, bool aFinished )
+{
+    SIM_TAB* tab = aFrame->GetCurrentSimTab();
+
+    if( !tab )
+        return;
+
+    const SIM_TYPE type = tab->GetSimType();
+    wxString       traces;
+    size_t         points = 0;
+
+    if( SIM_PLOT_TAB* plotTab = dynamic_cast<SIM_PLOT_TAB*>( tab ) )
+    {
+        for( const auto& [id, trace] : plotTab->GetTraces() )
+        {
+            traces << trace->GetName() << wxS( "\n" );
+            points = std::max( points, trace->GetDataX().size() );
+        }
+    }
+
+    if( aFinished && points == 0 && aFrame->GetSimulator() )
+    {
+        const wxString xAxis = aFrame->GetSimulator()->GetXAxis( type );
+
+        if( !xAxis.IsEmpty() )
+            points = aFrame->GetSimulator()->GetRealVector( xAxis.ToStdString() ).size();
+    }
+
+    PCBJAM_EDITOR_EVENTS::NotifySimulation( aFinished,
+                                            SPICE_SIMULATOR::TypeToName( type, true ).Lower().ToStdString(),
+                                            points > 1, (int) points, traces );
+}
+#endif
 
 
 // Reporter is stored by pointer in KIBIS, so keep this here to avoid crashes
 static WX_STRING_REPORTER s_reporter;
+static std::atomic<uint32_t> s_nextSimRunGeneration{ 1 };
 
 
-class SIM_THREAD_REPORTER : public SIMULATOR_REPORTER
+static uint32_t allocateSimRunGeneration()
+{
+    uint32_t generation = s_nextSimRunGeneration.fetch_add( 1, std::memory_order_relaxed );
+
+    // Zero is reserved for simulator state changes which do not belong to a
+    // Run().  This branch is reachable only after a uint32_t wrap.
+    if( generation == 0 )
+        generation = s_nextSimRunGeneration.fetch_add( 1, std::memory_order_relaxed );
+
+    return generation;
+}
+
+
+class SIM_CONSOLE_REPORTER : public SYNC_REPORTER
 {
 public:
-    SIM_THREAD_REPORTER( SIMULATOR_FRAME* aParent ) :
+    SIM_CONSOLE_REPORTER() :
+            SYNC_REPORTER( m_strRep )
+    {
+    }
+
+    wxString TakePendingMessages()
+    {
+        std::lock_guard lock( m_mutex );
+
+        wxString messages = m_strRep.GetMessages();
+        m_strRep.Clear();
+
+        return messages;
+    }
+
+private:
+    WX_STRING_REPORTER m_strRep;
+};
+
+
+class SIM_FRAME_STATE_LISTENER : public SIM_STATE_LISTENER
+{
+public:
+    SIM_FRAME_STATE_LISTENER( SIMULATOR_FRAME* aParent ) :
         m_parent( aParent )
     {
     }
 
-    REPORTER& Report( const wxString& aText, SEVERITY aSeverity = RPT_SEVERITY_UNDEFINED ) override
+    void SetRunGeneration( uint32_t aGeneration )
     {
-        wxCommandEvent* event = new wxCommandEvent( EVT_SIM_REPORT );
-        event->SetString( aText );
-        wxQueueEvent( m_parent, event );
-        return *this;
-    }
-
-    bool HasMessage() const override
-    {
-        return false;       // Technically "indeterminate" rather than false.
+        m_pendingRunGeneration.store( aGeneration, std::memory_order_release );
     }
 
     void OnSimStateChange( SIMULATOR* aObject, SIM_STATE aNewState ) override
     {
         wxCommandEvent* event = nullptr;
+        uint32_t        generation = 0;
 
         switch( aNewState )
         {
-        case SIM_IDLE:    event = new wxCommandEvent( EVT_SIM_FINISHED ); break;
-        case SIM_RUNNING: event = new wxCommandEvent( EVT_SIM_STARTED );  break;
-        default:          wxFAIL;                                         return;
+        case SIM_RUNNING:
+            generation = m_pendingRunGeneration.exchange( 0, std::memory_order_acq_rel );
+
+            if( generation == 0 )
+                generation = m_activeRunGeneration.load( std::memory_order_acquire );
+            else
+                m_activeRunGeneration.store( generation, std::memory_order_release );
+
+            event = new wxCommandEvent( EVT_SIM_STARTED );
+            break;
+
+        case SIM_IDLE:
+            // Keep a newly queued generation separate from the active one.  If
+            // an old run finishes after the next Run() was requested but before
+            // its RUNNING transition, this event still carries the old token.
+            generation = m_activeRunGeneration.exchange( 0, std::memory_order_acq_rel );
+
+#ifdef __EMSCRIPTEN__
+            // A crash exit can deliver IDLE before its RUNNING ever fired
+            // (ControlledExit on an early fatal error — cbBGThreadRunning may
+            // never fire); that owned run's only completion must not be
+            // swallowed by the unowned-event drop below.  Fall back to the
+            // launch's pending token.  (Wasm-only, findings E-12 — native
+            // keeps upstream delivery exactly; pre-first-run and duplicate
+            // IDLE transitions still read 0 from both counters.)
+            if( generation == 0 )
+                generation = m_pendingRunGeneration.exchange( 0, std::memory_order_acq_rel );
+#endif
+
+            event = new wxCommandEvent( EVT_SIM_FINISHED );
+            break;
+
+        default:
+            wxFAIL;
+            return;
         }
 
+#ifdef __EMSCRIPTEN__
+        // State transitions before the first Run(), and duplicate IDLE
+        // transitions after a run, do not own a completion generation.  The
+        // drop is confined to the wasm build (findings E-7): native keeps
+        // upstream delivery semantics exactly; the generation stamped below
+        // is inert bookkeeping there.
+        if( generation == 0 )
+        {
+            delete event;
+            return;
+        }
+#endif
+
+        event->SetExtraLong( static_cast<long>( generation ) );
         wxQueueEvent( m_parent, event );
     }
 
 private:
-    SIMULATOR_FRAME* m_parent;
+    SIMULATOR_FRAME*      m_parent;
+    std::atomic<uint32_t> m_pendingRunGeneration{ 0 };
+    std::atomic<uint32_t> m_activeRunGeneration{ 0 };
 };
 
 
@@ -120,6 +246,10 @@ SIMULATOR_FRAME::SIMULATOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
         m_schematicFrame( nullptr ),
         m_toolBar( nullptr ),
         m_ui( nullptr ),
+        m_consoleReporter( nullptr ),
+        m_stateListener( nullptr ),
+        m_simRunGeneration( 0 ),
+        m_lastAppliedSimRunGeneration( 0 ),
         m_simFinished( false ),
         m_workbookModified( false )
 {
@@ -159,8 +289,10 @@ SIMULATOR_FRAME::SIMULATOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_simulator->Init();
 
-    m_reporter = new SIM_THREAD_REPORTER( this );
-    m_simulator->SetReporter( m_reporter );
+    m_consoleReporter = new SIM_CONSOLE_REPORTER();
+    m_stateListener = new SIM_FRAME_STATE_LISTENER( this );
+    m_simulator->SetReporter( m_consoleReporter );
+    m_simulator->SetSimStateListener( m_stateListener );
 
     m_circuitModel = std::make_shared<SPICE_CIRCUIT_MODEL>( &m_schematicFrame->Schematic() );
 
@@ -179,7 +311,6 @@ SIMULATOR_FRAME::SIMULATOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     Bind( wxEVT_COMMAND_MENU_SELECTED, wxCommandEventHandler( SIMULATOR_FRAME::onExit ), this, wxID_EXIT );
 
     Bind( EVT_SIM_UPDATE, &SIMULATOR_FRAME::onUpdateSim, this );
-    Bind( EVT_SIM_REPORT, &SIMULATOR_FRAME::onSimReport, this );
     Bind( EVT_SIM_STARTED, &SIMULATOR_FRAME::onSimStarted, this );
     Bind( EVT_SIM_FINISHED, &SIMULATOR_FRAME::onSimFinished, this );
 
@@ -198,6 +329,7 @@ SIMULATOR_FRAME::SIMULATOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     Raise();
 
     m_ui->InitWorkbook();
+    m_ui->FlushSimConsole();
     UpdateTitle();
 }
 
@@ -207,8 +339,10 @@ SIMULATOR_FRAME::~SIMULATOR_FRAME()
     NULL_REPORTER devnull;
 
     m_simulator->Attach( nullptr, wxEmptyString, 0, wxEmptyString, devnull );
+    m_simulator->SetSimStateListener( nullptr );
     m_simulator->SetReporter( nullptr );
-    delete m_reporter;
+    delete m_stateListener;
+    delete m_consoleReporter;
 }
 
 
@@ -403,6 +537,43 @@ void SIMULATOR_FRAME::ReloadSimulator( const wxString& aSimCommand, unsigned aSi
 }
 
 
+void SIMULATOR_FRAME::destroyTabPlot( SIM_TAB* aSimTab )
+{
+    wxString oldPlotName = aSimTab->GetSpicePlotName();
+
+    if( oldPlotName.IsEmpty() )
+        return;
+
+    // A run may report a plot that another tab still owns (e.g. an FFT deriving from a TRAN plot,
+    // or an aborted run that produced nothing new).  Never destroy such a shared plot; just forget
+    // this tab's reference to it.
+    if( m_ui->IsPlotOwnedByOtherTab( aSimTab, oldPlotName ) )
+    {
+        aSimTab->SetSpicePlotName( wxEmptyString );
+        return;
+    }
+
+    // A noise run produces a pair of plots (odd spectral density noiseN, even integrated noiseN+1).
+    // Destroy both regardless of which of the pair the tab happened to record.
+    long noiseNumber = 0;
+
+    if( oldPlotName.StartsWith( wxS( "noise" ) ) && oldPlotName.Mid( 5 ).ToLong( &noiseNumber ) )
+    {
+        long spectral = ( noiseNumber % 2 == 0 ) ? noiseNumber - 1 : noiseNumber;
+
+        m_simulator->Command( wxString::Format( wxT( "destroy noise%ld" ), spectral ).ToStdString() );
+        m_simulator->Command(
+                wxString::Format( wxT( "destroy noise%ld" ), spectral + 1 ).ToStdString() );
+    }
+    else
+    {
+        m_simulator->Command( "destroy " + oldPlotName.ToStdString() );
+    }
+
+    aSimTab->SetSpicePlotName( wxEmptyString );
+}
+
+
 void SIMULATOR_FRAME::StartSimulation()
 {
     SIM_TAB* simTab = m_ui->GetCurrentSimTab();
@@ -425,6 +596,10 @@ void SIMULATOR_FRAME::StartSimulation()
         }
         else
         {
+            // Free the tab's previous FFT plot before recomputing; destroyTabPlot() leaves the
+            // shared TRAN plot it derives from untouched.
+            destroyTabPlot( simTab );
+
             m_simulator->Command( "setplot " + tranSpicePlot.ToStdString() );
 
             wxArrayString commands = wxSplit( simTab->GetSimCommand(), '\n' );
@@ -471,8 +646,13 @@ void SIMULATOR_FRAME::StartSimulation()
     {
         m_simFinished = false;
 
+        // Free this tab's previous plot only once the rerun is committed, so a failed netlist or
+        // a busy simulator leaves the existing results intact.  Other tabs' plots must survive
+        // (e.g. an FFT consumes a prior TRAN plot).
+        destroyTabPlot( simTab );
+
         m_ui->OnSimUpdate();
-        m_simulator->Run();
+        runSimulator();
 
         // Netlist from schematic may have changed; update signals list, measurements list,
         // etc.
@@ -566,6 +746,16 @@ bool SIMULATOR_FRAME::SaveWorkbook( const wxString& aPath )
     {
         m_workbookModified = false;
         UpdateTitle();
+
+#ifdef __EMSCRIPTEN__
+        // Push the new workbook pointer into the project settings now, as SaveSettings
+        // does on close: a browser tab is often closed with the simulator still open.
+        if( Prj().GetProjectFile().m_SchematicSettings->m_NgspiceSettings->SaveToFile()
+                && m_schematicFrame )
+        {
+            m_schematicFrame->OnModify();
+        }
+#endif
 
         return true;
     }
@@ -801,12 +991,45 @@ void SIMULATOR_FRAME::setupUIConditions()
 
 void SIMULATOR_FRAME::onSimStarted( wxCommandEvent& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // Generation acceptance is confined to the wasm build (findings E-7);
+    // native keeps upstream behavior exactly.
+    const uint32_t generation = static_cast<uint32_t>( aEvent.GetExtraLong() );
+
+    if( generation == 0 || generation != m_simRunGeneration
+            || generation <= m_lastAppliedSimRunGeneration )
+    {
+        return;
+    }
+#endif
+
     SetCursor( wxCURSOR_ARROWWAIT );
+}
+
+
+wxString SIMULATOR_FRAME::TakeSimReportMessages()
+{
+    return m_consoleReporter->TakePendingMessages();
 }
 
 
 void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
 {
+    if( IsClosing() )
+        return;
+
+    const uint32_t generation = static_cast<uint32_t>( aEvent.GetExtraLong() );
+
+#ifdef __EMSCRIPTEN__
+    // Generation acceptance is confined to the wasm build (findings E-7);
+    // native keeps upstream behavior exactly.
+    if( generation == 0 || generation != m_simRunGeneration
+            || generation <= m_lastAppliedSimRunGeneration )
+    {
+        return;
+    }
+#endif
+
     // Sometimes (for instance with a directive like wrdata my_file.csv "my_signal")
     // the simulator is in idle state (simulation is finished), but still running, during
     // the time the file is written. So gives a slice of time to fully finish the work:
@@ -825,6 +1048,15 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
         } while( max_time && m_simulator->IsRunning() );
     }
 
+#ifdef __EMSCRIPTEN__
+    // wxYield() above can dispatch an update which starts a newer run.  The
+    // older finish event must not apply or publish the newer run's state.
+    // (Wasm-only, findings E-7 — native keeps upstream behavior exactly.)
+    if( generation != m_simRunGeneration
+            || generation <= m_lastAppliedSimRunGeneration )
+        return;
+#endif
+
     // ensure the shown cursor is the default cursor, not the wxCURSOR_ARROWWAIT set when
     // staring the simulator in onSimStarted:
     SetCursor( wxNullCursor );
@@ -839,6 +1071,44 @@ void SIMULATOR_FRAME::onSimFinished( wxCommandEvent& aEvent )
 
     m_schematicFrame->RefreshOperatingPointDisplay();
     m_schematicFrame->GetCanvas()->Refresh();
+
+    m_lastAppliedSimRunGeneration = generation;
+
+#ifdef __EMSCRIPTEN__
+    pcbjamNotifySimulation( this, true );
+
+    // Final-refresh receipt (findings E-7) — deliberately after every final
+    // native refresh; implemented in wasm/stubs/sharedspice_client.cpp.
+    // Optional test evidence, no mainline/native behavior.
+    pcbjam_sim_run_applied( generation );
+#endif
+}
+
+
+void SIMULATOR_FRAME::runSimulator()
+{
+    // The process-wide value remains exact if a simulator frame is closed and
+    // reopened.  Publish it before Run() can report RUNNING.
+    m_simRunGeneration = allocateSimRunGeneration();
+
+    m_stateListener->SetRunGeneration( m_simRunGeneration );
+
+#ifdef __EMSCRIPTEN__
+    // A failed launch emits no RUNNING/IDLE, so nothing later would clear the
+    // busy state — and a stale pending token would let some future unrelated
+    // IDLE mis-deliver this launch's completion through the crash-exit
+    // fallback above.  Withdraw the token and reset the cursor explicitly.
+    // (Wasm-only, findings E-13 — native keeps upstream behavior exactly.
+    // Publishing m_simRunGeneration BEFORE Run() must stay: under JSPI the
+    // run's own events can dispatch while Run() is still parked in the rpc.)
+    if( !m_simulator->Run() )
+    {
+        m_stateListener->SetRunGeneration( 0 );
+        SetCursor( wxNullCursor );
+    }
+#else
+    m_simulator->Run();
+#endif
 }
 
 
@@ -859,8 +1129,14 @@ void SIMULATOR_FRAME::onUpdateSim( wxCommandEvent& aEvent )
 
     if( simulatorLock.owns_lock() )
     {
+        // Tuner drags and multi-run steps rerun through here without going through
+        // StartSimulation(), so free the prior plot to keep repeated updates from leaking.  A
+        // multi-run step's data is already copied into m_multiRunState before the next step.
+        if( SIM_TAB* simTab = m_ui->GetCurrentSimTab() )
+            destroyTabPlot( simTab );
+
         m_ui->OnSimUpdate();
-        m_simulator->Run();
+        runSimulator();
     }
     else
     {
@@ -868,12 +1144,6 @@ void SIMULATOR_FRAME::onUpdateSim( wxCommandEvent& aEvent )
     }
 
     updateInProgress = false;
-}
-
-
-void SIMULATOR_FRAME::onSimReport( wxCommandEvent& aEvent )
-{
-    m_ui->OnSimReport( aEvent.GetString() );
 }
 
 
@@ -892,11 +1162,14 @@ void SIMULATOR_FRAME::OnModify()
     KIWAY_PLAYER::OnModify();
     m_workbookModified = true;
     UpdateTitle();
+
+#ifdef __EMSCRIPTEN__
+    pcbjamNotifySimulation( this, false );
+#endif
 }
 
 
 wxDEFINE_EVENT( EVT_SIM_UPDATE, wxCommandEvent );
-wxDEFINE_EVENT( EVT_SIM_REPORT, wxCommandEvent );
 
 wxDEFINE_EVENT( EVT_SIM_STARTED, wxCommandEvent );
 wxDEFINE_EVENT( EVT_SIM_FINISHED, wxCommandEvent );

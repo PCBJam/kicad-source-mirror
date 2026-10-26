@@ -18,10 +18,14 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <ranges>
+
 #include <api/api_handler_editor.h>
+#include <api/api_server.h>
 #include <api/api_utils.h>
 #include <eda_base_frame.h>
 #include <eda_item.h>
+#include <pgm_base.h>
 #include <wx/wx.h>
 
 using namespace kiapi::common::commands;
@@ -40,9 +44,44 @@ API_HANDLER_EDITOR::API_HANDLER_EDITOR( EDA_BASE_FRAME* aFrame ) :
 }
 
 
+static std::optional<ApiResponseStatus> rejectIfMultipleEditors( const std::string& aFuncName )
+{
+    // Handle legacy clients that don't know about the document field, when it's safe to do so
+    if( std::ranges::count_if( Pgm().GetApiServer().Handlers(),
+                               []( const API_HANDLER* aHandler )
+                               {
+                                   return dynamic_cast<const API_HANDLER_EDITOR*>( aHandler );
+                               } )
+        > 1 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format(
+                "{} without a document specified is not allowed when multiple editors are open", aFuncName ) );
+        return e;
+    }
+
+    return std::nullopt;
+}
+
+
 HANDLER_RESULT<BeginCommitResponse> API_HANDLER_EDITOR::handleBeginCommit(
         const HANDLER_CONTEXT<BeginCommit>& aCtx )
 {
+    // Handle legacy clients that don't know about the document field, when it's safe to do so
+    if( std::optional<ApiResponseStatus> r = rejectIfMultipleEditors( "BeginCommit" );
+        !aCtx.Request.has_header() && r.has_value() )
+    {
+        return tl::unexpected( *r );
+    }
+
+    // TODO Mark BeginCommit.header explicitly required in V12 and remove this optionality along with the above
+    if( aCtx.Request.has_header() )
+    {
+        if( HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() ); !valid )
+            return tl::unexpected( valid.error() );
+    }
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
@@ -72,6 +111,20 @@ HANDLER_RESULT<BeginCommitResponse> API_HANDLER_EDITOR::handleBeginCommit(
 HANDLER_RESULT<EndCommitResponse> API_HANDLER_EDITOR::handleEndCommit(
         const HANDLER_CONTEXT<EndCommit>& aCtx )
 {
+    // Handle legacy clients that don't know about the document field, when it's safe to do so
+    if( std::optional<ApiResponseStatus> r = rejectIfMultipleEditors( "EndCommit" );
+        !aCtx.Request.has_header() && r.has_value() )
+    {
+        return tl::unexpected( *r );
+    }
+
+    // TODO Mark EndCommit.header explicitly required in V12 and remove this optionality along with the above
+    if( aCtx.Request.has_header() )
+    {
+        if( HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() ); !valid )
+            return tl::unexpected( valid.error() );
+    }
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
@@ -219,6 +272,12 @@ std::optional<ApiResponseStatus> API_HANDLER_EDITOR::checkForBusy()
 HANDLER_RESULT<CreateItemsResponse> API_HANDLER_EDITOR::handleCreateItems(
         const HANDLER_CONTEXT<CreateItems>& aCtx )
 {
+    HANDLER_RESULT<std::optional<KIID>> document =
+            validateItemHeaderDocument( aCtx.Request.header() );
+
+    if( !document )
+        return tl::unexpected( document.error() );
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
@@ -246,6 +305,12 @@ HANDLER_RESULT<CreateItemsResponse> API_HANDLER_EDITOR::handleCreateItems(
 HANDLER_RESULT<UpdateItemsResponse> API_HANDLER_EDITOR::handleUpdateItems(
         const HANDLER_CONTEXT<UpdateItems>& aCtx )
 {
+    HANDLER_RESULT<std::optional<KIID>> document =
+            validateItemHeaderDocument( aCtx.Request.header() );
+
+    if( !document )
+        return tl::unexpected( document.error() );
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
@@ -273,9 +338,6 @@ HANDLER_RESULT<UpdateItemsResponse> API_HANDLER_EDITOR::handleUpdateItems(
 HANDLER_RESULT<DeleteItemsResponse> API_HANDLER_EDITOR::handleDeleteItems(
         const HANDLER_CONTEXT<DeleteItems>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     if( !validateItemHeaderDocument( aCtx.Request.header() ) )
     {
         ApiResponseStatus e;
@@ -283,6 +345,9 @@ HANDLER_RESULT<DeleteItemsResponse> API_HANDLER_EDITOR::handleDeleteItems(
         e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     std::map<KIID, ItemDeletionStatus> itemsToDelete;
 
@@ -309,9 +374,9 @@ HANDLER_RESULT<DeleteItemsResponse> API_HANDLER_EDITOR::handleDeleteItems(
 
     for( const auto& [id, status] : itemsToDelete )
     {
-        ItemDeletionResult result;
-        result.mutable_id()->set_value( id.AsStdString() );
-        result.set_status( status );
+        ItemDeletionResult* result = response.add_deleted_items();
+        result->mutable_id()->set_value( id.AsStdString() );
+        result->set_status( status );
     }
 
     response.set_status( kiapi::common::types::ItemRequestStatus::IRS_OK );
@@ -322,9 +387,6 @@ HANDLER_RESULT<DeleteItemsResponse> API_HANDLER_EDITOR::handleDeleteItems(
 HANDLER_RESULT<HitTestResponse> API_HANDLER_EDITOR::handleHitTest(
         const HANDLER_CONTEXT<HitTest>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     if( !validateItemHeaderDocument( aCtx.Request.header() ) )
     {
         ApiResponseStatus e;
@@ -332,6 +394,9 @@ HANDLER_RESULT<HitTestResponse> API_HANDLER_EDITOR::handleHitTest(
         e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     HitTestResponse response;
 

@@ -175,6 +175,7 @@ private:
 protected:
     int                     m_version;          ///< Version of file being loaded.
     bool                    m_appending;        ///< Schematic load append status.
+    bool                    m_sheetLoad;        ///< Loading a sheet into an open schematic.
     wxString                m_error;            ///< For throwing exceptions or errors on partial
                                                 ///<  loads.
 
@@ -185,7 +186,7 @@ protected:
                                                 ///< calls, enabling screen reuse across top-level
                                                 ///< sheets that share sub-sheet files.
     SCH_SHEET_PATH          m_currentSheetPath;
-    SCHEMATIC*              m_schematic;
+    SCHEMATIC*              m_schematic = nullptr;  ///< init() reads this before assigning it.
     OUTPUTFORMATTER*        m_out;              ///< The formatter for saving SCH_SCREEN objects.
     SCH_IO_KICAD_SEXPR_LIB_CACHE* m_cache;
 

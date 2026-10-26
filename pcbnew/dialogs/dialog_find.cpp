@@ -123,6 +123,18 @@ void DIALOG_FIND::onFindPreviousClick( wxCommandEvent& aEvent )
 }
 
 
+void DIALOG_FIND::OnCharHook( wxKeyEvent& aEvent )
+{
+    if( aEvent.GetKeyCode() == WXK_F3 )
+    {
+        FindNext( aEvent.ShiftDown() );
+        return;
+    }
+
+    DIALOG_SHIM::OnCharHook( aEvent );
+}
+
+
 void DIALOG_FIND::onSearchAgainClick( wxCommandEvent& aEvent )
 {
     m_upToDate = false;
@@ -134,7 +146,7 @@ void DIALOG_FIND::onShowSearchPanel( wxHyperlinkEvent& event )
 {
     m_frame->GetToolManager()->RunAction( ACTIONS::showSearch );
 
-    EndModal( wxID_CANCEL );
+    Show( false );
 
     CallAfter(
             []()
@@ -208,7 +220,6 @@ void DIALOG_FIND::search( bool aDirection )
     // Search parameters
     frd.findString = searchString;
 
-    m_frame->GetToolManager()->RunAction( ACTIONS::selectionClear );
     m_frame->GetCanvas()->GetViewStart( &screen->m_StartVisu.x, &screen->m_StartVisu.y );
 
     BOARD* board = m_frame->GetBoard();
@@ -376,6 +387,7 @@ void DIALOG_FIND::search( bool aDirection )
     }
     else
     {
+        m_frame->GetToolManager()->RunAction( ACTIONS::selectionClear );
         m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, *m_it );
 
         msg.Printf( _( "'%s' found" ), searchString );

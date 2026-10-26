@@ -23,6 +23,11 @@
 #include <cmath>
 #include <algorithm>
 #include <kiface_base.h>
+
+#ifdef __EMSCRIPTEN__
+#include <eda_base_frame.h>
+#include <kiway.h>
+#endif
 #include <settings/app_settings.h>
 #include <widgets/color_swatch.h>
 #include <wx/bitmap.h>
@@ -32,6 +37,31 @@
 #define SLOPE_AXIS ( bmsize.y / 5.28 ) // was 50 at 264 size
 
 using KIGFX::COLOR4D;
+
+#ifdef __EMSCRIPTEN__
+// WASM: resolve the owning frame's kiface settings by walking the dialog's parent chain
+// to its EDA_BASE_FRAME. In the merged editor image (pcbnew + eeschema statically
+// linked, KICAD_WASM_MERGED_EDITOR) the global Kiface() is only a focus-based fallback;
+// the parent frame is exact. Single-kiface images resolve to the same settings.
+static APP_SETTINGS_BASE* wasmColorPickerSettings( wxWindow* aWindow )
+{
+    for( wxWindow* w = aWindow->GetParent(); w; w = w->GetParent() )
+    {
+        if( EDA_BASE_FRAME* frame = dynamic_cast<EDA_BASE_FRAME*>( w ) )
+        {
+            KIWAY::FACE_T face = KIWAY::KifaceType( frame->GetFrameType() );
+
+            if( face != KIWAY::FACE_T( -1 ) )
+            {
+                if( KIFACE* kiface = frame->Kiway().KiFACE( face ) )
+                    return static_cast<KIFACE_BASE*>( kiface )->KifaceSettings();
+            }
+        }
+    }
+
+    return Kiface().KifaceSettings();
+}
+#endif
 
 // Configure the spin controls contained inside the dialog
 void configureSpinCtrl( wxSpinCtrl* aCtrl )
@@ -83,7 +113,11 @@ DIALOG_COLOR_PICKER::DIALOG_COLOR_PICKER( wxWindow* aParent, const COLOR4D& aCur
     if( aCurrentColor == COLOR4D::UNSPECIFIED )
         m_val = 1.0;
 
+#ifdef __EMSCRIPTEN__
+    APP_SETTINGS_BASE* cfg = wasmColorPickerSettings( this );
+#else
     APP_SETTINGS_BASE* cfg = Kiface().KifaceSettings();
+#endif
     wxASSERT( cfg );
 
     m_notebook->SetSelection( cfg->m_ColorPicker.default_tab );
@@ -107,7 +141,11 @@ DIALOG_COLOR_PICKER::DIALOG_COLOR_PICKER( wxWindow* aParent, const COLOR4D& aCur
 
 DIALOG_COLOR_PICKER::~DIALOG_COLOR_PICKER()
 {
+#ifdef __EMSCRIPTEN__
+    APP_SETTINGS_BASE* cfg = wasmColorPickerSettings( this );
+#else
     APP_SETTINGS_BASE* cfg = Kiface().KifaceSettings();
+#endif
     wxASSERT( cfg );
 
     if( cfg )

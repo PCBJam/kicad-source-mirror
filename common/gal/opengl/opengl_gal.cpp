@@ -53,7 +53,6 @@
 #include <thread_pool.h>
 
 #include <core/profile.h>
-#include <trace_helpers.h>
 
 #include <functional>
 #include <limits>
@@ -79,6 +78,19 @@ static const wxChar* const traceGalXorMode = wxT( "KICAD_GAL_XOR_MODE" );
 
 static wxGLAttributes getGLAttribs()
 {
+    wxGLAttributes copyAttribs;
+    copyAttribs.RGBA().DoubleBuffer().Depth( 8 );
+
+    if( HIDPI_GL_CANVAS::AddSwapCopyAttributes( copyAttribs ) )
+    {
+        copyAttribs.EndList();
+
+        if( wxGLCanvas::IsDisplaySupported( copyAttribs ) )
+            return copyAttribs;
+
+        wxLogTrace( traceGalContext, wxS( "No copy-swap pixel format available, using the default" ) );
+    }
+
     wxGLAttributes attribs;
     attribs.RGBA().DoubleBuffer().Depth( 8 ).EndList();
 
@@ -100,6 +112,9 @@ public:
     {}
 
     ~GL_BITMAP_CACHE();
+
+    /// Drop the cached texture names without deleting them
+    void Abandon() { m_bitmaps.clear(); }
 
     GLuint RequestBitmap( const BITMAP_BASE* aBitmap );
 
@@ -179,7 +194,31 @@ GLuint GL_BITMAP_CACHE::cacheBitmap( const BITMAP_BASE* aBitmap )
     if( !imgPtr )
         return std::numeric_limits< GLuint >::max();
 
-    const wxImage& imgData = *imgPtr;
+    wxImage imgData = *imgPtr;
+
+    // Check if the image exceeds the maximum texture size supported by the GPU
+    GLint maxTextureSize;
+    glGetIntegerv( GL_MAX_TEXTURE_SIZE, &maxTextureSize );
+
+    int imgWidth = imgData.GetWidth();
+    int imgHeight = imgData.GetHeight();
+
+    if( imgWidth > maxTextureSize || imgHeight > maxTextureSize )
+    {
+        // Scale down the image to fit within the maximum texture size while preserving
+        // the aspect ratio
+        double scaleX = static_cast<double>( maxTextureSize ) / imgWidth;
+        double scaleY = static_cast<double>( maxTextureSize ) / imgHeight;
+        double scale = std::min( scaleX, scaleY );
+
+        int newWidth = std::clamp( KiROUND( imgWidth * scale ), 1, maxTextureSize );
+        int newHeight = std::clamp( KiROUND( imgHeight * scale ), 1, maxTextureSize );
+
+        imgData = imgData.Scale( newWidth, newHeight, wxIMAGE_QUALITY_HIGH );
+
+        if( !imgData.IsOk() )
+            return std::numeric_limits< GLuint >::max();
+    }
 
     bmp.w = imgData.GetSize().x;
     bmp.h = imgData.GetSize().y;
@@ -200,7 +239,7 @@ GLuint GL_BITMAP_CACHE::cacheBitmap( const BITMAP_BASE* aBitmap )
 
     if( imgData.HasAlpha() || imgData.HasMask() )
     {
-        bmp.size = bmp.w * bmp.h * 4;
+        bmp.size = static_cast<size_t>( bmp.w ) * bmp.h * 4;
         auto buf = std::make_unique<uint8_t[]>( bmp.size );
 
         uint8_t* dstP = buf.get();
@@ -248,7 +287,7 @@ GLuint GL_BITMAP_CACHE::cacheBitmap( const BITMAP_BASE* aBitmap )
     }
     else
     {
-        bmp.size = bmp.w * bmp.h * 3;
+        bmp.size = static_cast<size_t>( bmp.w ) * bmp.h * 3;
 
         uint8_t* srcP = imgData.GetData();
 
@@ -265,8 +304,10 @@ GLuint GL_BITMAP_CACHE::cacheBitmap( const BITMAP_BASE* aBitmap )
     bmp.accessTime = currentTime;
 
 #ifndef DISABLE_BITMAP_CACHE
-    if( ( m_cacheLru.size() + 1 > m_cacheMaxElements || m_cacheSize + bmp.size > m_cacheMaxSize )
-        && !m_cacheLru.empty() )
+    // A single oversized bitmap can exceed the whole cache budget, so evict until it fits or the
+    // cache is drained
+    while( ( m_cacheLru.size() + 1 > m_cacheMaxElements || m_cacheSize + bmp.size > m_cacheMaxSize )
+           && !m_cacheLru.empty() )
     {
         KIID toRemove( 0 );
         auto toRemoveLru = m_cacheLru.end();
@@ -331,8 +372,22 @@ OPENGL_GAL::OPENGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIO
         m_overlayBuffer( 0 ),
         m_tempBuffer( 0 ),
         m_isContextLocked( false ),
+        m_isContextValid( false ),
         m_lockClientCookie( 0 )
 {
+#ifdef __WXMSW__
+    if( wxLog::IsAllowedTraceMask( traceGalContext ) )
+    {
+        PIXELFORMATDESCRIPTOR pfd = {};
+        int                   pixelFormat = ::GetPixelFormat( GetHDC() );
+
+        ::DescribePixelFormat( GetHDC(), pixelFormat, sizeof( pfd ), &pfd );
+
+        wxLogTrace( traceGalContext, wxS( "OPENGL_GAL %p pixel format %d, swap copy %d, swap exchange %d" ), this,
+                    pixelFormat, ( pfd.dwFlags & PFD_SWAP_COPY ) != 0, ( pfd.dwFlags & PFD_SWAP_EXCHANGE ) != 0 );
+    }
+#endif
+
     if( m_glMainContext == nullptr )
     {
         m_glMainContext = Pgm().GetGLContextManager()->CreateCtx( this );
@@ -352,6 +407,9 @@ OPENGL_GAL::OPENGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIO
 
     m_shader = new SHADER();
     ++m_instanceCounter;
+
+    wxLogTrace( traceGalContext, wxS( "OPENGL_GAL %p created, context %p, main %p, instances %d" ), this,
+                m_glPrivContext, m_glMainContext, m_instanceCounter );
 
     m_bitmapCache = std::make_unique<GL_BITMAP_CACHE>();
 
@@ -429,17 +487,44 @@ OPENGL_GAL::OPENGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIO
 OPENGL_GAL::~OPENGL_GAL()
 {
     GL_CONTEXT_MANAGER* gl_mgr = Pgm().GetGLContextManager();
-    wxASSERT( gl_mgr );
 
     if( gl_mgr )
     {
-        gl_mgr->LockCtx( m_glPrivContext, this );
+        // wxMSW destroys child windows before their C++ objects, so our own device context
+        // can already be gone and the teardown below would run against a sibling's context
+        m_isContextValid = gl_mgr->LockCtx( m_glPrivContext, this );
 
         --m_instanceCounter;
-        if( m_isInitialized )
+
+        wxLogTrace( traceGalContext, wxS( "OPENGL_GAL %p destroyed, context %p valid %d initialized %d, "
+                                          "instances left %d" ),
+                    this, m_glPrivContext, m_isContextValid, m_isInitialized, m_instanceCounter );
+
+        if( !m_isContextValid )
+        {
+            // Whichever context is still current may belong to another share group, so every
+            // delete below would be aimed at an unrelated object of the same name
+            m_compositor->Abandon();
+            m_bitmapCache->Abandon();
+            m_shader->Abandon();
+
+            if( m_isInitialized )
+            {
+                m_cachedManager->Abandon();
+                m_nonCachedManager->Abandon();
+                m_overlayManager->Abandon();
+                m_tempManager->Abandon();
+            }
+        }
+        else if( m_isInitialized )
+        {
             glFlush();
+        }
+
         gluDeleteTess( m_tesselator );
-        ClearCache();
+
+        if( m_isContextValid )
+            ClearCache();
 
         delete m_compositor;
 
@@ -463,9 +548,7 @@ OPENGL_GAL::~OPENGL_GAL()
         // Are we destroying the last GAL instance?
         if( m_instanceCounter == 0 )
         {
-            gl_mgr->LockCtx( m_glMainContext, this );
-
-            if( m_isBitmapFontLoaded )
+            if( gl_mgr->LockCtx( m_glMainContext, this ) && m_isBitmapFontLoaded )
             {
                 glDeleteTextures( 1, &g_fontTexture );
                 m_isBitmapFontLoaded = false;
@@ -473,6 +556,10 @@ OPENGL_GAL::~OPENGL_GAL()
 
             gl_mgr->UnlockCtx( m_glMainContext );
             gl_mgr->DestroyCtx( m_glMainContext );
+
+            wxLogTrace( traceGalContext, wxS( "Main GL context %p destroyed with the last OPENGL_GAL" ),
+                        m_glMainContext );
+
             m_glMainContext = nullptr;
         }
     }
@@ -539,7 +626,9 @@ bool OPENGL_GAL::updatedGalDisplayOptions( const GAL_DISPLAY_OPTIONS& aOptions )
 
     bool refresh = false;
 
-    if( m_options.antialiasing_mode != m_compositor->GetAntialiasingMode() )
+    // Options arrive before the canvas is realized, so the context is not current yet.  Only
+    // the compositor needs it; BeginDrawing reconciles the mode once we can bind
+    if( m_isContextValid && m_options.antialiasing_mode != m_compositor->GetAntialiasingMode() )
     {
         m_compositor->SetAntialiasingMode( m_options.antialiasing_mode );
         m_isFramebufferInitialized = false;
@@ -594,6 +683,13 @@ void OPENGL_GAL::BeginDrawing()
     // Create the screen transformation (Do the RH-LH conversion here)
     glOrtho( 0, (GLint) m_screenSize.x, (GLsizei) m_screenSize.y, 0,
              -m_depthRange.x, -m_depthRange.y );
+
+    // An antialiasing change that arrived without a current context never reached the compositor
+    if( m_options.antialiasing_mode != m_compositor->GetAntialiasingMode() )
+    {
+        m_compositor->SetAntialiasingMode( m_options.antialiasing_mode );
+        m_isFramebufferInitialized = false;
+    }
 
     if( !m_isFramebufferInitialized )
     {
@@ -812,6 +908,9 @@ bool OPENGL_GAL::GetScreenshot( wxImage& aDstImage )
 
     GAL_CONTEXT_LOCKER locker( this );
 
+    if( !m_isContextValid )
+        return false;
+
     m_compositor->SetBuffer( m_mainBuffer );
 
     GLint viewport[4];
@@ -865,7 +964,12 @@ void OPENGL_GAL::LockContext( int aClientCookie )
     m_isContextLocked = true;
     m_lockClientCookie = aClientCookie;
 
-    Pgm().GetGLContextManager()->LockCtx( m_glPrivContext, this );
+    GL_CONTEXT_MANAGER* mgr = Pgm().GetGLContextManager();
+
+    if( !mgr )
+        return;
+
+    m_isContextValid = mgr->LockCtx( m_glPrivContext, this );
 }
 
 
@@ -880,7 +984,12 @@ void OPENGL_GAL::UnlockContext( int aClientCookie )
 
     m_isContextLocked = false;
 
-    Pgm().GetGLContextManager()->UnlockCtx( m_glPrivContext );
+    GL_CONTEXT_MANAGER* mgr = Pgm().GetGLContextManager();
+
+    if( !mgr )
+        return;
+
+    mgr->UnlockCtx( m_glPrivContext );
 }
 
 
@@ -2909,6 +3018,10 @@ void OPENGL_GAL::init()
         throw std::runtime_error( "No GL context is current (glGetString returned NULL)" );
 
     SetOpenGLInfo( vendor, renderer, version );
+
+    wxLogTrace( traceGalContext, wxS( "GL context %p ready on canvas %p: %s | %s | %s" ),
+                m_glPrivContext, this, wxString::FromUTF8( vendor ),
+                wxString::FromUTF8( renderer ), wxString::FromUTF8( version ) );
 
     // Check the OpenGL version (minimum 2.1 is required)
     if( !GLAD_GL_VERSION_2_1 )

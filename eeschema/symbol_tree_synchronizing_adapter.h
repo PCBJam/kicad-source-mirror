@@ -28,6 +28,7 @@
 
 #include <lib_tree_model_adapter.h>
 #include <map>
+#include <set>
 
 class SYMBOL_EDIT_FRAME;
 class SYMBOL_LIBRARY_MANAGER;

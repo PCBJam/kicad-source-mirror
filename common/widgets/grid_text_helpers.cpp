@@ -240,6 +240,15 @@ void GRID_CELL_STC_EDITOR::Create( wxWindow* aParent, wxWindowID aId, wxEvtHandl
     stc_ctrl()->SetMarginWidth( 0, 0 ); // Symbol margin
     stc_ctrl()->SetMarginWidth( 1, 0 ); // Line-number margin
     stc_ctrl()->SetEOLMode( wxSTC_EOL_LF );
+
+    if( !m_singleLine )
+    {
+        // Wrapping is display-only and does not insert newlines into the stored text.
+        stc_ctrl()->SetWrapMode( wxSTC_WRAP_WORD );
+        stc_ctrl()->SetWrapVisualFlags( wxSTC_WRAPVISUALFLAG_END );
+        stc_ctrl()->SetWrapIndentMode( wxSTC_WRAPINDENT_INDENT );
+    }
+
     stc_ctrl()->AutoCompSetMaxWidth( 25 );
     stc_ctrl()->AutoCompSetIgnoreCase( m_ignoreCase );
     stc_ctrl()->UsePopUp( 0 );
@@ -467,6 +476,37 @@ void GRID_CELL_TEXT_BUTTON::BeginEdit( int aRow, int aCol, wxGrid* aGrid )
 
     // Bind event to handle text changes
     Combo()->Bind( wxEVT_TEXT, &GRID_CELL_TEXT_BUTTON::OnTextChange, this );
+
+    // The SetInSetFocus() guard above is never lifted, so wxGridCellEditorEvtHandler ignores
+    // every kill-focus and the cell only commits on Enter, Tab or a click on the grid: a path
+    // pasted into Footprint Properties > 3D Models stayed uncommitted (and its model unloaded)
+    // until the next "add row". Commit when focus leaves for another window of the same
+    // dialog, once BeginEdit's own focus changes (the combo hides and re-shows its text
+    // control) have run their course.
+    m_editSettled = false;
+    Combo()->CallAfter( [this]() { m_editSettled = true; } );
+    Combo()->Bind( wxEVT_KILL_FOCUS, &GRID_CELL_TEXT_BUTTON::OnKillFocus, this );
+}
+
+
+void GRID_CELL_TEXT_BUTTON::OnKillFocus( wxFocusEvent& event )
+{
+    event.Skip();
+
+    wxWindow* next = event.GetWindow();
+
+    if( !m_editSettled || !m_grid || !next )
+        return;
+
+    // Focus moving inside the combo (its button) or to another top-level window (the browse
+    // dialog the button opens) keeps the edit open.
+    if( next == Combo() || Combo()->IsDescendant( next )
+            || wxGetTopLevelParent( next ) != wxGetTopLevelParent( Combo() ) )
+    {
+        return;
+    }
+
+    m_grid->CallAfter( &wxGrid::DisableCellEditControl );
 }
 
 
@@ -486,6 +526,8 @@ void GRID_CELL_TEXT_BUTTON::OnTextChange( wxCommandEvent& event )
 bool GRID_CELL_TEXT_BUTTON::EndEdit( int, int, const wxGrid*, const wxString&, wxString *aNewVal )
 {
     Combo()->Unbind( wxEVT_TEXT, &GRID_CELL_TEXT_BUTTON::OnTextChange, this );
+    Combo()->Unbind( wxEVT_KILL_FOCUS, &GRID_CELL_TEXT_BUTTON::OnKillFocus, this );
+    m_editSettled = false;
     m_grid = nullptr;
     m_row = -1;
     m_col = -1;

@@ -714,9 +714,14 @@ public:
                                        } );
 
                 wxASSERT( p != m_items.end() );
+
+                // Keep the parent alive through the ItemDeleted notification; erasing it from
+                // m_items destroys the LIST_ITEM, after which parent would be dangling.
+                wxDataViewItem             grandParent( parent->Parent() );
+                std::unique_ptr<LIST_ITEM> removedParent = std::move( *p );
                 m_items.erase( p );
 
-                ItemDeleted( wxDataViewItem( parent->Parent() ), wxDataViewItem( parent ) );
+                ItemDeleted( grandParent, wxDataViewItem( removedParent.get() ) );
             }
         }
 
@@ -747,6 +752,8 @@ public:
 
     void deleteAllItems()
     {
+        // BeforeReset() drives the canceller, dropping any deferred EnsureVisible before the
+        // clear frees items it may point at.
         BeforeReset();
         m_items.clear();
         AfterReset();
@@ -921,6 +928,15 @@ protected:
     int Compare( const wxDataViewItem& aItem1, const wxDataViewItem& aItem2, unsigned int aCol,
                  bool aAsc ) const override
     {
+        const auto compareNetNames =
+                [&]( const LIST_ITEM& i1, const LIST_ITEM& i2)
+                {
+                    const wxString& s1 = i1.GetNetName();
+                    const wxString& s2 = i2.GetNetName();
+
+                    return aAsc ? ValueStringCompare( s1, s2 ) : ValueStringCompare( s2, s1 );
+                };
+
         const LIST_ITEM& i1 = *static_cast<const LIST_ITEM*>( aItem1.GetID() );
         const LIST_ITEM& i2 = *static_cast<const LIST_ITEM*>( aItem2.GetID() );
 
@@ -932,10 +948,7 @@ protected:
 
         if( aCol == COLUMN_NAME )
         {
-            const wxString& s1 = i1.GetNetName();
-            const wxString& s2 = i2.GetNetName();
-
-            int res = aAsc ? ValueStringCompare( s1, s2 ) : ValueStringCompare( s2, s1 );
+            int res = compareNetNames( i1, i2 );
 
             if( res != 0 )
                 return res;
@@ -1009,7 +1022,18 @@ protected:
             }
         }
 
-        // when the item values compare equal resort to pointer comparison.
+        // When the item values compare equal, fall back to net name order so the sort is stable
+        // across rebuilds, and also in a sensible order for the user to find entries when sorting
+        // on other columns.
+        {
+            int res = compareNetNames( i1, i2 );
+
+            if( res != 0 )
+                return res;
+        }
+
+        // If the entries are STILL equal (how?), fall back to the pointer value, but this won't be
+        // stable across rebuilds as it is based on a heap allocation.
         wxUIntPtr id1 = wxPtrToUInt( aItem1.GetID() );
         wxUIntPtr id2 = wxPtrToUInt( aItem2.GetID() );
 

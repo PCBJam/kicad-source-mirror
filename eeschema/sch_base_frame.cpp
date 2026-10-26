@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <advanced_config.h>
 #include <base_units.h>
+#include <kiplatform/environment.h>
 #include <kiplatform/io.h>
 #include <wildcards_and_files_ext.h>
 #include <background_jobs_monitor.h>
@@ -62,6 +63,7 @@
 #include <tool/tool_manager.h>
 #include <tool/tool_dispatcher.h>
 #include <tools/sch_selection_tool.h>
+#include <tools/sch_find_replace_tool.h>
 #include <trace_helpers.h>
 #include <view/view_controls.h>
 #include <widgets/kistatusbar.h>
@@ -357,9 +359,14 @@ void SCH_BASE_FRAME::ActivateGalCanvas()
 
         m_spaceMouse->SetCanvas( GetCanvas() );
     }
-    catch( const std::system_error& e )
+    catch( const std::exception& e )
     {
-        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), e.what() );
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ), wxS( "%s" ), e.what() );
+    }
+    catch( ... )
+    {
+        wxLogTrace( wxT( "KI_TRACE_NAVLIB" ),
+                    wxT( "Unknown exception during SpaceMouse initialization" ) );
     }
 }
 
@@ -519,8 +526,9 @@ void SCH_BASE_FRAME::ShowFindReplaceDialog( bool aReplace )
     wxString findString;
 
     SCH_SELECTION& selection = m_toolManager->GetTool<SCH_SELECTION_TOOL>()->GetSelection();
+    SCH_FIND_REPLACE_TOOL* findTool = m_toolManager->GetTool<SCH_FIND_REPLACE_TOOL>();
 
-    if( selection.Size() == 1 )
+    if( selection.Size() == 1 && selection.Front() != findTool->GetLastFoundItem() )
     {
         EDA_ITEM* front = selection.Front();
 
@@ -795,6 +803,7 @@ wxString SCH_BASE_FRAME::SelectLibrary( const wxString& aDialogTitle, const wxSt
 
 void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
 {
+#if wxUSE_FSWATCHER
     Unbind( wxEVT_FSWATCHER, &SCH_BASE_FRAME::OnSymChange, this );
 
     if( m_watcher )
@@ -848,24 +857,35 @@ void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
     if( !wxEventLoopBase::GetActive() )
         return;
 
-    Bind( wxEVT_FSWATCHER, &SCH_BASE_FRAME::OnSymChange, this );
-    m_watcher = std::make_unique<wxFileSystemWatcher>();
-    m_watcher->SetOwner( this );
-
     wxFileName fn;
     fn.AssignDir( m_watcherFileName.GetPath() );
     fn.DontFollowLink();
+
+    // wxMSW frees a watch before SMB completes its pending read, which then corrupts the heap
+    if( KIPLATFORM::ENV::IsNetworkPath( fn.GetPath() ) )
+    {
+        wxLogTrace( traceLibWatch, "Network path, not watching: %s", fn.GetPath() );
+        return;
+    }
+
+    Bind( wxEVT_FSWATCHER, &SCH_BASE_FRAME::OnSymChange, this );
+    m_watcher = std::make_unique<wxFileSystemWatcher>();
+    m_watcher->SetOwner( this );
 
     {
         // Silence OS errors that come from the watcher
         wxLogNull silence;
         m_watcher->Add( fn );
     }
+#else
+    (void) aID;
+#endif
 }
 
 
 void SCH_BASE_FRAME::OnSymChange( wxFileSystemWatcherEvent& aEvent )
 {
+#if wxUSE_FSWATCHER
     wxLogTrace( traceLibWatch, "OnSymChange: %s, watcher file: %s",
                 aEvent.GetPath().GetFullPath(), m_watcherFileName.GetFullPath() );
 
@@ -893,6 +913,9 @@ void SCH_BASE_FRAME::OnSymChange( wxFileSystemWatcherEvent& aEvent )
         wxLogTrace( traceLibWatch, "Failed to start the debounce timer" );
         return;
     }
+#else
+    (void) aEvent;
+#endif
 }
 
 
@@ -911,13 +934,22 @@ void SCH_BASE_FRAME::OnSymChangeDebounceTimer( wxTimerEvent& aEvent )
         return;
     }
 
-    // If the frame is currently disabled then a quasi-modal/modal dialog is open on top
-    // of it (for example the symbol properties dialog).  Reloading the library now would
-    // delete the LIB_SYMBOL the dialog is editing and crash on dialog close.  Defer the
-    // reload until the dialog is dismissed.
-    if( !IsEnabled() )
+    // A modal dialog may be registered before wxGTK disables the frame.  Reloading the
+    // library while either state is active would delete the LIB_SYMBOL being edited.
+    if( !IsEnabled() || Kiway().HasBlockingDialog() )
     {
-        wxLogTrace( traceLibWatch, "Frame disabled (dialog open); restarting debounce timer" );
+        wxLogTrace( traceLibWatch, "Dialog open; restarting debounce timer" );
+        m_watcherDebounceTimer.StartOnce( 1000 );
+        return;
+    }
+
+    // An interactive tool (move, draw, place pin/text) holds references into the current symbol
+    // while its event loop runs.  Reloading now would free those out from under the running tool
+    // and crash.  Restart the timer before touching the watcher timestamp so the reload is retried
+    // once the tool finishes rather than silently dropped.
+    if( !ToolStackIsEmpty() )
+    {
+        wxLogTrace( traceLibWatch, "Interactive tool active; restarting debounce timer" );
         m_watcherDebounceTimer.StartOnce( 1000 );
         return;
     }

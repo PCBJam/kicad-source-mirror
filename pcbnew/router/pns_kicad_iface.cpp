@@ -903,17 +903,17 @@ int PNS_PCBNEW_RULE_RESOLVER::Clearance( const PNS::ITEM* aA, const PNS::ITEM* a
 
     for( int layer = layers.Start(); layer <= layers.End(); ++layer )
     {
-        if( !sameNet && !freePad )
+        if( IsDrilledHole( aA ) && IsDrilledHole( aB ) )
         {
-            if( IsDrilledHole( aA ) && IsDrilledHole( aB ) )
+            if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_HOLE_TO_HOLE, aA, aB, layer, &constraint ) )
             {
-                if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_HOLE_TO_HOLE, aA, aB, layer, &constraint ) )
-                {
-                    if( constraint.m_Value.Min() > rv )
-                        rv = constraint.m_Value.Min();
-                }
+                if( constraint.m_Value.Min() > rv )
+                    rv = constraint.m_Value.Min();
             }
-            else if( isHole( aA ) || isHole( aB ) )
+        }
+        else if( isHole( aA ) || isHole( aB ) )
+        {
+            if( !sameNet )
             {
                 if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_HOLE_CLEARANCE, aA, aB, layer, &constraint ) )
                 {
@@ -921,9 +921,12 @@ int PNS_PCBNEW_RULE_RESOLVER::Clearance( const PNS::ITEM* aA, const PNS::ITEM* a
                         rv = constraint.m_Value.Min();
                 }
             }
+        }
 
-            // No 'else'; plated holes get both HOLE_CLEARANCE and CLEARANCE
-            if( isCopper( aA ) && ( !aB || isCopper( aB ) ) )
+        // No 'else'; plated holes get both HOLE_CLEARANCE and CLEARANCE
+        if( isCopper( aA ) && ( !aB || isCopper( aB ) ) && !sameNet && !freePad )
+        {
+            if( !sameNet && !freePad )
             {
                 if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_CLEARANCE, aA, aB, layer, &constraint ) )
                 {
@@ -931,15 +934,14 @@ int PNS_PCBNEW_RULE_RESOLVER::Clearance( const PNS::ITEM* aA, const PNS::ITEM* a
                         rv = constraint.m_Value.Min();
                 }
             }
+        }
 
-            // No 'else'; non-plated milled holes get both HOLE_CLEARANCE and EDGE_CLEARANCE
-            if( isEdge( aA ) || IsNonPlatedSlot( aA ) || isEdge( aB ) || IsNonPlatedSlot( aB ) )
+        if( isEdge( aA ) || IsNonPlatedSlot( aA ) || isEdge( aB ) || IsNonPlatedSlot( aB ) )
+        {
+            if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_EDGE_CLEARANCE, aA, aB, layer, &constraint ) )
             {
-                if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_EDGE_CLEARANCE, aA, aB, layer, &constraint ) )
-                {
-                    if( constraint.m_Value.Min() > rv )
-                        rv = constraint.m_Value.Min();
-                }
+                if( constraint.m_Value.Min() > rv )
+                    rv = constraint.m_Value.Min();
             }
         }
 
@@ -1298,6 +1300,30 @@ bool PNS_KICAD_IFACE_BASE::ImportSizes( PNS::SIZES_SETTINGS& aSizes, PNS::ITEM* 
 
     aSizes.SetDiffPairHoleToHole( std::max( holeToHoleMin, aSizes.GetHoleToHole() ) );
 
+    // Seed with the board hole-to-copper minimum so a null DRC engine still constrains the gap,
+    // matching how the hole-to-hole block above falls back to bds.m_HoleToHoleMin.
+    int copperToHole = bds.m_HoleClearance;
+
+    // A net-scoped rule may bind the two vias asymmetrically, so query both orderings the way
+    // the DRC copper-clearance provider tests each hole in turn.
+    for( PNS::CONSTRAINT_TYPE type : { PNS::CONSTRAINT_TYPE::CT_HOLE_CLEARANCE,
+                                       PNS::CONSTRAINT_TYPE::CT_PHYSICAL_HOLE_CLEARANCE } )
+    {
+        if( m_ruleResolver->QueryConstraint( type, &dummyVia, &coupledVia, UNDEFINED_LAYER,
+                                             &constraint ) )
+        {
+            copperToHole = std::max( copperToHole, constraint.m_Value.Min() );
+        }
+
+        if( m_ruleResolver->QueryConstraint( type, &coupledVia, &dummyVia, UNDEFINED_LAYER,
+                                             &constraint ) )
+        {
+            copperToHole = std::max( copperToHole, constraint.m_Value.Min() );
+        }
+    }
+
+    aSizes.SetDiffPairCopperToHole( copperToHole );
+
     return true;
 }
 
@@ -1397,7 +1423,7 @@ public:
     ~PNS_PCBNEW_DEBUG_DECORATOR()
     {
         PNS_PCBNEW_DEBUG_DECORATOR::Clear();
-        
+
         for ( PNS::ITEM* item : m_clonedItems )
         {
             delete item;
@@ -2857,6 +2883,12 @@ BOARD_CONNECTED_ITEM* PNS_KICAD_IFACE::createBoardItem( PNS::ITEM* aItem )
 
         if( BOARD_ITEM* src = aItem->GetSourceItem() )
         {
+            if( !m_itemGroups.contains( src ) )
+            {
+                if( EDA_GROUP* group = src->GetParentGroup() )
+                    m_itemGroups[src] = group;
+            }
+
             if( m_itemGroups.contains( src ) )
                 m_replacementMap[src].push_back( newBoardItem );
         }

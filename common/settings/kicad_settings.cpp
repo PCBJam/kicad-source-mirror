@@ -59,6 +59,8 @@ KICAD_SETTINGS::KICAD_SETTINGS() :
 
     m_params.emplace_back( new PARAM<int>( "template.filter", &m_TemplateFilterChoice, 0 ) );
 
+    m_params.emplace_back( new PARAM<wxString>( "template.browsed_path", &m_BrowsedTemplatesPath, "" ) );
+
     m_params.emplace_back( new PARAM_LAMBDA<nlohmann::json>(
             "pcm.repositories",
             [&]() -> nlohmann::json
@@ -156,6 +158,9 @@ KICAD_SETTINGS::KICAD_SETTINGS() :
             },
             nlohmann::json::object() ) );
 
+    // The getter omits an override once both flags clear, so the save has to delete the key
+    m_params.back()->SetClearUnknownKeys();
+
     m_params.emplace_back(
             new PARAM<wxString>( "pcm.last_download_dir", &m_PcmLastDownloadDir, "" ) );
 
@@ -167,6 +172,8 @@ KICAD_SETTINGS::KICAD_SETTINGS() :
 
     m_params.emplace_back( new PARAM<wxString>( "pcm.lib_prefix", &m_PcmLibPrefix,
                                                 wxS( "PCM_" ) ) );
+
+    m_params.emplace_back( new PARAM<wxString>( "pcm.last_selected_repo_id", &m_PcmLastSelectedRepoId, "" ) );
 }
 
 

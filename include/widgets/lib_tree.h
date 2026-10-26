@@ -140,6 +140,8 @@ public:
      */
     void ExpandLibId( const LIB_ID& aLibId );
 
+    std::vector<LIB_ID> GetExpandedLibraries() const;
+
     void ExpandAll();
     void CollapseAll();
 
@@ -244,6 +246,7 @@ protected:
 
     void onTreeSelect( wxDataViewEvent& aEvent );
     void onTreeActivate( wxDataViewEvent& aEvent );
+    void onTreeExpanding( wxDataViewEvent& aEvent );
     void onTreeCharHook( wxKeyEvent& aEvent );
 
     void onIdle( wxIdleEvent& aEvent );

@@ -70,6 +70,11 @@ DIALOG_TEXT_PROPERTIES::DIALOG_TEXT_PROPERTIES( PCB_BASE_EDIT_FRAME* aParent, PC
 
     m_MultiLineText->SetEOLMode( wxSTC_EOL_LF );
 
+    // Wrapping is display-only and does not insert newlines into the stored text.
+    m_MultiLineText->SetWrapMode( wxSTC_WRAP_WORD );
+    m_MultiLineText->SetWrapVisualFlags( wxSTC_WRAPVISUALFLAG_END );
+    m_MultiLineText->SetWrapIndentMode( wxSTC_WRAPINDENT_INDENT );
+
 #ifdef _WIN32
     // Without this setting, on Windows, some esoteric unicode chars create display issue
     // in a wxStyledTextCtrl.
@@ -146,11 +151,12 @@ DIALOG_TEXT_PROPERTIES::DIALOG_TEXT_PROPERTIES( PCB_BASE_EDIT_FRAME* aParent, PC
         m_MultiLineSizer->Show( false );
 
         // Do not allow locking items in the footprint editor
-        m_cbLocked->Show( false );
+        if( m_frame->IsType( FRAME_FOOTPRINT_EDITOR ) )
+            m_cbLocked->Show( false );
 
-        m_tabOrder = { m_SingleLineText, m_LayerSelectionCtrl, m_SizeXCtrl,     m_SizeYCtrl,     m_ThicknessCtrl,
-                       m_Visible,        m_cbKnockout,         m_KeepUpright,   m_PositionXCtrl, m_PositionYCtrl,
-                       m_OrientCtrl,     m_sdbSizerOK,         m_sdbSizerCancel };
+        m_tabOrder = { m_SingleLineText, m_cbLocked,   m_LayerSelectionCtrl, m_SizeXCtrl,     m_SizeYCtrl,
+                       m_ThicknessCtrl,  m_Visible,    m_cbKnockout,         m_KeepUpright,   m_PositionXCtrl,
+                       m_PositionYCtrl,  m_OrientCtrl, m_sdbSizerOK,         m_sdbSizerCancel };
     }
     else
     {

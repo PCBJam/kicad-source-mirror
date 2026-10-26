@@ -173,6 +173,8 @@ FMT_VER HEADER_PARSER::FormatFromMagic( uint32_t aMagic )
     case 0x00140E00: return FMT_VER::V_174;
     case 0x00141500: return FMT_VER::V_175;
     case 0x00150000: return FMT_VER::V_180;
+    case 0x00150200: return FMT_VER::V_181;
+    case 0x00160100: return FMT_VER::V_190;
     default: break;
     }
 
@@ -260,14 +262,17 @@ std::unique_ptr<ALLEGRO::FILE_HEADER> HEADER_PARSER::ParseHeader()
 
     ReadCond( m_stream, m_fmtVer, header->m_LL_V18_6 );
     ReadCond( m_stream, m_fmtVer, header->m_0x35_Start_V18 );
+    ReadCond( m_stream, m_fmtVer, header->m_Unknown_V181 );
     ReadCond( m_stream, m_fmtVer, header->m_0x35_End_V18 );
 
     // Quick check that the positions line up
     // (start of the m_AllegroVersion string is easy to find)
     if( m_fmtVer < FMT_VER::V_180 )
         wxASSERT( m_stream.Position() - headerStartPos == 0xF8 );
-    else
+    else if( m_fmtVer < FMT_VER::V_181 )
         wxASSERT( m_stream.Position() - headerStartPos == 0x124 );
+    else
+        wxASSERT( m_stream.Position() - headerStartPos == 0x144 );
 
     m_stream.ReadBytes( header->m_AllegroVersion.data(), header->m_AllegroVersion.size() );
     header->m_Unknown4 = m_stream.ReadU32();
@@ -313,7 +318,7 @@ std::unique_ptr<ALLEGRO::FILE_HEADER> HEADER_PARSER::ParseHeader()
 
     header->m_UnitsDivisor = m_stream.ReadU32();
 
-    m_stream.SkipU32( 110 );
+    m_stream.SkipU32( m_fmtVer >= FMT_VER::V_181 ? 102 : 110 );
 
     for( size_t i = 0; i < header->m_LayerMap.size(); ++i )
     {
@@ -835,7 +840,10 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x0F( FILE_STREAM& stream, FMT_VER
 
     ReadCond( stream, aVer, data.m_Unknown1 );
 
-    stream.ReadBytes( data.m_CompDeviceType.data(), data.m_CompDeviceType.size() );
+    if( aVer < FMT_VER::V_190 )
+        stream.ReadBytes( data.m_CompDeviceType.data(), data.m_CompDeviceType.size() );
+
+    ReadCond( stream, aVer, data.m_CompDeviceTypePtr );
 
     ReadCond( stream, aVer, data.m_Next );
 
@@ -1145,12 +1153,17 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x1C_PADSTACK( FILE_STREAM& aStrea
         comp.m_X3 = aStream.ReadS32();
         comp.m_X4 = aStream.ReadS32();
 
-        comp.m_StrPtr = aStream.ReadU32();
-
-        // The last component has a different size only in < 17.2
-        if( aVer >= FMT_VER::V_172 || i < nComps - 1 )
+        if( aVer >= FMT_VER::V_172 )
         {
             comp.m_Z2 = aStream.ReadU32();
+            comp.m_ShapePtr = aStream.ReadU32();
+        }
+        else
+        {
+            comp.m_ShapePtr = aStream.ReadU32();
+
+            if(i < nComps - 1)
+                comp.m_Z2 = aStream.ReadU32();
         }
     }
 
@@ -1720,6 +1733,7 @@ static BLK_0x30_STR_WRAPPER::TEXT_PROPERTIES ParseTextProps( FILE_STREAM& aStrea
     {
     case 0x00: props.m_Reversal = BLK_0x30_STR_WRAPPER::TEXT_REVERSAL::STRAIGHT; break;
     case 0x01: props.m_Reversal = BLK_0x30_STR_WRAPPER::TEXT_REVERSAL::REVERSED; break;
+    case 0x03: props.m_Reversal = BLK_0x30_STR_WRAPPER::TEXT_REVERSAL::REVERSED_3; break;
     case 0x0c:
     default:
         props.m_Reversal = BLK_0x30_STR_WRAPPER::TEXT_REVERSAL::UNKNOWN;
@@ -2229,6 +2243,23 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x3B( FILE_STREAM& aStream, FMT_VE
 }
 
 
+static std::unique_ptr<BLOCK_BASE> ParseBlock_0x3E( FILE_STREAM& aStream, FMT_VER aVer )
+{
+    auto block = std::make_unique<BLOCK<BLK_0x3E>>( 0x3E, aStream.Position() );
+
+    auto& data = block->GetData();
+
+    aStream.Skip( 3 );
+
+    data.m_Key = aStream.ReadU32();
+
+    for( uint32_t& word : data.m_Unknown )
+        word = aStream.ReadU32();
+
+    return block;
+}
+
+
 static std::unique_ptr<BLOCK_BASE> ParseBlock_0x3C( FILE_STREAM& aStream, FMT_VER aVer )
 {
     auto block = std::make_unique<BLOCK<BLK_0x3C_KEY_LIST>>( 0x3C, aStream.Position() );
@@ -2538,6 +2569,11 @@ std::unique_ptr<BLOCK_BASE> ALLEGRO::BLOCK_PARSER::ParseBlock( bool& aEndOfObjec
         block = ParseBlock_0x3C( m_stream, m_ver );
         break;
     }
+    case 0x3E:
+    {
+        block = ParseBlock_0x3E( m_stream, m_ver );
+        break;
+    }
     case 0x00:
     {
         // Block type 0x00 marks the end of the objects section
@@ -2597,7 +2633,7 @@ void ALLEGRO::PARSER::readObjects( BRD_DB& aBoard )
                 while( m_stream.GetU8( nextByte ) && nextByte == 0x00 )
                     scanPos = m_stream.Position();
 
-                if( nextByte > 0x00 && nextByte <= 0x3C )
+                if( nextByte > 0x00 && nextByte <= 0x3E )
                 {
                     size_t blockStart = scanPos;
 
@@ -2612,7 +2648,7 @@ void ALLEGRO::PARSER::readObjects( BRD_DB& aBoard )
                     m_stream.GetU8( alignedByte );
                     m_stream.Seek( blockStart );
 
-                    if( alignedByte == 0x00 || alignedByte > 0x3C )
+                    if( alignedByte == 0x00 || alignedByte > 0x3E )
                         break;
 
                     wxLogTrace( traceAllegroParser,

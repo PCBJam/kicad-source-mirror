@@ -52,6 +52,9 @@
 #include <footprint_info_impl.h>
 #include <footprint.h>
 #include <nlohmann/json.hpp>
+#ifdef __EMSCRIPTEN__
+#include <pcb_io/pcbjam_fp/pcb_io_pcbjam_fp.h>
+#endif
 #include <dialogs/dialog_configure_paths.h>
 #include <dialogs/panel_grid_settings.h>
 #include <panel_display_options.h>
@@ -63,11 +66,15 @@
 #include <panel_pcbnew_color_settings.h>
 #include <panel_pcbnew_action_plugins.h>
 #include <panel_pcbnew_display_origin.h>
+#ifndef __EMSCRIPTEN__
 #include <panel_3D_display_options.h>
 #include <panel_3D_opengl_options.h>
 #include <panel_3D_raytracing_options.h>
+#endif
 #include <project_pcb.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <string_utils.h>
 #include <thread_pool.h>
 #include <trace_helpers.h>
@@ -88,7 +95,110 @@
 
 /* init functions defined by swig */
 
+#ifdef KICAD_SCRIPTING
 extern "C" PyObject* PyInit__pcbnew( void );
+#endif
+
+
+#ifdef __EMSCRIPTEN__
+/**
+ * The footprint index: for every pcbjam library (keyed by the /mnt/pcbjam/<id>
+ * URI tail) and every project .pretty folder we asked about (keyed by its
+ * path), each footprint's name + unique electrical pad count
+ * (FOOTPRINT::GetUniquePadCount( DO_NOT_INCLUDE_NPTH )).  filterFootprints()
+ * filters against this instead of loading every footprint library on the
+ * chooser's first symbol selection; no bodies are needed at all.
+ *
+ * Asked again on every call with the version held (libs 0029): the JS side
+ * answers "=" when nothing changed, or the new index when a library or a
+ * project file did.  A failed or malformed answer keeps the last good index.
+ */
+struct PCBJAM_FP_INDEX_ENTRY
+{
+    wxString name;
+    int      pads;
+};
+
+static const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>*
+pcbjamFpIndex( const std::vector<std::string>& aProjectLibs )
+{
+    static std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> s_index;
+    static std::string s_version;
+    static bool s_loaded = false;
+
+    nlohmann::json request = { { "v", s_version }, { "projectLibs", aProjectLibs } };
+
+    std::optional<std::string> raw = PCB_IO_PCBJAM_FP::BridgeRequest(
+            "index", wxS( "/mnt/pcbjam/" ), wxString::FromUTF8( request.dump() ) );
+
+    // Null = provider absent or no index: keep the last good one, if any.
+    if( !raw )
+        return s_loaded ? &s_index : nullptr;
+
+    if( *raw == "=" && s_loaded )
+        return &s_index;
+
+    try
+    {
+        nlohmann::json parsed = nlohmann::json::parse( *raw );
+        std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> index;
+
+        for( const auto& [libId, entries] : parsed.at( "libs" ).items() )
+        {
+            std::vector<PCBJAM_FP_INDEX_ENTRY>& vec = index[libId];
+            vec.reserve( entries.size() );
+
+            for( const auto& e : entries )
+            {
+                vec.push_back( { wxString::FromUTF8( e.at( 0 ).get<std::string>() ),
+                                 e.at( 1 ).get<int>() } );
+            }
+        }
+
+        s_index = std::move( index );
+        s_version = parsed.value( "v", std::string() );
+        s_loaded = true;
+    }
+    catch( const std::exception& )
+    {
+        // Malformed: keep the last good index; with none, every pcbjam library is
+        // skipped and project folders take the parse path.
+        if( !s_loaded )
+            return nullptr;
+    }
+
+    return &s_index;
+}
+
+
+/// The resolved paths of the footprint table's native rows that are folders (the
+/// project's own .pretty libraries), in table order: the JS side indexes them too.
+static std::vector<std::string> pcbjamProjectFpLibs()
+{
+    std::vector<std::string> projectLibs;
+
+    for( const LIBRARY_TABLE_ROW* row : Pgm().GetLibraryManager().Rows( LIBRARY_TABLE_TYPE::FOOTPRINT ) )
+    {
+        if( row->Disabled() )
+            continue;
+
+        wxString uri = LIBRARY_MANAGER::GetFullURI( row, true );
+
+        if( !uri.IsEmpty() && !uri.StartsWith( wxS( "/mnt/pcbjam/" ) ) && wxDirExists( uri ) )
+            projectLibs.push_back( std::string( uri.utf8_str() ) );
+    }
+
+    return projectLibs;
+}
+
+
+/// pcbjam (libs 0028 8.3): the background warm-up's footprint step in a schematic
+/// session, so the first Add Symbol footprint list is answered from the cache.
+extern "C" void pcbjam_fp_index_warm()
+{
+    pcbjamFpIndex( pcbjamProjectFpLibs() );
+}
+#endif
 
 
 /**
@@ -161,12 +271,103 @@ static wxString filterFootprints( const wxString& aFilterJson )
         adapter->AsyncLoad();
         adapter->BlockUntilLoaded();
 
+        // Footprint filter patterns with case-insensitive matching
+        auto matchesFilters =
+                [&filterMatchers]( const wxString& aLibNickname, const wxString& aName ) -> bool
+                {
+                    if( filterMatchers.empty() )
+                        return true;
+
+                    for( const auto& matcher : filterMatchers )
+                    {
+                        wxString name;
+
+                        // If filter contains ':', include library nickname in match string
+                        if( matcher->GetPattern().Contains( wxS( ":" ) ) )
+                            name = aLibNickname.Lower() + wxS( ":" );
+
+                        name += aName.Lower();
+
+                        if( matcher->Find( name ) )
+                            return true;
+                    }
+
+                    return false;
+                };
+
         // Iterate through preloaded footprints directly instead of re-reading from disk
         json output = json::array();
         int  count = 0;
 
+#ifdef __EMSCRIPTEN__
+        // The project's own .pretty folders are indexed by the JS side too, so the
+        // list never parses a library inside the chooser's modal pump.
+        const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>* fpIndex =
+                pcbjamFpIndex( pcbjamProjectFpLibs() );
+        static std::set<wxString> s_tracedSkips;
+#endif
+
         for( const wxString& nickname : adapter->GetLibraryNames() )
         {
+#ifdef __EMSCRIPTEN__
+            // Answer from the index: names and pad counts only, NO body loads.
+            // A pcbjam lib the index doesn't cover (its index can't be had) is
+            // SKIPPED rather than fat-loaded: this filter runs inside the
+            // chooser's modal event pump, and the lazy per-lib fat-load fan-out
+            // (bridge suspend + thread-pool parse per library) would fan
+            // suspending fetches into that modal wait (it crashed the retired
+            // asyncify pump outright). A project folder the index doesn't cover
+            // keeps the native parse path below (MEMFS, no bridge).
+            {
+                std::optional<LIBRARY_TABLE_ROW*> row = adapter->GetRow( nickname );
+                wxString uri = row ? LIBRARY_MANAGER::GetFullURI( *row, true ) : wxString();
+                bool     pcbjamLib = uri.StartsWith( wxS( "/mnt/pcbjam/" ) );
+                std::string key = pcbjamLib
+                                          ? std::string( uri.Mid( strlen( "/mnt/pcbjam/" ) ).utf8_str() )
+                                          : std::string( uri.utf8_str() );
+                const std::vector<PCBJAM_FP_INDEX_ENTRY>* entries = nullptr;
+
+                if( fpIndex )
+                {
+                    if( auto it = fpIndex->find( key ); it != fpIndex->end() )
+                        entries = &it->second;
+                }
+
+                if( pcbjamLib && !entries )
+                {
+                    if( s_tracedSkips.insert( nickname ).second )
+                        KI_TRACE( wxS( "PCBJAM_FP" ), wxS( "footprint filter: no index for %s, skipped\n" ),
+                                    nickname );
+
+                    continue;
+                }
+
+                if( entries )
+                {
+                    for( const PCBJAM_FP_INDEX_ENTRY& entry : *entries )
+                    {
+                        // Pin count filter
+                        if( pinCount > 0 && entry.pads != pinCount )
+                            continue;
+
+                        if( !matchesFilters( nickname, entry.name ) )
+                            continue;
+
+                        wxString libId = LIB_ID( nickname, entry.name ).Format();
+                        output.push_back( libId.ToStdString() );
+
+                        if( ++count >= maxResults )
+                            break;
+                    }
+
+                    if( count >= maxResults )
+                        break;
+
+                    continue;
+                }
+            }
+#endif
+
             std::vector<FOOTPRINT*> footprints = adapter->GetFootprints( nickname, true );
 
             for( FOOTPRINT* fp : footprints )
@@ -183,31 +384,9 @@ static wxString filterFootprints( const wxString& aFilterJson )
                         continue;
                 }
 
-                // Footprint filter patterns with case-insensitive matching
-                if( !filterMatchers.empty() )
-                {
-                    bool matches = false;
-
-                    for( const auto& matcher : filterMatchers )
-                    {
-                        wxString name;
-
-                        // If filter contains ':', include library nickname in match string
-                        if( matcher->GetPattern().Contains( wxS( ":" ) ) )
-                            name = fp->GetFPID().GetLibNickname().wx_str().Lower() + wxS( ":" );
-
-                        name += fp->GetFPID().GetLibItemName().wx_str().Lower();
-
-                        if( matcher->Find( name ) )
-                        {
-                            matches = true;
-                            break;
-                        }
-                    }
-
-                    if( !matches )
-                        continue;
-                }
+                if( !matchesFilters( fp->GetFPID().GetLibNickname().wx_str(),
+                                     fp->GetFPID().GetLibItemName().wx_str() ) )
+                    continue;
 
                 wxString libId = fp->GetFPID().Format();
                 output.push_back( libId.ToStdString() );
@@ -219,6 +398,14 @@ static wxString filterFootprints( const wxString& aFilterJson )
             if( count >= maxResults )
                 break;
         }
+
+#ifdef __EMSCRIPTEN__
+        // pcbjam: the list the selector gets (?trace=PCBJAM_FP; libs 0029 e2e). KI_TRACE,
+        // not wxLogTrace: only KI_TRACE follows KICAD_TRACE. The newline matters:
+        // TRACE_MANAGER writes none, and wasm stderr is line-buffered.
+        KI_TRACE( wxS( "PCBJAM_FP" ), wxS( "footprint filter pins=%d: %s\n" ), pinCount,
+                    wxString::FromUTF8( output.dump() ) );
+#endif
 
         return wxString::FromUTF8( output.dump() );
     }
@@ -254,8 +441,10 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         {
             auto frame = new PCB_EDIT_FRAME( aKiway, aParent );
 
+#ifdef KICAD_SCRIPTING
             // give the scripting helpers access to our frame
             ScriptingSetPcbEditFrame( frame );
+#endif
 
             if( Kiface().IsSingle() )
             {
@@ -469,6 +658,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         case PANEL_PCB_ACTION_PLUGINS:
             return new PANEL_PCBNEW_ACTION_PLUGINS( aParent );
 
+#ifndef __EMSCRIPTEN__
         case PANEL_3DV_DISPLAY_OPTIONS:
             return new PANEL_3D_DISPLAY_OPTIONS( aParent );
 
@@ -494,6 +684,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
 
             return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_PCB_DISPLAY3D, actions, controls );
         }
+#endif  // __EMSCRIPTEN__
 
         default:
             return nullptr;
@@ -545,8 +736,10 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             return reinterpret_cast<void*>( &filterFootprints );
         }
 
+#ifdef KICAD_SCRIPTING
         case KIFACE_SCRIPTING_LEGACY:
             return reinterpret_cast<void*>( PyInit__pcbnew );
+#endif
 
         default:
             return nullptr;
@@ -771,8 +964,8 @@ bool IFACE::HandleJobConfig( JOB* aJob, wxWindow* aParent )
 
 void IFACE::PreloadLibraries( KIWAY* aKiway )
 {
-    constexpr static int interval = 150;
-    constexpr static int timeLimit = 120000;
+    [[maybe_unused]] constexpr static int interval = 150;    // poll loop is native-only (WASM runs inline)
+    [[maybe_unused]] constexpr static int timeLimit = 120000;
 
     wxCHECK( aKiway, /* void */ );
 
@@ -797,12 +990,17 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
 
             FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &aKiway->Prj() );
 
-            int elapsed = 0;
+            [[maybe_unused]] int elapsed = 0;    // poll loop is native-only (WASM runs inline)
             bool aborted = false;
 
             reporter->Report( _( "Loading Footprint Libraries" ) );
             adapter->AsyncLoad();
 
+#ifndef __EMSCRIPTEN__
+            // Native: poll the background workers for progress. On WASM AsyncLoad()
+            // above ran inline+synchronously (the preload is dispatched inline on the
+            // main thread — see below), so the futures are already complete; skip the
+            // poll loop, whose sleep_for would otherwise just block the main thread.
             while( true )
             {
                 if( m_libraryPreloadAbort.load() )
@@ -833,6 +1031,7 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
                 if( elapsed > timeLimit )
                     break;
             }
+#endif
 
             // AbortAsyncLoad() sets the adapter's worker abort flag and then blocks,
             // so workers exit at their next checkpoint. BlockUntilLoaded() alone just
@@ -891,8 +1090,20 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
             }
         };
 
+#ifdef __EMSCRIPTEN__
+    // WASM: std::async( launch::async ) would run the preload on a real pthread
+    // worker; on it the pcbjam footprint-library bridge takes its proxy-to-main path
+    // and deadlocks, because the main thread is still inside OpenProjectFiles and
+    // never returns to the event loop to pump the proxying queue. Run the preload
+    // inline on the main thread so the bridge uses its suspending main-thread path.
+    preload();
+    std::promise<void> preloadDone;
+    preloadDone.set_value();
+    m_libraryPreloadReturn = preloadDone.get_future();
+#else
     std::future<void> preloadFuture = std::async( std::launch::async, preload );
     m_libraryPreloadReturn = std::move( preloadFuture );
+#endif
 }
 
 

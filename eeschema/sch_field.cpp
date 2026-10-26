@@ -245,7 +245,7 @@ wxString SCH_FIELD::GetShownText( const SCH_SHEET_PATH* aPath, bool aAllowExtraT
     if( IsNameShown() && aAllowExtraText )
         text = GetShownName() << wxS( ": " ) << text;
 
-    if( HasTextVars() )
+    if( HasTextVars() || ( !aVariantName.IsEmpty() && text.Contains( wxT( "${" ) ) ) )
         text = ResolveText( text, aPath, aDepth );
 
     if( m_id == FIELD_T::SHEET_FILENAME && aAllowExtraText && !IsNameShown() )
@@ -520,23 +520,12 @@ bool SCH_FIELD::IsHorizJustifyFlipped() const
 
 void SCH_FIELD::SetEffectiveHorizJustify( GR_TEXT_H_ALIGN_T aJustify )
 {
-    GR_TEXT_H_ALIGN_T actualJustify;
+    // The justification must be stored before asking whether it is flipped, as a center
+    // justification has no side to report.
+    SetHorizJustify( aJustify );
 
-    switch( aJustify )
-    {
-    case GR_TEXT_H_ALIGN_LEFT:
-        actualJustify = IsHorizJustifyFlipped() ? GR_TEXT_H_ALIGN_RIGHT : GR_TEXT_H_ALIGN_LEFT;
-        break;
-
-    case GR_TEXT_H_ALIGN_RIGHT:
-        actualJustify = IsHorizJustifyFlipped() ? GR_TEXT_H_ALIGN_LEFT : GR_TEXT_H_ALIGN_RIGHT;
-        break;
-
-    default:
-        actualJustify = aJustify;
-    }
-
-    SetHorizJustify( actualJustify );
+    if( IsHorizJustifyFlipped() )
+        SetHorizJustify( MapHorizJustify( -aJustify ) );
 }
 
 
@@ -578,23 +567,10 @@ bool SCH_FIELD::IsVertJustifyFlipped() const
 
 void SCH_FIELD::SetEffectiveVertJustify( GR_TEXT_V_ALIGN_T aJustify )
 {
-    GR_TEXT_V_ALIGN_T actualJustify;
+    SetVertJustify( aJustify );
 
-    switch( aJustify )
-    {
-    case GR_TEXT_V_ALIGN_TOP:
-        actualJustify = IsVertJustifyFlipped() ? GR_TEXT_V_ALIGN_BOTTOM : GR_TEXT_V_ALIGN_TOP;
-        break;
-
-    case GR_TEXT_V_ALIGN_BOTTOM:
-        actualJustify = IsVertJustifyFlipped() ? GR_TEXT_V_ALIGN_TOP : GR_TEXT_V_ALIGN_BOTTOM;
-        break;
-
-    default:
-        actualJustify = aJustify;
-    }
-
-    SetVertJustify( actualJustify );
+    if( IsVertJustifyFlipped() )
+        SetVertJustify( MapVertJustify( -aJustify ) );
 }
 
 
@@ -642,7 +618,8 @@ bool SCH_FIELD::Matches( const EDA_SEARCH_DATA& aSearchData, void* aAuxData ) co
         if( !parentSymbol )
             return false;
 
-        if( parentSymbol->Matches( aSearchData, aAuxData ) )
+        // the search pane surfaces metadata hits through the reference field
+        if( aSearchData.searchMetadata && parentSymbol->Matches( aSearchData, aAuxData ) )
             return true;
 
         wxASSERT( aAuxData );
@@ -1009,9 +986,6 @@ void SCH_FIELD::GetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PANEL_I
 bool SCH_FIELD::HasHypertext() const
 {
     if( m_id == FIELD_T::INTERSHEET_REFS )
-        return true;
-
-    if( m_name == SIM_LIBRARY::LIBRARY_FIELD )
         return true;
 
     return IsURL( GetShownText( false ) );
@@ -1524,6 +1498,33 @@ bool SCH_FIELD::operator==( const SCH_FIELD& aOther ) const
 }
 
 
+bool SCH_FIELD::HasSameContent( const SCH_FIELD& aOther ) const
+{
+    if( GetCanonicalName() != aOther.GetCanonicalName() )
+        return false;
+
+    if( GetPosition() != aOther.GetPosition() )
+        return false;
+
+    if( IsVisible() != aOther.IsVisible() )
+        return false;
+
+    if( IsPrivate() != aOther.IsPrivate() )
+        return false;
+
+    if( IsGeneratedField() != aOther.IsGeneratedField() )
+        return false;
+
+    if( IsNameShown() != aOther.IsNameShown() )
+        return false;
+
+    if( CanAutoplace() != aOther.CanAutoplace() )
+        return false;
+
+    return EDA_TEXT::operator==( aOther );
+}
+
+
 double SCH_FIELD::Similarity( const SCH_ITEM& aOther ) const
 {
     if( Type() != aOther.Type() )
@@ -1728,6 +1729,11 @@ static struct SCH_FIELD_DESC
         propMgr.AddTypeCast( new TYPE_CAST<SCH_FIELD, EDA_TEXT> );
         propMgr.InheritsAfter( TYPE_HASH( SCH_FIELD ), TYPE_HASH( SCH_ITEM ) );
         propMgr.InheritsAfter( TYPE_HASH( SCH_FIELD ), TYPE_HASH( EDA_TEXT ) );
+
+        // Library fields are written at symbol scope rather than inside a unit body, so a
+        // per-unit or per-body-style assignment is silently dropped by the next save
+        propMgr.Mask( TYPE_HASH( SCH_FIELD ), TYPE_HASH( SCH_ITEM ), _HKI( "Unit" ) );
+        propMgr.Mask( TYPE_HASH( SCH_FIELD ), TYPE_HASH( SCH_ITEM ), _HKI( "Body Style" ) );
 
         const wxString textProps = _HKI( "Text Properties" );
 

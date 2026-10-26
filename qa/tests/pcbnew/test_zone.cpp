@@ -34,6 +34,7 @@
 #include <netinfo.h>
 #include <pad.h>
 #include <padstack.h>
+#include <pcb_painter.h>
 #include <pcb_track.h>
 #include <zone.h>
 #include <zone_utils.h>
@@ -71,6 +72,25 @@ static std::unique_ptr<ZONE> CreateSimilarZone( BOARD_ITEM_CONTAINER& aParent, c
     zone->SetOutline( outline.release() );
 
     return zone;
+}
+
+
+static FOOTPRINT* MakeFootprintWithRuleArea( BOARD& aBoard, const std::vector<BOX2I>& aCutouts )
+{
+    FOOTPRINT* fp = new FOOTPRINT( &aBoard );
+    aBoard.Add( fp );
+
+    ZONE* zone = new ZONE( fp );
+    zone->SetIsRuleArea( true );
+    zone->SetLayer( F_Cu );
+    zone->Outline()->AddOutline( KIGEOM::BoxToLineChain(
+            BOX2I( VECTOR2I( 0, 0 ), VECTOR2I( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) ) ) ) );
+
+    for( const BOX2I& cutout : aCutouts )
+        zone->Outline()->AddHole( KIGEOM::BoxToLineChain( cutout ) );
+
+    fp->Add( zone );
+    return fp;
 }
 
 
@@ -669,6 +689,75 @@ BOOST_AUTO_TEST_CASE( FilledZoneCoverageUsesFilledPolygons )
     double expected = (double) pcbIUScale.mmToIU( 2 ) * pcbIUScale.mmToIU( 2 );
     BOOST_TEST( FOOTPRINT::GetCoverageArea( zone.get(), collector ) == expected,
                 boost::test_tools::tolerance( 0.001 ) );
+}
+
+
+/**
+ * A rule area's outline must be drawn on the zone layer, which sorts above copper, so unrelated
+ * tracks and pads on the same copper layer cannot paint over it and leave a broken-looking border
+ * (issue 24688). A filled zone keeps its outline on the copper layer, beneath its own fill.
+ */
+BOOST_AUTO_TEST_CASE( RuleAreaOutlineDrawnAboveCopper )
+{
+    const int copperPass = F_Cu;
+    const int zonePass = ZONE_LAYER_FOR( F_Cu );
+
+    BOOST_TEST( KIGFX::ZoneOutlineDrawnOnLayer( true, zonePass ) );
+    BOOST_TEST( !KIGFX::ZoneOutlineDrawnOnLayer( true, copperPass ) );
+
+    BOOST_TEST( KIGFX::ZoneOutlineDrawnOnLayer( false, copperPass ) );
+    BOOST_TEST( !KIGFX::ZoneOutlineDrawnOnLayer( false, zonePass ) );
+}
+
+
+/**
+ * A cutout moved without changing its corner count must still report a library mismatch.
+ */
+BOOST_AUTO_TEST_CASE( LibraryParityDetectsMovedCutout )
+{
+    const VECTOR2I cutoutSize( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) );
+    const BOX2I    cutoutA( VECTOR2I( pcbIUScale.mmToIU( 2 ), pcbIUScale.mmToIU( 2 ) ), cutoutSize );
+    const BOX2I    cutoutB( VECTOR2I( pcbIUScale.mmToIU( 6 ), pcbIUScale.mmToIU( 6 ) ), cutoutSize );
+
+    FOOTPRINT* fp = MakeFootprintWithRuleArea( m_board, { cutoutA } );
+    FOOTPRINT* same = MakeFootprintWithRuleArea( m_board, { cutoutA } );
+    FOOTPRINT* moved = MakeFootprintWithRuleArea( m_board, { cutoutB } );
+
+    BOOST_CHECK_MESSAGE( !fp->FootprintNeedsUpdate( same, BOARD_ITEM::COMPARE_FLAGS::DRC ),
+                         "Identical rule areas must not report a mismatch" );
+
+    BOOST_CHECK_MESSAGE( fp->FootprintNeedsUpdate( moved, BOARD_ITEM::COMPARE_FLAGS::DRC ),
+                         "A moved cutout with the same corner count must report a mismatch" );
+}
+
+
+/**
+ * A changed cutout count must report a mismatch even when the vertex totals stay equal.
+ */
+BOOST_AUTO_TEST_CASE( LibraryParityDetectsCutoutCountChange )
+{
+    const VECTOR2I cutoutSize( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) );
+    const BOX2I    cutout1( VECTOR2I( pcbIUScale.mmToIU( 2 ), pcbIUScale.mmToIU( 2 ) ), cutoutSize );
+    const BOX2I    cutout2( VECTOR2I( pcbIUScale.mmToIU( 6 ), pcbIUScale.mmToIU( 6 ) ), cutoutSize );
+
+    FOOTPRINT* twoCutouts = MakeFootprintWithRuleArea( m_board, { cutout1, cutout2 } );
+    FOOTPRINT* oneCutout = MakeFootprintWithRuleArea( m_board, { cutout1 } );
+
+    // Match the vertex total of the two rectangles
+    ZONE*             zone = oneCutout->Zones()[0];
+    SHAPE_LINE_CHAIN& hole = zone->Outline()->Hole( 0, 0 );
+
+    const int mid = pcbIUScale.mmToIU( 2 ) + pcbIUScale.mmToIU( 1 ) / 2;
+    hole.Insert( 1, VECTOR2I( mid, pcbIUScale.mmToIU( 2 ) ) );
+    hole.Insert( 3, VECTOR2I( mid, pcbIUScale.mmToIU( 3 ) ) );
+    hole.Insert( 5, VECTOR2I( pcbIUScale.mmToIU( 2 ), mid ) );
+    hole.Insert( 7, VECTOR2I( pcbIUScale.mmToIU( 3 ), mid ) );
+
+    BOOST_REQUIRE_EQUAL( twoCutouts->Zones()[0]->Outline()->TotalVertices(),
+                         oneCutout->Zones()[0]->Outline()->TotalVertices() );
+
+    BOOST_CHECK_MESSAGE( twoCutouts->FootprintNeedsUpdate( oneCutout, BOARD_ITEM::COMPARE_FLAGS::DRC ),
+                         "A changed cutout count with equal total vertices must report a mismatch" );
 }
 
 

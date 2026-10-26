@@ -76,12 +76,13 @@ using namespace TSCHEMATIC_T;
 SCH_IO_KICAD_SEXPR_PARSER::SCH_IO_KICAD_SEXPR_PARSER( LINE_READER* aLineReader,
                                                       PROGRESS_REPORTER* aProgressReporter,
                                                       unsigned aLineCount, SCH_SHEET* aRootSheet,
-                                                      bool aIsAppending ) :
+                                                      bool aIsAppending, bool aIsSheetLoad ) :
         SCHEMATIC_LEXER( aLineReader ),
         m_requiredVersion( 0 ),
         m_unit( 1 ),
         m_bodyStyle( 1 ),
         m_appending( aIsAppending ),
+        m_sheetLoad( aIsSheetLoad ),
         m_progressReporter( aProgressReporter ),
         m_lineReader( aLineReader ),
         m_lastProgressLine( 0 ),
@@ -530,9 +531,6 @@ LIB_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseLibSymbol( LIB_SYMBOL_MAP& aSymbolLi
 
             m_bodyStyle = static_cast<int>( tmp );
 
-            if( m_bodyStyle > symbol->GetBodyStyleCount() )
-                symbol->SetBodyStyleCount( m_bodyStyle, false, false );
-
             if( m_unit > symbol->GetUnitCount() )
                 symbol->SetUnitCount( m_unit, false );
 
@@ -641,9 +639,14 @@ LIB_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseLibSymbol( LIB_SYMBOL_MAP& aSymbolLi
             RECURSE_MODE::NO_RECURSE );
 
     // Before V10 we didn't store the number of body styles in a symbol, we just looked at all its
-    // drawings each time we wanted to know.
-    if( m_requiredVersion < 20250827 )
+    // drawings each time we wanted to know.  Symbol libraries kept their old version for a while
+    // after custom body styles landed, so only infer De Morgan when nothing was declared.
+    if( m_requiredVersion < 20250827 && !symbol->IsMultiBodyStyle() )
         symbol->SetHasDeMorganBodyStyles( symbol->HasLegacyAlternateBodyStyle() );
+
+    // The declaration wins over the drawings, which lets libraries written by a version that
+    // failed to delete a body style load without its leftovers
+    symbol->PruneBodyStyleDrawItems( symbol->GetBodyStyleCount() );
 
     symbol->RefreshLibraryTreeCaches();
 
@@ -2453,12 +2456,8 @@ SCH_SHEET_PIN* SCH_IO_KICAD_SEXPR_PARSER::parseSchSheetPin( SCH_SHEET* aSheet )
 
     wxString name = FromUTF8();
 
-    if( name.IsEmpty() )
-    {
-        THROW_PARSE_ERROR( _( "Empty sheet pin name" ), CurSource(), CurLine(), CurLineNumber(),
-                           CurOffset() );
-    }
-
+    // An unnamed pin is junk, but rejecting it makes the whole schematic unopenable with no way
+    // out but hand-editing the file.  Load it so the user can rename or delete it
     auto sheetPin = std::make_unique<SCH_SHEET_PIN>( aSheet, VECTOR2I( 0, 0 ), name );
 
     token = NextTok();
@@ -3030,7 +3029,14 @@ void SCH_IO_KICAD_SEXPR_PARSER::ParseSchematic( SCH_SHEET* aSheet, bool aIsCopya
                 THROW_PARSE_ERROR( _( "No schematic object" ), CurSource(), CurLine(),
                                    CurLineNumber(), CurOffset() );
 
-            schematic->GetEmbeddedFiles()->SetAreFontsEmbedded( parseBool() );
+            bool embedFonts = parseBool();
+
+            // A sheet loaded into an open schematic must not clear the destination's flag;
+            // saving with it off deletes the fonts the destination already embedded
+            if( m_sheetLoad )
+                embedFonts = embedFonts || schematic->GetAreFontsEmbedded();
+
+            schematic->GetEmbeddedFiles()->SetAreFontsEmbedded( embedFonts );
             NeedRIGHT();
             break;
         }
@@ -3523,6 +3529,25 @@ SCH_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol()
                 existing = symbol->GetField( field->GetId() );
             else
                 existing = symbol->GetField( field->GetName() );
+
+            if( existing && !field->IsMandatory() )
+            {
+                // If there are other fields with the same name, for whatever reason,
+                // try renameing instead of silently discarding them right away.
+                wxString base_name = field->GetName();
+
+                // Arbitrary number of attempts to find a new name (oldname_x)
+                for( int ii = 1; ii < 10 && existing; ii++ )
+                {
+                    wxString newname = base_name;
+                    newname << '_' << ii;
+
+                    existing = symbol->GetField( newname );
+
+                    if( !existing )
+                        field->SetName( newname );
+                }
+            }
 
             if( existing )
                 *existing = *field;

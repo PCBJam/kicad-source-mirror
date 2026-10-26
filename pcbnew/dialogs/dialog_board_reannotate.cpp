@@ -324,7 +324,7 @@ void DIALOG_BOARD_REANNOTATE::LogChangePlan()
     int i = 1;
 
     for( const REFDES_PREFIX_INFO& info : m_refDesPrefixInfos ) // Show all the types of refdes
-        message += info.RefDesPrefix + ( ( i++ % 16 ) == 0 ? wxT( "<br/>" ) : wxS( " " ) );
+        message += info.RefDesPrefix + ( ( i++ % 16 ) == 0 ? wxT( "<br/>" ) : wxT( " " ) );
 
     message += wxT( "<br/>" );
 

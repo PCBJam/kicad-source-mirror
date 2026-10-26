@@ -82,12 +82,37 @@ void transformFPShapesToPolySet( const FOOTPRINT* aFootprint, PCB_LAYER_ID aLaye
 {
     for( BOARD_ITEM* item : aFootprint->GraphicalItems() )
     {
-        if( item->Type() == PCB_SHAPE_T
-                || item->Type() == PCB_BARCODE_T
-                || BaseType( item->Type() ) == PCB_DIMENSION_T )
+        if( !item->IsOnLayer( aLayer ) )
+            continue;
+
+        switch( item->Type() )
         {
-            if( item->GetLayer() == aLayer )
-                item->TransformShapeToPolySet( aBuffer, aLayer, 0, aMaxError, aErrorLoc );
+        case PCB_SHAPE_T:
+        {
+            PCB_SHAPE* shape = static_cast<PCB_SHAPE*>( item );
+            int        margin = 0;
+
+            if( IsSolderMaskLayer( aLayer ) && shape->HasSolderMask() )
+                margin = shape->GetSolderMaskExpansion();
+
+            item->TransformShapeToPolySet( aBuffer, aLayer, margin, aMaxError, aErrorLoc );
+            break;
+        }
+
+        case PCB_BARCODE_T:
+            item->TransformShapeToPolySet( aBuffer, aLayer, 0, aMaxError, aErrorLoc );
+            break;
+
+        case PCB_DIM_ALIGNED_T:
+        case PCB_DIM_CENTER_T:
+        case PCB_DIM_RADIAL_T:
+        case PCB_DIM_ORTHOGONAL_T:
+        case PCB_DIM_LEADER_T:
+            item->TransformShapeToPolySet( aBuffer, aLayer, 0, aMaxError, aErrorLoc );
+            break;
+
+        default:
+            break;
         }
     }
 }
@@ -99,9 +124,6 @@ void transformFPTextToPolySet( const FOOTPRINT* aFootprint, PCB_LAYER_ID aLayer,
 {
     for( BOARD_ITEM* item : aFootprint->GraphicalItems() )
     {
-        if( item->GetLayer() != aLayer )
-            continue;
-
         if( item->Type() == PCB_TEXT_T )
         {
             PCB_TEXT* text = static_cast<PCB_TEXT*>( item );
@@ -115,7 +137,7 @@ void transformFPTextToPolySet( const FOOTPRINT* aFootprint, PCB_LAYER_ID aLayer,
             if( text->GetText() == wxT( "${VALUE}" ) && !aFlags.test( LAYER_FP_VALUES ) )
                 continue;
 
-            if( aLayer != UNDEFINED_LAYER && text->GetLayer() == aLayer )
+            if( text->IsOnLayer( aLayer ) )
                 text->TransformTextToPolySet( aBuffer, 0, aMaxError, aErrorLoc );
         }
 
@@ -123,7 +145,7 @@ void transformFPTextToPolySet( const FOOTPRINT* aFootprint, PCB_LAYER_ID aLayer,
         {
             PCB_TEXTBOX* textbox = static_cast<PCB_TEXTBOX*>( item );
 
-            if( aLayer != UNDEFINED_LAYER && textbox->GetLayer() == aLayer )
+            if( textbox->IsOnLayer( aLayer ) )
             {
                 // border
                 if( textbox->IsBorderEnabled() )
@@ -148,7 +170,7 @@ void transformFPTextToPolySet( const FOOTPRINT* aFootprint, PCB_LAYER_ID aLayer,
         if( field->IsValue() && !aFlags.test( LAYER_FP_VALUES ) )
             continue;
 
-        if(  field->GetLayer() == aLayer && field->IsVisible() )
+        if( field->IsOnLayer( aLayer ) && field->IsVisible() )
             field->TransformTextToPolySet( aBuffer, 0, aMaxError, aErrorLoc );
     }
 }
@@ -369,6 +391,8 @@ void BOARD_ADAPTER::createLayers( REPORTER* aStatusReporter )
                 const float    hole_inner_radius = static_cast<float>( holediameter / 2.0f );
                 const float    ring_radius       = static_cast<float>( viasize / 2.0f );
 
+                const bool capped = via->GetCappingMode() == CAPPING_MODE::CAPPED;
+
                 const SFVEC2F via_center( via->GetStart().x * m_biuTo3Dunits,
                                           -via->GetStart().y * m_biuTo3Dunits );
 
@@ -385,8 +409,11 @@ void BOARD_ADAPTER::createLayers( REPORTER* aStatusReporter )
                 else if( layer == layer_ids[0] ) // it only adds once the THT holes
                 {
                     // Add through hole object
-                    m_TH_ODs.Add( new FILLED_CIRCLE_2D( via_center, hole_inner_radius + thickness, *track ) );
-                    m_viaTH_ODs.Add( new FILLED_CIRCLE_2D( via_center, hole_inner_radius + thickness, *track ) );
+                    if( !capped || !( IsFrontLayer( layer ) || IsBackLayer( layer ) ) )
+                    {
+                        m_TH_ODs.Add( new FILLED_CIRCLE_2D( via_center, hole_inner_radius + thickness, *track ) );
+                        m_viaTH_ODs.Add( new FILLED_CIRCLE_2D( via_center, hole_inner_radius + thickness, *track ) );
+                    }
 
                     if( cfg.clip_silk_on_via_annuli && ring_radius > 0.0 )
                         m_viaAnnuli.Add( new FILLED_CIRCLE_2D( via_center, ring_radius, *track ) );
@@ -1511,7 +1538,7 @@ void BOARD_ADAPTER::createLayers( REPORTER* aStatusReporter )
         // Add item contours.  We need these if we're building vertical walls or if this is a
         // mask layer and we're differentiating copper from plated copper.
         if( ( cfg.engine == RENDER_ENGINE::OPENGL && cfg.opengl_copper_thickness )
-                || ( cfg.DifferentiatePlatedCopper() && ( layer == F_Mask || layer == B_Mask ) ) )
+                || ( cfg.DifferentiatePlatedCopper() && IsSolderMaskLayer( layer ) ) )
         {
             // DRAWINGS
             for( BOARD_ITEM* item : m_board->Drawings() )
@@ -1522,8 +1549,16 @@ void BOARD_ADAPTER::createLayers( REPORTER* aStatusReporter )
                 switch( item->Type() )
                 {
                 case PCB_SHAPE_T:
-                    item->TransformShapeToPolySet( *layerPoly, layer, 0, item->GetMaxError(), ERROR_INSIDE );
+                {
+                    PCB_SHAPE* shape = static_cast<PCB_SHAPE*>( item );
+                    int        margin = 0;
+
+                    if( IsSolderMaskLayer( layer ) && shape->HasSolderMask() )
+                        margin = shape->GetSolderMaskExpansion();
+
+                    item->TransformShapeToPolySet( *layerPoly, layer, margin, item->GetMaxError(), ERROR_INSIDE );
                     break;
+                }
 
                 case PCB_TEXT_T:
                 {

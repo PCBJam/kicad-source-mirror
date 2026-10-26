@@ -147,7 +147,6 @@ public:
 
     struct SYSTEM
     {
-        bool local_history_enabled;
         int local_history_debounce;
         wxString text_editor;
         wxString file_explorer;
@@ -167,6 +166,15 @@ public:
         bool data_collection_prompt;
         bool update_check_prompt;
         bool migrate_wrl_prompt;
+    };
+
+    // Sticky "Embed file" choice, remembered per file-picker context.
+    struct EMBED_FILE_DEFAULTS
+    {
+        bool datasheet;
+        bool drawing_sheet;
+        bool model_3d;
+        bool sim_model;
     };
 
     struct PACKAGE_MANAGER
@@ -215,6 +223,18 @@ public:
      */
     void InitializeEnvironment();
 
+    /**
+     * The backup format is the single switch that selects the autosave mechanism: the
+     * incremental format records git local history while the zip format falls back to
+     * legacy recovery files.  Either mechanism requires backups to be enabled.
+     *
+     * @return true when autosave should commit to the git local history.
+     */
+    bool AutosaveUsesLocalHistory() const
+    {
+        return m_Backup.enabled && m_Backup.format == BACKUP_FORMAT::INCREMENTAL;
+    }
+
 private:
     bool migrateSchema0to1();
     bool migrateSchema1to2();
@@ -237,18 +257,19 @@ private:
                                   std::vector<LEGACY_3D_SEARCH_PATH>& aSearchPaths );
 
 public:
-    APPEARANCE        m_Appearance;
-    AUTO_BACKUP       m_Backup;
-    ENVIRONMENT       m_Env;
-    INPUT             m_Input;
-    SPACEMOUSE        m_SpaceMouse;
-    GRAPHICS          m_Graphics;
-    SESSION           m_Session;
-    SYSTEM            m_System;
-    DO_NOT_SHOW_AGAIN m_DoNotShowAgain;
-    PACKAGE_MANAGER   m_PackageManager;
-    GIT               m_Git;
-    API               m_Api;
+    APPEARANCE          m_Appearance;
+    AUTO_BACKUP         m_Backup;
+    ENVIRONMENT         m_Env;
+    INPUT               m_Input;
+    SPACEMOUSE          m_SpaceMouse;
+    GRAPHICS            m_Graphics;
+    SESSION             m_Session;
+    SYSTEM              m_System;
+    DO_NOT_SHOW_AGAIN   m_DoNotShowAgain;
+    EMBED_FILE_DEFAULTS m_EmbedFileDefaults;
+    PACKAGE_MANAGER     m_PackageManager;
+    GIT                 m_Git;
+    API                 m_Api;
 
     /// Extra directories to search for 3D models, added by the user through
     /// the 3D model migration dialog.  Persists across sessions.

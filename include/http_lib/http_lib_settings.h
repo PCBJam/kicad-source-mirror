@@ -33,12 +33,12 @@ enum class HTTP_LIB_SOURCE_TYPE
 
 struct HTTP_LIB_SOURCE
 {
-    HTTP_LIB_SOURCE_TYPE type;
+    HTTP_LIB_SOURCE_TYPE type = HTTP_LIB_SOURCE_TYPE::INVALID;
     std::string          root_url;
     std::string          api_version;
     std::string          token;
-    int                  timeout_parts;
-    int                  timeout_categories;
+    int                  timeout_parts = 30;
+    int                  timeout_categories = 600;
 };
 
 
@@ -54,11 +54,16 @@ struct HTTP_LIB_PART
 
     std::time_t lastCached = 0;
 
+    bool        detailsLoaded = false;
+
     std::string              desc;
     std::string              keywords;
     std::vector<std::string> fp_filters;
 
-    std::vector<std::pair<std::string, std::tuple<std::string, bool>>> fields;
+    /// Field content keyed by name, holding the text value and its schematic visibility.
+    using field_type = std::tuple<std::string, bool>;
+
+    std::vector<std::pair<std::string, field_type>> fields;
 };
 
 
