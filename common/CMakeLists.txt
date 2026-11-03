@@ -374,6 +374,14 @@ if( EMSCRIPTEN AND NOT KICAD_IPC_API )
     )
 endif()
 
+# WASM: no fontconfig in the browser; the wasm layer's FONTCONFIG serves embedded fonts and
+# the browser's installed fonts instead, with a bundled fallback font.
+if( EMSCRIPTEN )
+    list( REMOVE_ITEM KICOMMON_SRCS font/fontconfig.cpp )
+    list( APPEND KICOMMON_SRCS ${KICAD_WASM_LAYER}/stubs/fontconfig_wasm.cpp )
+    include( ${KICAD_WASM_LAYER}/stubs/fallback_font.cmake )
+endif()
+
 # WASM: STATIC, not SHARED. emcc 6 treats a .so input as a REAL dynamic
 # dependency (DT_NEEDED resolved at runtime — the app 404s fetching
 # libkicommon.so.10.0.4 at boot); emcc 4 folded it in statically. A static
