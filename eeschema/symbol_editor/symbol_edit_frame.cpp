@@ -91,6 +91,13 @@
 #include <wx/log.h>
 #include <trace_helpers.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (libs 0031): the notice and copy button for a part of a read-only library come from
+// pcbjam/wasm/bindings/part_copy_symbol.h. False keeps KiCad's own.
+extern "C" bool pcbjam_symbol_readonly_notice( SYMBOL_EDIT_FRAME* aFrame, WX_INFOBAR* aInfobar,
+                                               wxArrayString* aMsgs ) __attribute__(( weak ));
+#endif
+
 
 bool SYMBOL_EDIT_FRAME::m_showDeMorgan = false;
 
@@ -1054,7 +1061,12 @@ void SYMBOL_EDIT_FRAME::SetCurSymbol( LIB_SYMBOL* aSymbol, bool aUpdateZoom )
 
     if( m_symbol
             && !IsSymbolFromSchematic()
-            && m_libMgr->IsLibraryReadOnly( m_symbol->GetLibId().GetFullLibraryName() ) )
+            && m_libMgr->IsLibraryReadOnly( m_symbol->GetLibId().GetFullLibraryName() )
+#ifdef __EMSCRIPTEN__
+            && !( pcbjam_symbol_readonly_notice
+                  && pcbjam_symbol_readonly_notice( this, &infobar, &msgs ) )
+#endif
+            )
     {
         msgs.push_back( _( "Library is read-only.  Changes cannot be saved to this library." ) );
 

@@ -60,6 +60,14 @@
 #include <wx/filedlg.h>
 #include <wx/fswatcher.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (libs 0031): a footprint of a read-only library is copied to a team library by our
+// modal (pcbjam/wasm/bindings/part_copy_footprint.h): 1 = saved there, 0 = not saved,
+// -1 = not ours, save as usual.
+extern "C" int pcbjam_footprint_save_gate( FOOTPRINT_EDIT_FRAME* aFrame,
+                                           FOOTPRINT* aFootprint ) __attribute__(( weak ));
+#endif
+
 
 static constexpr int ID_MAKE_NEW_LIBRARY = 4173;
 
@@ -743,6 +751,14 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprint( FOOTPRINT* aFootprint )
         return false;
     }
 
+#ifdef __EMSCRIPTEN__
+    if( int saved = pcbjam_footprint_save_gate ? pcbjam_footprint_save_gate( this, aFootprint ) : -1;
+        saved >= 0 )
+    {
+        return saved != 0;
+    }
+#endif
+
     LIBRARY_MANAGER& manager = Pgm().GetLibraryManager();
 
     // Legacy libraries are readable, but modifying legacy format is not allowed
@@ -1140,6 +1156,16 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprintAs( FOOTPRINT* aFootprint )
                     }
                     else
                     {
+                        return false;
+                    }
+
+                    if( !adapter->IsFootprintLibWritable( newLib ) )
+                    {
+                        wxMessageBox( wxString::Format( _( "Library '%s' is read-only. Choose a "
+                                                           "different library to save the "
+                                                           "footprint '%s' to." ),
+                                                        newLib,
+                                                        UnescapeString( newName ) ) );
                         return false;
                     }
 

@@ -120,6 +120,27 @@ EM_JS( void, pcbjam_libs_request_start,
     } );
 } );
 
+// libs 0031: whether this user may write a library. The page's libs bridge
+// knows it from the library's sync stack; the answer is a synchronous lookup,
+// since KiCad asks once per library tree row. No bridge (the converter diet,
+// a worker thread's JS context) or no answer = writable, as before.
+EM_JS( int, pcbjam_libs_is_writable, ( const char* aLib ), {
+    const hook = globalThis.kicadLibs;
+
+    if( !hook || typeof hook.isWritable !== 'function' )
+        return 1;
+
+    try
+    {
+        return hook.isWritable( UTF8ToString( aLib ) ) ? 1 : 0;
+    }
+    catch( e )
+    {
+        console.error( 'kicadLibs.isWritable failed:', e );
+        return 1;
+    }
+} );
+
 // Token waits live in the wx wasm port (evtloop.cpp); this is the first
 // KiCad-side client of that registry. WEAK: the sym_convert diet compiles this
 // TU without the wx wasm port — there the registry is absent, and so is any
@@ -274,6 +295,21 @@ bool SCH_IO_PCBJAM_LIB::CanReadLibrary( const wxString& aFileName ) const
     // plugin's CanReadLibrary), so the type is selected from the URI without
     // touching sch_io_mgr.
     return aFileName.StartsWith( wxS( "/mnt/pcbjam/" ) );
+}
+
+
+bool SCH_IO_PCBJAM_LIB::IsLibraryWritable( const wxString& aLibraryPath )
+{
+    if( !aLibraryPath.StartsWith( wxS( "/mnt/pcbjam/" ) ) )
+        return false;
+
+#ifdef __EMSCRIPTEN__
+    // The bridge lives on the page's main thread; elsewhere keep the old answer.
+    if( emscripten_is_main_runtime_thread() )
+        return pcbjam_libs_is_writable( aLibraryPath.utf8_str().data() ) != 0;
+#endif
+
+    return true;
 }
 
 

@@ -82,6 +82,13 @@
 #include <wx/filedlg.h>
 #include <wx/hyperlink.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (libs 0031): the notice and copy button for a footprint of a read-only library come
+// from pcbjam/wasm/bindings/part_copy_footprint.h. False keeps KiCad's own.
+extern "C" bool pcbjam_footprint_readonly_notice( FOOTPRINT_EDIT_FRAME* aFrame,
+                                                  WX_INFOBAR* aInfobar ) __attribute__(( weak ));
+#endif
+
 BEGIN_EVENT_TABLE( FOOTPRINT_EDIT_FRAME, PCB_BASE_FRAME )
     EVT_MENU( wxID_CLOSE, FOOTPRINT_EDIT_FRAME::CloseFootprintEditor )
     EVT_MENU( wxID_EXIT, FOOTPRINT_EDIT_FRAME::OnExitKiCad )
@@ -684,6 +691,12 @@ void FOOTPRINT_EDIT_FRAME::ReloadFootprint( FOOTPRINT* aFootprint )
 
                     if( WX_INFOBAR* infobar = GetInfoBar() )
                     {
+#ifdef __EMSCRIPTEN__
+                        if( pcbjam_footprint_readonly_notice
+                                && pcbjam_footprint_readonly_notice( this, infobar ) )
+                            return;
+#endif
+
                         link = _( "Save as editable copy" );
 
                         const auto saveAsEditableCopy =

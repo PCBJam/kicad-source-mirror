@@ -48,6 +48,12 @@
 #include <wx/filedlg.h>
 #include <kiplatform/ui.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (libs 0031): before Save / Save All write parts of a read-only library, our modal
+// copies them to a team library (pcbjam/wasm/bindings/part_copy_symbol.h). False = stop here.
+extern "C" bool pcbjam_symbol_save_gate( SYMBOL_EDIT_FRAME* aFrame, bool aSaveAll ) __attribute__(( weak ));
+#endif
+
 
 bool SYMBOL_EDITOR_CONTROL::Init()
 {
@@ -356,6 +362,13 @@ int SYMBOL_EDITOR_CONTROL::Save( const TOOL_EVENT& aEvt )
         return 0;
 
     SYMBOL_EDIT_FRAME* editFrame = getEditFrame<SYMBOL_EDIT_FRAME>();
+
+#ifdef __EMSCRIPTEN__
+    if( ( aEvt.IsAction( &SCH_ACTIONS::save ) || aEvt.IsAction( &SCH_ACTIONS::saveAll ) )
+            && pcbjam_symbol_save_gate
+            && !pcbjam_symbol_save_gate( editFrame, aEvt.IsAction( &SCH_ACTIONS::saveAll ) ) )
+        return 0;
+#endif
 
     if( aEvt.IsAction( &SCH_ACTIONS::save ) )
         editFrame->Save();
