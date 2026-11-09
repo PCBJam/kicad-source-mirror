@@ -51,6 +51,21 @@ struct PCBJAM_FOOTPRINT_ROW
 bool ParseFootprintIndexTsv( const std::string& aTsv, std::vector<PCBJAM_FOOTPRINT_ROW>& aRows );
 
 
+/// The header of one footprint index answer: the library's token and, for a page
+/// ("index:<from>"), its first row and the library's row count (-1 otherwise).
+struct PCBJAM_FOOTPRINT_INDEX_HEAD
+{
+    std::string token;
+    int         from = -1;
+    int         total = -1;
+};
+
+
+/// Read the header of the provider's footprint TSV. False when it isn't a
+/// schema-1 footprint index.
+bool ParseFootprintIndexHead( const std::string& aTsv, PCBJAM_FOOTPRINT_INDEX_HEAD& aHead );
+
+
 /// Split the batch answer ("\x1d<uri>\n<tsv>" frames) into uri -> tsv.
 std::map<std::string, std::string> SplitFootprintIndexBatch( const std::string& aBatch );
 

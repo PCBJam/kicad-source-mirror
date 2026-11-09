@@ -53,7 +53,10 @@
 #include <footprint.h>
 #include <nlohmann/json.hpp>
 #ifdef __EMSCRIPTEN__
+#include <chrono>
+#include <deque>
 #include <pcb_io/pcbjam_fp/pcb_io_pcbjam_fp.h>
+#include <pcb_io/pcbjam_fp/pcbjam_footprint_index.h>
 #endif
 #include <dialogs/dialog_configure_paths.h>
 #include <dialogs/panel_grid_settings.h>
@@ -111,7 +114,11 @@ extern "C" PyObject* PyInit__pcbnew( void );
  *
  * Asked again on every call with the version held (libs 0029): the JS side
  * answers "=" when nothing changed, or the new index when a library or a
- * project file did.  A failed or malformed answer keeps the last good index.
+ * project file did.  We also send each library's token, so a source that knows
+ * them answers only the libraries that differ, plus every current token.  The
+ * background warm-up fills the index one library page at a time beforehand
+ * (pcbjam_fp_index_warm_step), so that first answer is small.  A failed or
+ * malformed answer keeps the last good index.
  */
 struct PCBJAM_FP_INDEX_ENTRY
 {
@@ -119,33 +126,52 @@ struct PCBJAM_FP_INDEX_ENTRY
     int      pads;
 };
 
+namespace
+{
+struct PCBJAM_FP_INDEX_STATE
+{
+    std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> index;
+    std::map<std::string, std::string> tokens;   ///< key -> the token its rows came with
+    std::string version;
+    bool        loaded = false;
+};
+
+PCBJAM_FP_INDEX_STATE& fpIndexState()
+{
+    static PCBJAM_FP_INDEX_STATE s_state;
+    return s_state;
+}
+} // namespace
+
 static const std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>*
 pcbjamFpIndex( const std::vector<std::string>& aProjectLibs )
 {
-    static std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> s_index;
-    static std::string s_version;
-    static bool s_loaded = false;
+    PCBJAM_FP_INDEX_STATE& st = fpIndexState();
+    nlohmann::json         have = nlohmann::json::object();
 
-    nlohmann::json request = { { "v", s_version }, { "projectLibs", aProjectLibs } };
+    for( const auto& [key, token] : st.tokens )
+        have[key] = token;
+
+    nlohmann::json request = { { "v", st.version }, { "have", have }, { "projectLibs", aProjectLibs } };
 
     std::optional<std::string> raw = PCB_IO_PCBJAM_FP::BridgeRequest(
             "index", wxS( "/mnt/pcbjam/" ), wxString::FromUTF8( request.dump() ) );
 
     // Null = provider absent or no index: keep the last good one, if any.
     if( !raw )
-        return s_loaded ? &s_index : nullptr;
+        return st.loaded ? &st.index : nullptr;
 
-    if( *raw == "=" && s_loaded )
-        return &s_index;
+    if( *raw == "=" && st.loaded )
+        return &st.index;
 
     try
     {
         nlohmann::json parsed = nlohmann::json::parse( *raw );
-        std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> index;
+        std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> fresh;
 
         for( const auto& [libId, entries] : parsed.at( "libs" ).items() )
         {
-            std::vector<PCBJAM_FP_INDEX_ENTRY>& vec = index[libId];
+            std::vector<PCBJAM_FP_INDEX_ENTRY>& vec = fresh[libId];
             vec.reserve( entries.size() );
 
             for( const auto& e : entries )
@@ -155,19 +181,46 @@ pcbjamFpIndex( const std::vector<std::string>& aProjectLibs )
             }
         }
 
-        s_index = std::move( index );
-        s_version = parsed.value( "v", std::string() );
-        s_loaded = true;
+        if( parsed.contains( "tokens" ) )
+        {
+            // A delta: "libs" holds the libraries that differ, "tokens" names every
+            // current one; the rest keep the rows we hold.
+            std::map<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>> index;
+            std::map<std::string, std::string>                        tokens;
+
+            for( const auto& [key, token] : parsed.at( "tokens" ).items() )
+            {
+                if( auto it = fresh.find( key ); it != fresh.end() )
+                    index[key] = std::move( it->second );
+                else if( auto old = st.index.find( key ); old != st.index.end() )
+                    index[key] = std::move( old->second );
+                else
+                    continue;
+
+                tokens[key] = token.get<std::string>();
+            }
+
+            st.index = std::move( index );
+            st.tokens = std::move( tokens );
+        }
+        else
+        {
+            st.index = std::move( fresh );
+            st.tokens.clear();
+        }
+
+        st.version = parsed.value( "v", std::string() );
+        st.loaded = true;
     }
     catch( const std::exception& )
     {
         // Malformed: keep the last good index; with none, every pcbjam library is
         // skipped and project folders take the parse path.
-        if( !s_loaded )
+        if( !st.loaded )
             return nullptr;
     }
 
-    return &s_index;
+    return &st.index;
 }
 
 
@@ -192,11 +245,136 @@ static std::vector<std::string> pcbjamProjectFpLibs()
 }
 
 
-/// pcbjam (libs 0028 8.3): the background warm-up's footprint step in a schematic
-/// session, so the first Add Symbol footprint list is answered from the cache.
-extern "C" void pcbjam_fp_index_warm()
+/**
+ * pcbjam (libs 0028 8.3): one step of the background warm-up's footprint part in
+ * a schematic session: one page of one pcbjam footprint library, asked for with
+ * "index:<from>" so the provider never waits (it answers "~" while the rows
+ * aren't ready). The first Add Symbol footprint list then gets only what the
+ * warm-up didn't cover. Project folders are left to that answer (the JS side
+ * reads them from MEMFS). Returns 0 when done, 1 when there is more, 2 when
+ * every queued library said "not ready" (wait a little). A library still not
+ * ready after five minutes is left to that answer too.
+ */
+extern "C" int pcbjam_fp_index_warm_step()
 {
-    pcbjamFpIndex( pcbjamProjectFpLibs() );
+    struct PENDING
+    {
+        std::string uri;
+        int         from = 0;
+    };
+
+    static std::deque<PENDING> s_queue;
+    static bool                s_queued = false;
+    static size_t              s_notReady = 0;
+    // Rows of a library still being paged, and the token its first page came with.
+    static std::map<std::string, std::pair<std::string, std::vector<PCBJAM_FP_INDEX_ENTRY>>> s_partial;
+    // When each library first said "not ready".
+    static std::map<std::string, std::chrono::steady_clock::time_point> s_waitingSince;
+
+    static const std::string mount = "/mnt/pcbjam/";
+
+    if( !s_queued )
+    {
+        s_queued = true;
+
+        for( const LIBRARY_TABLE_ROW* row : Pgm().GetLibraryManager().Rows( LIBRARY_TABLE_TYPE::FOOTPRINT ) )
+        {
+            if( row->Disabled() )
+                continue;
+
+            std::string uri( LIBRARY_MANAGER::GetFullURI( row, true ).utf8_str() );
+
+            if( uri.rfind( mount, 0 ) == 0 && uri.size() > mount.size() )
+                s_queue.push_back( { uri, 0 } );
+        }
+    }
+
+    if( s_queue.empty() )
+        return 0;
+
+    PENDING next = s_queue.front();
+    s_queue.pop_front();
+
+    PCBJAM_FP_INDEX_STATE& st = fpIndexState();
+    std::string            key = next.uri.substr( mount.size() );
+
+    // An Add Symbol answer got here first.
+    if( next.from == 0 && st.tokens.count( key ) )
+        return s_queue.empty() ? 0 : 1;
+
+    std::optional<std::string> raw = PCB_IO_PCBJAM_FP::BridgeRequest(
+            "list", wxString::FromUTF8( next.uri ), wxString::Format( wxS( "index:%d" ), next.from ) );
+
+    if( raw && *raw == "~" )
+    {
+        auto since = s_waitingSince.try_emplace( key, std::chrono::steady_clock::now() ).first;
+
+        if( std::chrono::steady_clock::now() - since->second >= std::chrono::minutes( 5 ) )
+        {
+            KI_TRACE( wxT( "KI_TRACE_FP_CHOOSER" ), wxT( "warmup:fp gave-up lib=%s\n" ), key );
+            s_waitingSince.erase( since );
+            s_partial.erase( key );
+            return s_queue.empty() ? 0 : 1;
+        }
+
+        s_queue.push_back( next );
+
+        if( ++s_notReady >= s_queue.size() )
+        {
+            s_notReady = 0;
+            return 2;
+        }
+
+        return 1;
+    }
+
+    s_notReady = 0;
+    s_waitingSince.erase( key );
+
+    PCBJAM_FOOTPRINT_INDEX_HEAD       head;
+    std::vector<PCBJAM_FOOTPRINT_ROW> rows;
+
+    // No index for this library (or a malformed one): the Add Symbol answer decides.
+    if( !raw || !ParseFootprintIndexHead( *raw, head ) || !ParseFootprintIndexTsv( *raw, rows ) )
+    {
+        s_partial.erase( key );
+        return s_queue.empty() ? 0 : 1;
+    }
+
+    auto& [token, entries] = s_partial[key];
+
+    // The library changed between two pages: start it over.
+    if( next.from > 0 && token != head.token )
+    {
+        s_partial.erase( key );
+        s_queue.push_front( { next.uri, 0 } );
+        return 1;
+    }
+
+    if( next.from == 0 )
+    {
+        token = head.token;
+        entries.clear();
+        entries.reserve( std::max( head.total, 0 ) );
+    }
+
+    for( const PCBJAM_FOOTPRINT_ROW& row : rows )
+        entries.push_back( { wxString::FromUTF8( row.name ), row.uniquePadCount } );
+
+    int after = next.from + static_cast<int>( rows.size() );
+
+    if( !rows.empty() && after < head.total )
+    {
+        s_queue.push_front( { next.uri, after } );
+        return 1;
+    }
+
+    st.index[key] = std::move( entries );
+    st.tokens[key] = token;
+    s_partial.erase( key );
+
+    KI_TRACE( wxT( "KI_TRACE_FP_CHOOSER" ), wxT( "fp warm-up: lib=%s rows=%zu\n" ), key, st.index[key].size() );
+    return s_queue.empty() ? 0 : 1;
 }
 #endif
 

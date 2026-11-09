@@ -117,6 +117,39 @@ bool ParseFootprintIndexTsv( const std::string& aTsv, std::vector<PCBJAM_FOOTPRI
 }
 
 
+bool ParseFootprintIndexHead( const std::string& aTsv, PCBJAM_FOOTPRINT_INDEX_HEAD& aHead )
+{
+    std::string header = aTsv.substr( 0, aTsv.find( '\n' ) );
+
+    if( header.rfind( "v=", 0 ) != 0 || header.find( "\tschema=1\t" ) == std::string::npos
+            || header.find( "\tkind=footprint" ) == std::string::npos )
+    {
+        return false;
+    }
+
+    aHead = PCBJAM_FOOTPRINT_INDEX_HEAD();
+    size_t from = 0;
+
+    for( size_t i = 0; i <= header.size(); ++i )
+    {
+        if( i < header.size() && header[i] != '\t' )
+            continue;
+
+        std::string field( header, from, i - from );
+        from = i + 1;
+
+        if( field.rfind( "v=", 0 ) == 0 )
+            aHead.token = unescapeTsv( field.substr( 2 ) );
+        else if( field.rfind( "from=", 0 ) == 0 )
+            aHead.from = toInt( field.substr( 5 ) );
+        else if( field.rfind( "total=", 0 ) == 0 )
+            aHead.total = toInt( field.substr( 6 ) );
+    }
+
+    return true;
+}
+
+
 std::map<std::string, std::string> SplitFootprintIndexBatch( const std::string& aBatch )
 {
     std::map<std::string, std::string> out;

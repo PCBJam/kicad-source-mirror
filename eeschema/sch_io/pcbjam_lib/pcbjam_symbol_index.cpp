@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <set>
 
 #include <nlohmann/json.hpp>
@@ -648,7 +649,7 @@ int SYMBOL_LIBRARY_ADAPTER::WarmIndex( const wxString& aNickname, const wxString
 // Defined in the wasm bindings (kicad_editor_embind.cpp) and pcbnew.cpp; weak so
 // an image without them still links.
 extern "C" int  pcbjam_progress_may_yield() __attribute__(( weak ));
-extern "C" void pcbjam_fp_index_warm() __attribute__(( weak ));
+extern "C" int  pcbjam_fp_index_warm_step() __attribute__(( weak ));
 
 namespace
 {
@@ -672,9 +673,16 @@ bool modalShown()
  * memory and makes no crossing. Each step is one wx timer callback (a fresh
  * browser task on the mailbox lane): one page (up to 256 rows) of one library.
  * It pauses while an open is in flight, a modal is up or a long operation
- * yields, and stops for good above 75 % of the maximum heap. Clicking Add Symbol
+ * yields, and stops for good above 75 % of the maximum heap. The footprint
+ * libraries follow the same way, one page per step (pcbjam_fp_index_warm_step). Clicking Add Symbol
  * before it has finished is fine: the chooser fetches the rest in one batch.
+ * A library whose rows aren't ready is asked again after the others, with a
+ * pause that grows while nothing is ready, and left to the chooser once it has
+ * waited WARM_GIVE_UP.
  */
+/// How long a library may answer "not ready" before the warm-up leaves it to the chooser.
+constexpr auto WARM_GIVE_UP = std::chrono::minutes( 5 );
+
 class INDEX_WARMUP : public wxTimer
 {
 public:
@@ -706,6 +714,8 @@ public:
 
         if( std::find( m_queue.begin(), m_queue.end(), aNickname ) == m_queue.end() )
             m_queue.push_back( aNickname );
+
+        m_waitingSince.erase( aNickname );
 
         if( !m_inStep && !IsRunning() )
             arm( 1 );
@@ -758,6 +768,30 @@ public:
             return;
         }
 
+        // Then the footprint libraries, one page per step (pcbnew.cpp), so the
+        // first Add Symbol footprint list is answered from memory.
+        if( m_queue.empty() && !m_fpDone && pcbjam_fp_index_warm_step )
+        {
+            auto t0 = std::chrono::steady_clock::now();
+            m_inStep = true;
+            int result = pcbjam_fp_index_warm_step();
+            m_inStep = false;
+            double ms = std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - t0 ).count();
+
+            m_steps++;
+            KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:fp result=%d ms=%.1f\n" ), result, ms );
+
+            if( result == 0 )
+                m_fpDone = true;
+
+            if( result == 2 )
+                idle();
+            else
+                arm( ms < 4.0 ? 1 : 16 );
+
+            return;
+        }
+
         if( m_queue.empty() )
         {
             finish();
@@ -777,27 +811,38 @@ public:
         KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:step lib=%s result=%d ms=%.1f\n" ),
                   nickname, result, ms );
 
-        if( result == 1 )
+        if( result == 2 )
         {
-            m_queue.push_front( nickname );   // its next page
-            m_notReady = 0;
-        }
-        else if( result == 2 )
-        {
-            // Its rows aren't ready on the JS side yet: try it again later, and
-            // wait a little once every queued library has said so.
-            m_queue.push_back( nickname );
+            auto since = m_waitingSince.try_emplace( nickname, std::chrono::steady_clock::now() ).first;
 
-            if( ++m_notReady >= m_queue.size() )
+            if( std::chrono::steady_clock::now() - since->second >= WARM_GIVE_UP )
             {
-                m_notReady = 0;
-                arm( 250 );
-                return;
+                // Never ready (a library that can't open, say): the chooser fetches it.
+                KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:gave-up lib=%s\n" ), nickname );
+                m_waitingSince.erase( since );
+            }
+            else
+            {
+                // Its rows aren't ready on the JS side yet: try it again later, and
+                // wait a little once every queued library has said so.
+                m_queue.push_back( nickname );
+
+                if( ++m_notReady >= m_queue.size() )
+                {
+                    m_notReady = 0;
+                    idle();
+                    return;
+                }
             }
         }
         else
         {
+            m_waitingSince.erase( nickname );
             m_notReady = 0;
+            m_idleMs = IDLE_MIN_MS;
+
+            if( result == 1 )
+                m_queue.push_front( nickname );   // its next page
         }
 
         // Back to back while steps are short, one per frame otherwise.
@@ -805,7 +850,17 @@ public:
     }
 
 private:
+    static constexpr int IDLE_MIN_MS = 250;
+    static constexpr int IDLE_MAX_MS = 2000;
+
     void arm( int aMs ) { StartOnce( aMs ); }
+
+    /// Nothing queued is ready: wait, longer each time in a row (reset by a page that came in).
+    void idle()
+    {
+        arm( m_idleMs );
+        m_idleMs = std::min( m_idleMs * 2, IDLE_MAX_MS );
+    }
 
     /// The unique library symbols placed in the open schematic (once per warm-up).
     void listPlaced()
@@ -832,19 +887,13 @@ private:
 
     void finish()
     {
-        if( !m_fpDone && pcbjam_fp_index_warm )
-        {
-            m_fpDone = true;
-            m_inStep = true;
-            pcbjam_fp_index_warm();
-            m_inStep = false;
-        }
-
         KI_TRACE( wxT( "KI_TRACE_SYM_CHOOSER" ), wxT( "warmup:done steps=%zu total_ms=%.0f\n" ), m_steps,
                   std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - m_t0 ).count() );
     }
 
     std::deque<wxString>                  m_queue;
+    std::map<wxString, std::chrono::steady_clock::time_point> m_waitingSince;   ///< first "not ready"
+    int                                   m_idleMs = IDLE_MIN_MS;
     std::chrono::steady_clock::time_point m_t0;
     size_t                                m_steps = 0;
     size_t                                m_notReady = 0;
