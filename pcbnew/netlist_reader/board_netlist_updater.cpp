@@ -50,10 +50,54 @@
 
 #include "board_netlist_updater.h"
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (mcp 0006): without a frame (the headless kicad_tools CLI) footprints load and swap
+// through these, implemented by the CLI and absent in the editor.
+extern "C" FOOTPRINT* pcbjam_headless_load_footprint( const LIB_ID* aId ) __attribute__(( weak ));
+extern "C" void pcbjam_headless_exchange_footprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
+                                                    BOARD_COMMIT* aCommit ) __attribute__(( weak ));
+#endif
+
+static FOOTPRINT* loadFootprint( PCB_EDIT_FRAME* aFrame, const LIB_ID& aId )
+{
+    if( aFrame )
+        return aFrame->LoadFootprint( aId );
+
+#ifdef __EMSCRIPTEN__
+    if( pcbjam_headless_load_footprint )
+        return pcbjam_headless_load_footprint( &aId );
+#endif
+
+    return nullptr;
+}
+
 
 BOARD_NETLIST_UPDATER::BOARD_NETLIST_UPDATER( PCB_EDIT_FRAME* aFrame, BOARD* aBoard ) :
     m_frame( aFrame ),
     m_commit( aFrame ),
+    m_board( aBoard )
+{
+    m_reporter = &NULL_REPORTER::GetInstance();
+
+    m_deleteUnusedFootprints = false;
+    m_isDryRun = false;
+    m_replaceFootprints = true;
+    m_lookupByTimestamp = false;
+    m_transferGroups = false;
+    m_applyDesignBlockLayouts = false;
+    m_overrideLocks = false;
+    m_updateFields = false;
+    m_removeExtraFields = false;
+
+    m_warningCount = 0;
+    m_errorCount = 0;
+    m_newFootprintsCount = 0;
+}
+
+
+BOARD_NETLIST_UPDATER::BOARD_NETLIST_UPDATER( TOOL_MANAGER* aToolManager, BOARD* aBoard ) :
+    m_frame( nullptr ),
+    m_commit( aToolManager ),
     m_board( aBoard )
 {
     m_reporter = &NULL_REPORTER::GetInstance();
@@ -159,7 +203,7 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::addNewFootprint( COMPONENT* aComponent, const 
         return nullptr;
     }
 
-    FOOTPRINT* footprint = m_frame->LoadFootprint( aFootprintId );
+    FOOTPRINT* footprint = loadFootprint( m_frame, aFootprintId );
 
     if( footprint == nullptr )
     {
@@ -188,7 +232,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::addNewFootprint( COMPONENT* aComponent, const 
         for( PAD* pad : footprint->Pads() )
         {
             // Set the pads ratsnest settings to the global settings
-            pad->SetLocalRatsnestVisible( m_frame->GetPcbNewSettings()->m_Display.m_ShowGlobalRatsnest );
+            pad->SetLocalRatsnestVisible( m_frame ? m_frame->GetPcbNewSettings()->m_Display.m_ShowGlobalRatsnest
+                                                  : true );
 
             // Pads in the library all have orphaned nets.  Replace with Default.
             pad->SetNetCode( 0 );
@@ -324,7 +369,7 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
         return nullptr;
     }
 
-    FOOTPRINT* newFootprint = m_frame->LoadFootprint( aNewComponent->GetFPID() );
+    FOOTPRINT* newFootprint = loadFootprint( m_frame, aNewComponent->GetFPID() );
 
     if( newFootprint == nullptr )
     {
@@ -379,7 +424,12 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
              // Expand the footprint pad layers
              newFootprint->FixUpPadsForBoard( m_board );
 
-             m_frame->ExchangeFootprint( aFootprint, newFootprint, m_commit );
+             if( m_frame )
+                 m_frame->ExchangeFootprint( aFootprint, newFootprint, m_commit );
+#ifdef __EMSCRIPTEN__
+             else if( pcbjam_headless_exchange_footprint )
+                 pcbjam_headless_exchange_footprint( aFootprint, newFootprint, &m_commit );
+#endif
 
              msg.Printf( _( "Changed %s footprint from '%s' to '%s'."),
                          aFootprint->GetReference(),

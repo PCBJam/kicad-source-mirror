@@ -39,6 +39,7 @@ class NETINFO_ITEM;
 class PAD;
 class PCB_EDIT_FRAME;
 class PCB_GROUP;
+class TOOL_MANAGER;
 
 #include <board_commit.h>
 
@@ -70,6 +71,11 @@ class BOARD_NETLIST_UPDATER
 {
 public:
     BOARD_NETLIST_UPDATER( PCB_EDIT_FRAME* aFrame, BOARD* aBoard );
+
+    /**
+     * Construct an updater without a board editor frame (headless), as KiCad master does.
+     */
+    BOARD_NETLIST_UPDATER( TOOL_MANAGER* aToolManager, BOARD* aBoard );
     ~BOARD_NETLIST_UPDATER();
 
     /**

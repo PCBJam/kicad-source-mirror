@@ -896,12 +896,17 @@ if( EMSCRIPTEN AND KICAD_PCB_CONVERTER_WASM )
     # --gerbers' .gbrjob output (the jobfile writer resolves stackup colors
     # through GetStandardColors — a pure data-table TU, not the UI panel),
     # --drill's excellon writer, and --ipc356's D-356 writer (plugins 0002):
+    # --update-from-netlist's frameless Update PCB from Schematic (mcp 0006): the updater and
+    # the spread of new footprints only; the netlist readers are in pcbcommon, and netlist.cpp
+    # (PCB_EDIT_FRAME's) stays out.
     list( APPEND PCBNEW_SRCS
         exporters/gerber_jobfile_writer.cpp
         exporters/gendrill_excellon_writer.cpp
         exporters/gendrill_writer_base.cpp
         exporters/export_d356.cpp
-        board_stackup_manager/stackup_predefined_prms.cpp )
+        board_stackup_manager/stackup_predefined_prms.cpp
+        netlist_reader/board_netlist_updater.cpp
+        autorouter/spread_footprints.cpp )
 endif()
 
 add_library( pcbnew_kiface_objects OBJECT
