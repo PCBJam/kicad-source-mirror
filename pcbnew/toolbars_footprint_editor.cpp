@@ -138,9 +138,12 @@ std::optional<TOOLBAR_CONFIGURATION> FOOTPRINT_EDIT_TOOLBAR_SETTINGS::DefaultToo
         break;
 
     case TOOLBAR_LOC::TOP_MAIN:
-        config.AppendAction( PCB_ACTIONS::newFootprint )
-              .AppendAction( PCB_ACTIONS::createFootprint )
-              .AppendAction( ACTIONS::save );
+        config.AppendAction( PCB_ACTIONS::newFootprint );
+#ifndef __EMSCRIPTEN__
+        // No footprint wizards in the wasm build (they are Python; libs 0020 P15).
+        config.AppendAction( PCB_ACTIONS::createFootprint );
+#endif
+        config.AppendAction( ACTIONS::save );
 
         config.AppendSeparator()
               .AppendAction( ACTIONS::print );

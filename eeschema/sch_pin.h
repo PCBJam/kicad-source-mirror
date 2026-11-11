@@ -33,8 +33,22 @@ class LIB_SYMBOL;
 class SCH_SYMBOL;
 class PIN_LAYOUT_CACHE;
 
+namespace KIFONT
+{
+class FONT;
+}
+
 // Circle diameter drawn at the active end of pins:
 #define TARGET_PIN_RADIUS   schIUScale.MilsToIU( 15 )
+
+/**
+ * Break a stacked pin number of the form "[A,B,C]" into one number per line when it is too wide
+ * to sit alongside the pin.  Anything else, and anything that already fits, is returned as-is.
+ *
+ * Everything that draws, plots or measures a pin number goes through here.
+ */
+wxString FormatStackedPinForDisplay( const wxString& aPinNumber, int aPinLength, int aTextSize,
+                                     KIFONT::FONT* aFont, const KIFONT::METRICS& aFontMetrics );
 
 
 class SCH_PIN : public SCH_ITEM
@@ -197,6 +211,12 @@ public:
      */
     PIN_ORIENTATION PinDrawOrient( const TRANSFORM& aTransform ) const;
 
+    /**
+     * Return true when \a aTransform maps the side the stacked number block is drawn on
+     * (above horizontal pins, left of vertical pins) onto the opposite side.
+     */
+    bool StackedTextSideFlipped( const TRANSFORM& aTransform ) const;
+
 #if defined(DEBUG)
     void Show( int nestLevel, std::ostream& os ) const override;
 #endif
@@ -337,6 +357,13 @@ public:
     const wxString& GetOperatingPoint() const { return m_operatingPoint; }
     void SetOperatingPoint( const wxString& aText ) { m_operatingPoint = aText; }
 
+    /**
+     * Transient, render-only hint that the symbol transform mirrors the stacked number
+     * block side.  Set by the painter on its pre-transformed temp pins.  Never serialized.
+     */
+    bool GetFlipStackedTextSide() const { return m_flipStackedTextSide; }
+    void SetFlipStackedTextSide( bool aFlip ) { m_flipStackedTextSide = aFlip; }
+
     double Similarity( const SCH_ITEM& aOther ) const override;
 
     bool operator>( const SCH_ITEM& aRhs ) const { return compare( aRhs, EQUALITY ) > 0; }
@@ -404,6 +431,9 @@ protected:
     wxString                m_alt;             // The current alternate for an instance
 
     wxString                m_operatingPoint;
+
+    /// Render-only stacked block side hint, see GetFlipStackedTextSide().  Not saved.
+    bool m_flipStackedTextSide = false;
 
     bool                    m_isDangling;
 

@@ -185,6 +185,7 @@ protected:
 
             if( options != result )
             {
+                tbl->OnModify();
                 row.SetOptions( result );
                 m_grid->Refresh();
             }
@@ -194,7 +195,8 @@ protected:
     void openTable( const LIBRARY_TABLE_ROW& aRow ) override
     {
         wxFileName fn( LIBRARY_MANAGER::ExpandURI( aRow.URI(), Pgm().GetSettingsManager().Prj() ) );
-        std::shared_ptr<LIBRARY_TABLE> child = std::make_shared<LIBRARY_TABLE>( fn, LIBRARY_TABLE_SCOPE::GLOBAL, LIBRARY_TABLE_TYPE::SYMBOL );
+        std::shared_ptr<LIBRARY_TABLE> child = std::make_shared<LIBRARY_TABLE>( fn, LIBRARY_TABLE_SCOPE::GLOBAL,
+                                                                                LIBRARY_TABLE_TYPE::SYMBOL );
 
         if( !child->IsOk() )
         {
@@ -333,6 +335,8 @@ PANEL_SYM_LIB_TABLE::PANEL_SYM_LIB_TABLE( DIALOG_EDIT_LIBRARY_TABLES* aParent, P
         m_parent( aParent ),
         m_suppressNotebookPageEvents( false )
 {
+    m_notebook->SetArtProvider( new WX_AUI_TAB_ART() );
+
     m_lastProjectLibDir = m_project->GetProjectPath();
 
     populatePluginList();
@@ -362,8 +366,6 @@ PANEL_SYM_LIB_TABLE::PANEL_SYM_LIB_TABLE( DIALOG_EDIT_LIBRARY_TABLES* aParent, P
 
     if( projectTable.has_value() )
         AddTable( projectTable.value(), _( "Project Specific Libraries" ), false /* closable */ );
-
-    m_notebook->SetArtProvider( new WX_AUI_TAB_ART() );
 
     // add Cut, Copy, and Paste to wxGrids
     m_path_subs_grid->PushEventHandler( new GRID_TRICKS( m_path_subs_grid ) );
@@ -722,11 +724,14 @@ void PANEL_SYM_LIB_TABLE::onReset( wxCommandEvent& event )
                                                           lastGlobalLibDir, wxEmptyString ),
                     true /* take ownership */ );
 
-    LIB_TABLE_NOTEBOOK_PANEL* panel0 =
-            static_cast<LIB_TABLE_NOTEBOOK_PANEL*>( m_notebook->GetPage( 0 ) );
+    LIB_TABLE_NOTEBOOK_PANEL* panel0 = static_cast<LIB_TABLE_NOTEBOOK_PANEL*>( m_notebook->GetPage( 0 ) );
     panel0->ClearDirty();
+
     static_cast<LIB_TABLE_GRID_DATA_MODEL*>( grid->GetTable() )->SetChangeCallback(
-            [panel0]() { panel0->MarkDirty(); } );
+            [panel0]()
+            {
+                panel0->MarkDirty();
+            } );
 
     m_parent->m_GlobalTableChanged = true;
 
@@ -789,16 +794,18 @@ void PANEL_SYM_LIB_TABLE::onConvertLegacyLibraries( wxCommandEvent& event )
     wxString   databaseType = SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_DATABASE );
     wxString   httpType = SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_HTTP );
     wxString   kicadType = SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_KICAD );
+    wxString   nestedTableType = LIBRARY_TABLE_ROW::TABLE_TYPE_NAME;
     wxString   msg;
 
     // HTTP and Database libraries are live, dynamic backends that are not file-based.
     // Migrating them to a static .kicad_sym snapshot is not meaningful and would silently
-    // produce an empty library, destroying the original table entry.
+    // produce an empty library, destroying the original table entry.  Nested library tables
+    // are not symbol libraries at all and likewise cannot be migrated.
     for( int row : selectedRows )
     {
         const wxString& type = cur_grid()->GetCellValue( row, COL_TYPE );
 
-        if( type != databaseType && type != httpType && type != kicadType )
+        if( type != databaseType && type != httpType && type != kicadType && type != nestedTableType )
             legacyRows.push_back( row );
     }
 

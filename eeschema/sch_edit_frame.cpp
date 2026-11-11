@@ -58,7 +58,9 @@
 #include <core/profile.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <sch_edit_frame.h>
 #include <symbol_chooser_frame.h>
 #include <sch_painter.h>
@@ -97,6 +99,7 @@
 #include <tools/sch_line_wire_bus_tool.h>
 #include <tools/sch_move_tool.h>
 #include <tools/sch_navigate_tool.h>
+#include <tools/sch_selection_tool.h>
 #include <tools/sch_find_replace_tool.h>
 #include <trace_helpers.h>
 #include <unordered_set>
@@ -322,6 +325,9 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     // The selection filter doesn't need to grow in the vertical direction when docked
     selectionFilterPane.dock_proportion = 0;
+
+    // wx 3.3.3 turns a -1 min height into 1, and a legacy perspective restores one
+    selectionFilterPane.min_size.y = m_selectionFilterPanel->GetBestSize().y;
 
     if( aui_cfg.hierarchy_panel_float_width > 0 && aui_cfg.hierarchy_panel_float_height > 0 )
     {
@@ -589,6 +595,10 @@ void SCH_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 SCH_EDIT_FRAME::~SCH_EDIT_FRAME()
 {
+    // Ensure that teardowns without doCloseWindow are fully unregistered
+    if( m_schematic )
+        Kiway().LocalHistory().UnregisterSaver( m_schematic );
+
     m_hierarchy->Unbind( wxEVT_SIZE, &SCH_EDIT_FRAME::OnResizeHierarchyNavigator, this );
 
     // Ensure m_canvasType is up to date, to save it in config
@@ -1091,6 +1101,7 @@ void SCH_EDIT_FRAME::SetCurrentSheet( const SCH_SHEET_PATH& aSheet )
                    aSheet.size() );
 
         Schematic().SetCurrentSheet( aSheet );
+        SetSheetNumberAndCount();
         GetCanvas()->DisplaySheet( aSheet.LastScreen() );
     }
 }
@@ -1215,6 +1226,11 @@ bool SCH_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 
 void SCH_EDIT_FRAME::doCloseWindow()
 {
+#ifdef KICAD_IPC_API
+    Pgm().GetApiServer().DeregisterHandler( m_apiHandler.get() );
+    wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &SCH_EDIT_FRAME::onPluginAvailabilityChanged, this );
+#endif
+
     // Unregister the autosave saver before any cleanup that might invalidate m_schematic
     if( m_schematic )
         Kiway().LocalHistory().UnregisterSaver( m_schematic );
@@ -1241,11 +1257,6 @@ void SCH_EDIT_FRAME::doCloseWindow()
 
         Kiway().LocalHistory().RemoveAutosaveFiles( Prj().GetProjectPath(), sheetSrcs );
     }
-
-#ifdef KICAD_IPC_API
-    Pgm().GetApiServer().DeregisterHandler( m_apiHandler.get() );
-    wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &SCH_EDIT_FRAME::onPluginAvailabilityChanged, this );
-#endif
 
     // Close modeless dialogs.  They're trouble when they get destroyed after the frame.
     Unbind( EDA_EVT_CLOSE_DIALOG_BOOK_REPORTER, &SCH_EDIT_FRAME::onCloseSymbolDiffDialog, this );
@@ -1324,9 +1335,22 @@ SEVERITY SCH_EDIT_FRAME::GetSeverity( int aErrorCode ) const
 }
 
 
+#ifdef __EMSCRIPTEN__
+// pcbjam: per-sheet page settings / title block have no item events, so the collab
+// bridge re-checks the shown sheet's header on every modification (proposal 21 WP4,
+// S3). Weak: images without the collab bridge resolve it to null.
+extern "C" __attribute__( ( weak ) ) void kicadCollabSchOnModify();
+#endif
+
+
 void SCH_EDIT_FRAME::OnModify()
 {
     EDA_BASE_FRAME::OnModify();
+
+#ifdef __EMSCRIPTEN__
+    if( kicadCollabSchOnModify )
+        kicadCollabSchOnModify();
+#endif
 
     if( GetScreen() )
     {
@@ -1504,7 +1528,8 @@ void SCH_EDIT_FRAME::ProjectChanged()
             [this]( const wxString& aProjectPath, std::vector<HISTORY_FILE_DATA>& aFileData )
             {
                 m_schematic->SaveToHistory( aProjectPath, aFileData );
-            } );
+            },
+            m_schematic->GetHistoryLifetimeToken() );
 
     m_designBlocksPane->ProjectChanged();
 }
@@ -2107,6 +2132,12 @@ void SCH_EDIT_FRAME::SetScreen( BASE_SCREEN* aScreen )
         m_toolManager->RunAction( ACTIONS::selectionClear );
 
     SCH_BASE_FRAME::SetScreen( aScreen );
+
+    // SetSheetNumberAndCount() dereferences the current sheet's screen, which is absent on the
+    // unload paths that pass a null screen.
+    if( aScreen )
+        SetSheetNumberAndCount();
+
     GetCanvas()->DisplaySheet( static_cast<SCH_SCREEN*>( aScreen ) );
 
     if( m_toolManager )
@@ -2208,7 +2239,9 @@ SELECTION& SCH_EDIT_FRAME::GetCurrentSelection()
 
 void SCH_EDIT_FRAME::onSize( wxSizeEvent& aEvent )
 {
-    if( IsShown() )
+    // doCloseWindow() destroys the tool manager and then updates the AUI layout, which can
+    // dispatch a deferred size event back to this still-bound handler.
+    if( IsShown() && GetToolManager() )
     {
         // We only need this until the frame is done resizing and the final client size is
         // established.
@@ -2522,12 +2555,13 @@ wxWindow* SCH_EDIT_FRAME::createHighlightedNetNavigator()
 
     sizer->Add( searchSizer, 0, wxEXPAND | wxALL, FromDIP( 2 ) );
 
-    m_netNavigator = new wxGenericTreeCtrl( panel, wxID_ANY, wxPoint( 0, 0 ), FromDIP( wxSize( 160, 250 ) ),
-                                            wxTR_DEFAULT_STYLE | wxNO_BORDER );
+    m_netNavigator = new NET_NAVIGATOR_TREE( panel, wxID_ANY, wxPoint( 0, 0 ), FromDIP( wxSize( 160, 250 ) ),
+                                             wxTR_DEFAULT_STYLE | wxNO_BORDER );
     sizer->Add( m_netNavigator, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 2 ) );
 
     panel->SetSizer( sizer );
 
+    m_netNavigator->Bind( wxEVT_DPI_CHANGED, &SCH_EDIT_FRAME::onNetNavigatorDPIChanged, this );
     m_netNavigatorFilter->Bind( wxEVT_COMMAND_TEXT_UPDATED, &SCH_EDIT_FRAME::onNetNavigatorFilterChanged, this );
     m_netNavigatorFilter->Bind( wxEVT_KEY_DOWN, &SCH_EDIT_FRAME::onNetNavigatorKey, this );
     m_netNavigator->Bind( wxEVT_KEY_DOWN, &SCH_EDIT_FRAME::onNetNavigatorKey, this );
@@ -2563,20 +2597,18 @@ wxWindow* SCH_EDIT_FRAME::createHighlightedNetNavigator()
 }
 
 
-void SCH_EDIT_FRAME::SetHighlightedConnection( const wxString& aConnection,
-                                               const NET_NAVIGATOR_ITEM_DATA* aSelection )
+void SCH_EDIT_FRAME::SetHighlightedConnection( const wxString& aConnection, const NET_NAVIGATOR_ITEM_DATA* aSelection,
+                                               bool aForceNetNavigatorRefresh )
 {
-    bool refreshNetNavigator = aConnection != m_highlightedConn;
+    bool connectionChanged = aConnection != m_highlightedConn;
 
     m_highlightedConn = aConnection;
 
-    if( refreshNetNavigator )
-    {
+    if( connectionChanged || aForceNetNavigatorRefresh )
         RefreshNetNavigator( aSelection );
 
-        if( m_hierarchy )
-            m_hierarchy->UpdateNetHighlight( aConnection );
-    }
+    if( connectionChanged && m_hierarchy )
+        m_hierarchy->UpdateNetHighlight( aConnection );
 }
 
 
@@ -3162,4 +3194,26 @@ bool SCH_EDIT_FRAME::doAutoSave()
 {
     // Delegate to base auto-save behavior (commits pending local history) for now.
     return EDA_BASE_FRAME::doAutoSave();
+}
+
+
+bool SCH_EDIT_FRAME::canRunAutoSave() const
+{
+    // Serializing the schematic on the UI thread freezes the editor; defer it while the user
+    // is mid-operation (any tool other than passive selection or point editing is active) so
+    // the snapshot waits for the timer to retry once the edit finishes.
+    TOOL_MANAGER* mgr = GetToolManager();
+
+    if( !mgr )
+        return true;
+
+    TOOL_BASE*        currentTool = mgr->GetCurrentTool();
+    SCH_POINT_EDITOR* pointEditor = mgr->GetTool<SCH_POINT_EDITOR>();
+
+    // The point editor is the active tool whenever a point-editable item is selected, even while
+    // idle, so it is safe to snapshot unless a drag is actively mutating the model.
+    if( currentTool == pointEditor )
+        return pointEditor && !pointEditor->IsDragging();
+
+    return currentTool == mgr->GetTool<SCH_SELECTION_TOOL>();
 }

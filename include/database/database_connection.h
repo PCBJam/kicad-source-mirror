@@ -24,6 +24,7 @@
 #include <any>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -63,7 +64,21 @@ public:
 
     bool IsConnected() const;
 
-    bool CacheTableInfo( const std::string& aTable, const std::set<std::string>& aColumns );
+    /**
+     * Caches schema information for a table so that subsequent queries know which columns exist.
+     *
+     * Required columns are trusted even if the driver doesn't report them (e.g. SQLite generated
+     * columns).  Optional columns are added only if confirmed present; otherwise they are dropped
+     * with a warning rather than breaking every query against the table.  Matching is case-insensitive.
+     *
+     * @param aTable the name of a table in the database
+     * @param aRequiredColumns columns that must be present in queries even if the driver does not
+     *                         report them
+     * @param aOptionalColumns columns that are added only when the driver confirms they exist
+     * @return true on success
+     */
+    bool CacheTableInfo( const std::string& aTable, const std::set<std::string>& aRequiredColumns,
+                         const std::set<std::string>& aOptionalColumns = {} );
 
     /**
      * Retrieves a single row from a database table.  Table and column names are cached when the
@@ -87,6 +102,12 @@ public:
     bool SelectAll( const std::string& aTable, const std::string& aKey,
                     std::vector<ROW>& aResults );
 
+    void ClearCache( const std::string& aTable )
+    {
+        if( m_cache )
+            m_cache->Clear( aTable );
+    }
+
     std::string GetLastError() const { return m_lastError; }
 
 private:
@@ -96,6 +117,7 @@ private:
 
     std::string columnsFor( const std::string& aTable );
 
+    /// The caller must already hold m_queryMutex.
     bool selectAllAndCache( const std::string& aTable, const std::string& aKey );
 
     std::unique_ptr<nanodbc::connection> m_conn;
@@ -115,6 +137,8 @@ private:
     long m_timeout;
 
     char m_quoteChar;
+
+    mutable std::mutex m_queryMutex;
 
     typedef DATABASE_CACHE<std::map<std::string, ROW>> DB_CACHE_TYPE;
 

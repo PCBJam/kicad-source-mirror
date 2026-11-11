@@ -55,8 +55,22 @@
 #include <wx/msgdlg.h>
 #include <sch_edit_tool.h>
 
+#ifdef __EMSCRIPTEN__
+#include <pcbjam_editor_events.h>
+#endif
+
 
 wxDEFINE_EVENT( EDA_EVT_CLOSE_ERC_DIALOG, wxCommandEvent );
+
+
+// Route marker exclusion through the provider so its cached severity counts stay in sync.
+static void setMarkerExcluded( const std::shared_ptr<RC_ITEMS_PROVIDER>& aProvider,
+                               SCH_MARKER* aMarker, bool aExcluded,
+                               const wxString& aComment = wxEmptyString )
+{
+    static_cast<SHEETLIST_ERC_ITEMS_PROVIDER&>( *aProvider ).SetMarkerExcluded( aMarker, aExcluded,
+                                                                                aComment );
+}
 
 
 // wxWidgets spends *far* too long calculating column widths (most of it, believe it or
@@ -577,6 +591,16 @@ void DIALOG_ERC::OnRunERCClick( wxCommandEvent& event )
     updateDisplayedCounts();
     // set float level again, it can be lost due to window events during test run
     KIPLATFORM::UI::SetFloatLevel( this );
+
+#ifdef __EMSCRIPTEN__
+    // pcbjam WASM addition (overlay-system 0005): tell the page what this run found, the
+    // counts the badges above show, so a tutorial can react to a clean schematic.
+    if( !m_cancelled && m_markerProvider )
+    {
+        PCBJAM_EDITOR_EVENTS::NotifyCheckFinished( "erc", m_markerProvider->GetCount( RPT_SEVERITY_ERROR ),
+                                                   m_markerProvider->GetCount( RPT_SEVERITY_WARNING ), 0 );
+    }
+#endif
 }
 
 
@@ -584,6 +608,7 @@ void DIALOG_ERC::redrawDrawPanel()
 {
     WINDOW_THAWER thawer( m_parent );
 
+    m_parent->GetCanvas()->GetView()->RefreshDrawingSheetPageInfo();
     m_parent->GetCanvas()->Refresh();
 }
 
@@ -829,7 +854,7 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
             if( dlg.ShowModal() == wxID_CANCEL )
                 break;
 
-            marker->SetExcluded( true, dlg.GetValue() );
+            setMarkerExcluded( m_markerProvider, marker, true, dlg.GetValue() );
 
             // Update view
             static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->ValueChanged( node );
@@ -841,11 +866,17 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
     case ID_REMOVE_EXCLUSION:
         if( SCH_MARKER* marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() ) )
         {
-            marker->SetExcluded( false );
+            setMarkerExcluded( m_markerProvider, marker, false );
             m_parent->GetCanvas()->GetView()->Update( marker );
 
-            // Update view
-            static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->ValueChanged( node );
+            // The restored severity may fall outside the current filter, so re-filter when it no
+            // longer matches instead of leaving a stale node in the view.
+            if( getSeverities() & marker->GetSeverity() )
+                static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->ValueChanged( node );
+            else
+                static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->Update( m_markerProvider,
+                                                                          getSeverities() );
+
             modified = true;
         }
 
@@ -867,15 +898,17 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
                 comment = dlg.GetValue();
             }
 
-            marker->SetExcluded( true, comment );
+            setMarkerExcluded( m_markerProvider, marker, true, comment );
 
             m_parent->GetCanvas()->GetView()->Update( marker );
 
-            // Update view
+            // The marker survives as an exclusion, so when exclusions are hidden it must leave
+            // the filtered view without being counted as deleted; a rebuild re-filters cleanly.
             if( getSeverities() & RPT_SEVERITY_EXCLUSION )
                 static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->ValueChanged( node );
             else
-                static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->DeleteCurrentItem( false );
+                static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->Update( m_markerProvider,
+                                                                          getSeverities() );
 
             modified = true;
         }
@@ -1056,29 +1089,37 @@ void DIALOG_ERC::ExcludeMarker( SCH_MARKER* aMarker )
     if( marker != nullptr )
         m_markerTreeModel->SelectMarker( marker );
 
-    if( m_notebook->GetSelection() != 0 )
+    RC_TREE_NODE* node = nullptr;
+
+    if( m_notebook->GetSelection() == 0 )
+    {
+        node = RC_TREE_MODEL::ToNode( m_markerDataView->GetCurrentItem() );
+
+        if( node && node->m_RcItem )
+            marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() );
+    }
+
+    if( !marker || marker->IsExcluded() )
         return;
 
-    RC_TREE_NODE* node = RC_TREE_MODEL::ToNode( m_markerDataView->GetCurrentItem() );
+    // Route through the provider so its cached counts stay in sync even when the dialog is not on
+    // the violations tab and has no tree node to refresh.
+    setMarkerExcluded( m_markerProvider, marker, true );
+    m_parent->GetCanvas()->GetView()->Update( marker );
 
-    if( node && node->m_RcItem )
-        marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() );
-
-    if( node && marker && !marker->IsExcluded() )
+    if( node )
     {
-        marker->SetExcluded( true );
-        m_parent->GetCanvas()->GetView()->Update( marker );
-
-        // Update view
+        // The marker survives as an exclusion, so when exclusions are hidden it must leave the
+        // filtered view without being counted as deleted; a rebuild re-filters cleanly.
         if( getSeverities() & RPT_SEVERITY_EXCLUSION )
             m_markerTreeModel->ValueChanged( node );
         else
-            m_markerTreeModel->DeleteCurrentItem( false );
-
-        updateDisplayedCounts();
-        redrawDrawPanel();
-        m_parent->OnModify();
+            m_markerTreeModel->Update( m_markerProvider, getSeverities() );
     }
+
+    updateDisplayedCounts();
+    redrawDrawPanel();
+    m_parent->OnModify();
 }
 
 
@@ -1114,6 +1155,10 @@ void DIALOG_ERC::deleteAllMarkers( bool aIncludeExclusions )
 
     SCH_SCREENS screens( m_parent->Schematic().Root() );
     screens.DeleteAllMarkers( MARKER_BASE::MARKER_ERC, aIncludeExclusions );
+
+    // DeleteItems() only decremented the cached counts for markers matching the current filter,
+    // but DeleteAllMarkers() removed hidden severities too; rebuild to resync the counts.
+    m_markerTreeModel->Update( m_markerProvider, getSeverities() );
 
     Thaw();
 }

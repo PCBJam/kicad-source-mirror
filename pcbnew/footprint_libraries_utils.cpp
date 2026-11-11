@@ -60,6 +60,14 @@
 #include <wx/filedlg.h>
 #include <wx/fswatcher.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (libs 0031): a footprint of a read-only library is copied to a team library by our
+// modal (pcbjam/wasm/bindings/part_copy_footprint.h): 1 = saved there, 0 = not saved,
+// -1 = not ours, save as usual.
+extern "C" int pcbjam_footprint_save_gate( FOOTPRINT_EDIT_FRAME* aFrame,
+                                           FOOTPRINT* aFootprint ) __attribute__(( weak ));
+#endif
+
 
 static constexpr int ID_MAKE_NEW_LIBRARY = 4173;
 
@@ -667,13 +675,16 @@ void PCB_EDIT_FRAME::ExportFootprintsToLibrary( bool aStoreInNewLib, const wxStr
 
     for( FOOTPRINT* footprint : GetBoard()->Footprints() )
     {
+        bool saved = false;
+
         try
         {
             FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &Prj() );
 
             if( !footprint->GetFPID().GetLibItemName().empty() )    // Handle old boards.
             {
-                FOOTPRINT* fpCopy = static_cast<FOOTPRINT*>( footprint->Duplicate( IGNORE_PARENT_GROUP ) );
+                std::unique_ptr<FOOTPRINT> fpCopy(
+                        static_cast<FOOTPRINT*>( footprint->Duplicate( IGNORE_PARENT_GROUP ) ) );
 
                 // Reset reference designator, group membership, and zone offset before saving
 
@@ -683,9 +694,8 @@ void PCB_EDIT_FRAME::ExportFootprintsToLibrary( bool aStoreInNewLib, const wxStr
                 for( ZONE* zone : fpCopy->Zones() )
                     zone->Move( -fpCopy->GetPosition() );
 
-                adapter->SaveFootprint( nickname, fpCopy, true );
-
-                delete fpCopy;
+                adapter->SaveFootprint( nickname, fpCopy.get(), true );
+                saved = true;
             }
         }
         catch( const IO_ERROR& ioe )
@@ -693,7 +703,9 @@ void PCB_EDIT_FRAME::ExportFootprintsToLibrary( bool aStoreInNewLib, const wxStr
             DisplayError( this, ioe.What() );
         }
 
-        if( map )
+        // Relink only if the footprint was actually written; otherwise the board would point
+        // at an entry the library does not contain.
+        if( map && saved )
         {
             LIB_ID id = footprint->GetFPID();
             id.SetLibNickname( nickname );
@@ -739,6 +751,14 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprint( FOOTPRINT* aFootprint )
         return false;
     }
 
+#ifdef __EMSCRIPTEN__
+    if( int saved = pcbjam_footprint_save_gate ? pcbjam_footprint_save_gate( this, aFootprint ) : -1;
+        saved >= 0 )
+    {
+        return saved != 0;
+    }
+#endif
+
     LIBRARY_MANAGER& manager = Pgm().GetLibraryManager();
 
     // Legacy libraries are readable, but modifying legacy format is not allowed
@@ -756,17 +776,16 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprint( FOOTPRINT* aFootprint )
         return false;
     }
 
-    if( nameChanged )
-    {
-        LIB_ID oldFPID( libraryName, m_footprintNameWhenLoaded );
-        DeleteFootprintFromLibrary( oldFPID, false );
-    }
-
+    // Save the renamed footprint before deleting the original, so a failed save does not
+    // destroy the old entry and lose the user's work (issue #23850).
     if( !SaveFootprintInLibrary( aFootprint, libraryName ) )
         return false;
 
     if( nameChanged )
     {
+        LIB_ID oldFPID( libraryName, m_footprintNameWhenLoaded );
+        DeleteFootprintFromLibrary( oldFPID, false );
+
         m_footprintNameWhenLoaded = footprintName;
         SyncLibraryTree( true );
     }
@@ -831,7 +850,16 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprintInLibrary( FOOTPRINT* aFootprint,
                 RECURSE_MODE::RECURSE );
 
         FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &Prj() );
-        adapter->SaveFootprint( aLibraryName, aFootprint );
+
+        if( adapter->SaveFootprint( aLibraryName, aFootprint ) != FOOTPRINT_LIBRARY_ADAPTER::SAVE_OK )
+        {
+            aFootprint->SetFPID( LIB_ID( aLibraryName, aFootprint->GetFPID().GetLibItemName() ) );
+
+            DisplayError( this, wxString::Format( _( "Footprint '%s' could not be saved to library '%s'." ),
+                                                  aFootprint->GetFPID().GetUniStringLibItemName(),
+                                                  aLibraryName ) );
+            return false;
+        }
 
         aFootprint->SetFPID( LIB_ID( aLibraryName, aFootprint->GetFPID().GetLibItemName() ) );
 
@@ -917,12 +945,18 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprintToBoard( bool aAddNew )
                     aUuid = KIID();
             };
 
-    fixUuid( const_cast<KIID&>( newFootprint->m_Uuid ) );
+    {
+        KIID uuid = newFootprint->m_Uuid;
+        fixUuid( uuid );
+        newFootprint->SetUuid( uuid );
+    }
 
     newFootprint->RunOnChildren(
             [&]( BOARD_ITEM* aChild )
             {
-                fixUuid( const_cast<KIID&>( aChild->m_Uuid ) );
+                KIID uuid = aChild->m_Uuid;
+                fixUuid( uuid );
+                aChild->SetUuid( uuid );
             },
             RECURSE_MODE::RECURSE );
 
@@ -973,7 +1007,7 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprintToBoard( bool aAddNew )
         pcbframe->PlaceFootprint( newFootprint );
         newFootprint->SetPosition( VECTOR2I( 0, 0 ) );
         viewControls->SetCrossHairCursorPosition( cursorPos, false );
-        const_cast<KIID&>( newFootprint->m_Uuid ) = KIID();
+        newFootprint->ResetUuid();
         commit.Push( _( "Insert Footprint" ) );
 
         pcbframe->Raise();
@@ -1122,6 +1156,16 @@ bool FOOTPRINT_EDIT_FRAME::SaveFootprintAs( FOOTPRINT* aFootprint )
                     }
                     else
                     {
+                        return false;
+                    }
+
+                    if( !adapter->IsFootprintLibWritable( newLib ) )
+                    {
+                        wxMessageBox( wxString::Format( _( "Library '%s' is read-only. Choose a "
+                                                           "different library to save the "
+                                                           "footprint '%s' to." ),
+                                                        newLib,
+                                                        UnescapeString( newName ) ) );
                         return false;
                     }
 

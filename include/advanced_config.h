@@ -408,6 +408,18 @@ public:
     bool m_DrawBoundingBoxes;
 
     /**
+     * Ask for an OpenGL pixel format that swaps by copying rather than by flipping.
+     *
+     * Some Intel drivers stop showing a flip-swapped canvas after a sibling OpenGL window is
+     * destroyed, although every swap succeeds.  Only used on Windows.
+     *
+     * Setting name: "GLSwapCopy"
+     * Valid values: 0 or 1
+     * Default value: 1
+     */
+    bool m_GLSwapCopy;
+
+    /**
      * Enable exporting board editor netlist to a file for troubleshooting purposes.
      *
      * Setting name: "ShowPcbnewExportNetlist"

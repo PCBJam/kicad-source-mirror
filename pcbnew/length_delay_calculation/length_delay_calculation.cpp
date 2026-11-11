@@ -27,6 +27,7 @@
 
 #include <board.h>
 #include <board_design_settings.h>
+#include <footprint.h>
 #include <geometry/geometry_utils.h>
 #include <geometry/shape_circle.h>
 #include <geometry/circle.h>
@@ -493,42 +494,41 @@ void LENGTH_DELAY_CALCULATION::mergeLines(
     // Vector of pads, and an associated flag to indicate whether they have been visited by the clustering algorithm
     std::vector<LENGTH_DELAY_CALCULATION_ITEM*> pads;
 
-    auto removeFromPositionMap = [&aLinesPositionMap]( LENGTH_DELAY_CALCULATION_ITEM* line )
-    {
-        aLinesPositionMap[line->GetLine().CPoint( 0 )].erase( line );
-        aLinesPositionMap[line->GetLine().CLastPoint()].erase( line );
-    };
-
     // Attempts to merge unmerged lines in to aPrimaryLine
-    auto tryMerge = [&removeFromPositionMap, &aLinesPositionMap]( const MERGE_POINT                    aMergePoint,
-                                                                  const VECTOR2I&                      aMergePos,
-                                                                  const LENGTH_DELAY_CALCULATION_ITEM* aPrimaryItem,
-                                                                  SHAPE_LINE_CHAIN& aPrimaryLine, bool* aDidMerge )
+    auto tryMerge = [&aLinesPositionMap]( const MERGE_POINT aMergePoint, const VECTOR2I& aMergePos,
+                                          const LENGTH_DELAY_CALCULATION_ITEM* aPrimaryItem,
+                                          SHAPE_LINE_CHAIN& aPrimaryLine, bool* aDidMerge )
     {
         const auto startItr = aLinesPositionMap.find( aMergePos );
 
         if( startItr == aLinesPositionMap.end() )
             return;
 
-        std::unordered_set<LENGTH_DELAY_CALCULATION_ITEM*>& startItems = startItr->second;
+        // The map is keyed on position alone, so other layers share the bucket.
+        LENGTH_DELAY_CALCULATION_ITEM* lineToMerge = nullptr;
+        int                            sameLayer = 0;
 
-        if( startItems.size() != 1 )
-            return;
+        for( LENGTH_DELAY_CALCULATION_ITEM* item : startItr->second )
+        {
+            if( item->GetStartLayer() != aPrimaryItem->GetStartLayer() )
+                continue;
 
-        LENGTH_DELAY_CALCULATION_ITEM* lineToMerge = *startItems.begin();
+            sameLayer++;
 
-        // Don't merge if line is an arc
-        if( !lineToMerge->GetLine().CArcs().empty() )
-            return;
+            if( item != aPrimaryItem
+                && item->GetMergeStatus() == LENGTH_DELAY_CALCULATION_ITEM::MERGE_STATUS::UNMERGED )
+            {
+                lineToMerge = item;
+            }
+        }
 
-        // Don't merge if lines are on different layers
-        if( aPrimaryItem->GetStartLayer() != lineToMerge->GetStartLayer() )
+        // Two ends on this layer is a simple joint. More is a branch.
+        if( sameLayer != 2 || !lineToMerge )
             return;
 
         // Merge the lines
         lineToMerge->SetMergeStatus( LENGTH_DELAY_CALCULATION_ITEM::MERGE_STATUS::MERGED_RETIRED );
         mergeShapeLineChains( aPrimaryLine, lineToMerge->GetLine(), aMergePoint );
-        removeFromPositionMap( lineToMerge );
         *aDidMerge = true;
     };
 
@@ -538,9 +538,6 @@ void LENGTH_DELAY_CALCULATION::mergeLines(
         // Don't start with an already merged line
         if( primaryItem->GetMergeStatus() != LENGTH_DELAY_CALCULATION_ITEM::MERGE_STATUS::UNMERGED )
             continue;
-
-        // Remove starting line from the position map
-        removeFromPositionMap( primaryItem );
 
         SHAPE_LINE_CHAIN& primaryLine = primaryItem->GetLine();
 
@@ -568,34 +565,29 @@ void LENGTH_DELAY_CALCULATION::mergeLines(
 void LENGTH_DELAY_CALCULATION::mergeShapeLineChains( SHAPE_LINE_CHAIN& aPrimary, const SHAPE_LINE_CHAIN& aSecondary,
                                                      const MERGE_POINT aMergePoint )
 {
+    // Append carries the arcs across and drops the shared point. Orient the
+    // secondary so its joining end meets the primary.
     if( aMergePoint == MERGE_POINT::START )
     {
-        if( aSecondary.GetPoint( 0 ) == aPrimary.GetPoint( 0 ) )
-        {
-            for( auto itr = aSecondary.CPoints().begin() + 1; itr != aSecondary.CPoints().end(); ++itr )
-                aPrimary.Insert( 0, *itr );
-        }
-        else
-        {
-            wxASSERT( aSecondary.CLastPoint() == aPrimary.GetPoint( 0 ) );
+        // Secondary joins the primary's start, so build secondary + primary.
+        SHAPE_LINE_CHAIN merged =
+                ( aSecondary.GetPoint( 0 ) == aPrimary.GetPoint( 0 ) ) ? aSecondary.Reverse() : aSecondary;
 
-            for( auto itr = aSecondary.CPoints().rbegin() + 1; itr != aSecondary.CPoints().rend(); ++itr )
-                aPrimary.Insert( 0, *itr );
-        }
+        wxASSERT( merged.CLastPoint() == aPrimary.GetPoint( 0 ) );
+
+        merged.Append( aPrimary );
+        aPrimary = merged;
     }
     else
     {
         if( aSecondary.GetPoint( 0 ) == aPrimary.CLastPoint() )
         {
-            for( auto itr = aSecondary.CPoints().begin() + 1; itr != aSecondary.CPoints().end(); ++itr )
-                aPrimary.Append( *itr );
+            aPrimary.Append( aSecondary );
         }
         else
         {
             wxASSERT( aSecondary.CLastPoint() == aPrimary.CLastPoint() );
-
-            for( auto itr = aSecondary.CPoints().rbegin() + 1; itr != aSecondary.CPoints().rend(); ++itr )
-                aPrimary.Append( *itr );
+            aPrimary.Append( aSecondary.Reverse() );
         }
     }
 }
@@ -626,7 +618,7 @@ void LENGTH_DELAY_CALCULATION::optimiseTracesInPads( const std::vector<LENGTH_DE
 void LENGTH_DELAY_CALCULATION::optimiseVias(
         const std::vector<LENGTH_DELAY_CALCULATION_ITEM*>& aVias, std::vector<LENGTH_DELAY_CALCULATION_ITEM*>& aLines,
         std::map<VECTOR2I, std::unordered_set<LENGTH_DELAY_CALCULATION_ITEM*>>&       aLinesPositionMap,
-        const std::map<VECTOR2I, std::unordered_set<LENGTH_DELAY_CALCULATION_ITEM*>>& aPadsPositionMap )
+        const std::map<VECTOR2I, std::unordered_set<LENGTH_DELAY_CALCULATION_ITEM*>>& aPadsPositionMap ) const
 {
     for( LENGTH_DELAY_CALCULATION_ITEM* via : aVias )
     {
@@ -636,13 +628,11 @@ void LENGTH_DELAY_CALCULATION::optimiseVias(
 
         const VECTOR2I viaPos = pcbVia->GetPosition();
 
-        // Check for exact position match (fast path)
         auto exactMatch = aLinesPositionMap.find( viaPos );
 
         if( exactMatch != aLinesPositionMap.end() )
             connectedLines.insert( exactMatch->second.begin(), exactMatch->second.end() );
 
-        // Check for off-center connections
         int maxRadius = 0;
 
         pcbVia->Padstack().ForEachUniqueLayer(
@@ -656,7 +646,7 @@ void LENGTH_DELAY_CALCULATION::optimiseVias(
         for( const auto& [pos, lineSet] : aLinesPositionMap )
         {
             if( pos == viaPos )
-                continue; // already handled
+                continue;
 
             if( ( pos - viaPos ).SquaredEuclideanNorm() > maxRadiusSq )
                 continue;
@@ -671,69 +661,57 @@ void LENGTH_DELAY_CALCULATION::optimiseVias(
             }
         }
 
-        if( connectedLines.empty() )
+        const PAD* coincidentPad = nullptr;
+
+        for( PAD* pad : m_board->GetConnectivity()->GetConnectedPads( pcbVia ) )
         {
-            // No connected lines - this via is floating. Set both layers to the same
-            via->SetLayers( via->GetVia()->GetLayer(), via->GetVia()->GetLayer() );
+            coincidentPad = pad;
+            break;
         }
-        else if( connectedLines.size() == 1 )
+
+        LSET spanLayers;
+
+        for( const LENGTH_DELAY_CALCULATION_ITEM* lineItem : connectedLines )
+            spanLayers.set( lineItem->GetStartLayer() );
+
+        if( coincidentPad )
         {
-            // This is either a via stub, or a via-in-pad
-            bool               isViaInPad = false;
-            const PCB_LAYER_ID lineLayer = ( *connectedLines.begin() )->GetStartLayer();
+            PCB_LAYER_ID padSideLayer;
 
-            auto padItr = aPadsPositionMap.find( via->GetVia()->GetPosition() );
-
-            if( padItr != aPadsPositionMap.end() )
+            if( coincidentPad->GetAttribute() == PAD_ATTRIB::SMD || coincidentPad->GetAttribute() == PAD_ATTRIB::CONN )
             {
-                // This could be a via-in-pad - check for overlapping pads which are not on the line layer
-                const std::unordered_set<LENGTH_DELAY_CALCULATION_ITEM*>& pads = padItr->second;
-
-                if( pads.size() == 1 )
-                {
-                    const LENGTH_DELAY_CALCULATION_ITEM* padItem = *pads.begin();
-
-                    if( !padItem->GetPad()->Padstack().LayerSet().Contains( lineLayer ) )
-                    {
-                        // This is probably a via-in-pad
-                        isViaInPad = true;
-                        via->SetLayers( lineLayer, padItem->GetStartLayer() );
-                    }
-                }
+                padSideLayer = *coincidentPad->Padstack().LayerSet().CuStack().begin();
+            }
+            else
+            {
+                padSideLayer = coincidentPad->GetParentFootprint()->GetLayer();
             }
 
-            if( !isViaInPad )
-            {
-                // This is a via stub - make its electrical length 0
-                via->SetLayers( lineLayer, lineLayer );
-            }
+            spanLayers.set( padSideLayer );
+        }
+
+        wxLogTrace( wxT( "PNS_TUNE" ),
+                    wxT( "optimiseVias: via@(%d,%d) connectedLines=%zu coincidentPad=%d "
+                         "spanLayerCount=%d" ),
+                    viaPos.x, viaPos.y, connectedLines.size(), coincidentPad ? 1 : 0,
+                    static_cast<int>( spanLayers.count() ) );
+
+        const LSEQ cuStack = spanLayers.CuStack();
+
+        if( cuStack.empty() )
+        {
+            // Nothing connects to this via
+            via->SetLayers( pcbVia->GetLayer(), pcbVia->GetLayer() );
+        }
+        else if( cuStack.size() == 1 )
+        {
+            // Stub via
+            via->SetLayers( cuStack.front(), cuStack.front() );
         }
         else
         {
-            // This via has more than one track ending at it. Calculate the connected layer span (which may be shorter
-            // than the overall via span)
-            LSET layers;
-
-            for( const LENGTH_DELAY_CALCULATION_ITEM* lineItem : connectedLines )
-                layers.set( lineItem->GetStartLayer() );
-
-            LSEQ cuStack = layers.CuStack();
-
-            PCB_LAYER_ID firstLayer = UNDEFINED_LAYER;
-            PCB_LAYER_ID lastLayer = UNDEFINED_LAYER;
-
-            for( PCB_LAYER_ID layer : cuStack )
-            {
-                if( firstLayer == UNDEFINED_LAYER )
-                    firstLayer = layer;
-                else
-                    lastLayer = layer;
-            }
-
-            if( lastLayer == UNDEFINED_LAYER )
-                via->SetLayers( firstLayer, firstLayer );
-            else
-                via->SetLayers( firstLayer, lastLayer );
+            // Signal transitions layers
+            via->SetLayers( cuStack.front(), cuStack.back() );
         }
     }
 }
@@ -956,6 +934,12 @@ int64_t LENGTH_DELAY_CALCULATION::CalculateLengthForDelay( const int64_t        
                                                            const TUNING_PROFILE_GEOMETRY_CONTEXT& aCtx ) const
 {
     return m_tuningProfileParameters->GetTrackLengthForPropagationDelay( aDesiredDelay, aCtx );
+}
+
+
+bool LENGTH_DELAY_CALCULATION::CanCalculateLengthForDelay( const TUNING_PROFILE_GEOMETRY_CONTEXT& aCtx ) const
+{
+    return m_tuningProfileParameters->CanCalculateLengthForDelay( aCtx );
 }
 
 

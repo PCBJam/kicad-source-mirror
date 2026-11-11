@@ -80,6 +80,7 @@ enum LAST_PATH_TYPE : unsigned int
     LAST_PATH_VRML,
     LAST_PATH_SPECCTRADSN,
     LAST_PATH_PLOT,
+    LAST_PATH_STEP,
 
     LAST_PATH_SIZE
 };
@@ -107,11 +108,22 @@ public:
 
     bool SaveToFile( const wxString& aDirectory = "", bool aForce = false ) override;
 
+    /**
+     * Serialize to the bytes SaveToFile would write, without touching the file.
+     * @return the document, or an empty string on error
+     */
+    std::string SerializeToString();
+
     bool SaveAs( const wxString& aDirectory, const wxString& aFile );
 
     void SetProject( PROJECT* aProject )
     {
         m_project = aProject;
+    }
+
+    const PROJECT* GetOwningProject() const override
+    {
+        return m_project;
     }
 
     std::vector<FILE_INFO_PAIR>& GetSheets()

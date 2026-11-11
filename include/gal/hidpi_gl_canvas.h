@@ -28,6 +28,8 @@
 #define HIDPI_GL_CANVAS_H
 
 #include <kicad_gl/kiglad.h> // Must be included first
+#include <view/view_controls.h>
+#include <wx/window.h>
 #include <wx/glcanvas.h>
 
 #include <view/view_controls.h>
@@ -62,6 +64,18 @@ public:
     double GetScaleFactor() const;
 
     void SetVcSettings( const KIGFX::VC_SETTINGS& aVcSettings ) { m_settings = aVcSettings; }
+
+    /**
+     * Add the attributes that request a pixel format swapping by copy rather than by flip.
+     *
+     * Some Intel drivers on Windows stop showing a flip-swapped canvas once a sibling OpenGL
+     * window is destroyed, although every swap succeeds.  Call before EndList(), and check
+     * the result with wxGLCanvas::IsDisplaySupported() since not every driver offers it.
+     *
+     * @return true if attributes were added, false when the platform or the GLSwapCopy
+     *         advanced setting rules it out.
+     */
+    static bool AddSwapCopyAttributes( wxGLAttributes& aAttribs );
 
 protected:
     ///< Current VIEW_CONTROLS settings.

@@ -9,7 +9,7 @@
     {
       "kind": "git",
       "repository": "https://gitlab.com/kicad/packaging/kicad-vcpkg-registry.git",
-      "baseline": "9b23c206291914d106d4e9ca486453f676c9b561",
+      "baseline": "1c729aa1d25750bd43f392a6ae618ea96d6ee76c",
       "packages": [
         "python3",
         "opencascade",

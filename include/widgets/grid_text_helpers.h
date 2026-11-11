@@ -127,7 +127,8 @@ public:
     GRID_CELL_TEXT_BUTTON() :
             m_grid( nullptr ),
             m_row( -1 ),
-            m_col( -1 )
+            m_col( -1 ),
+            m_editSettled( false )
     {};
 
     wxString GetValue() const override;
@@ -141,6 +142,7 @@ public:
     void Reset() override;
 
     void OnTextChange( wxCommandEvent& event );
+    void OnKillFocus( wxFocusEvent& event );
 
 #if wxUSE_VALIDATORS
     void SetValidator( const wxValidator& validator );
@@ -158,6 +160,7 @@ protected:
     int      m_row;
     int      m_col;
     wxString m_value;
+    bool     m_editSettled;   ///< BeginEdit's own focus churn is over
 
     wxDECLARE_NO_COPY_CLASS( GRID_CELL_TEXT_BUTTON );
 };

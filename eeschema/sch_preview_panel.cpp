@@ -102,6 +102,25 @@ void SCH_PREVIEW_PANEL::OnShow()
 }
 
 
+bool SCH_PREVIEW_PANEL::SwitchBackend( GAL_TYPE aGalType )
+{
+    // SwitchBackend creates a brand-new GAL, whose constructor resets the world
+    // unit length to the Pcbnew default (1 nm). Eeschema's IU is 100 nm, so the
+    // value must be re-applied or the world->screen scale is off by 100x — which
+    // makes the symbol-chooser preview's fit-to-view blow past the scale limits
+    // and clamp to a dot. SCH_DRAW_PANEL does the same; the preview panel was
+    // missing it. The backend gets switched after construction (e.g. the draw
+    // path falls back to GAL_FALLBACK), so the constructor's one-time set isn't
+    // enough.
+    bool rv = EDA_DRAW_PANEL_GAL::SwitchBackend( aGalType );
+
+    setDefaultLayerDeps();
+    m_gal->SetWorldUnitLength( SCH_WORLD_UNIT );
+
+    return rv;
+}
+
+
 void SCH_PREVIEW_PANEL::setDefaultLayerOrder()
 {
     for( int i = 0; (unsigned) i < sizeof( SCH_LAYER_ORDER ) / sizeof( int ); ++i )

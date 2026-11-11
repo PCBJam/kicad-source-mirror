@@ -159,3 +159,49 @@ void WX_DATAVIEWCTRL::CollapseAll()
 {
     recursiveDescent( this, wxDataViewItem(), false );
 }
+
+
+void WX_DATAVIEWCTRL::CancelPendingEnsureVisible()
+{
+#ifdef __WXGTK__
+    if( !GetModel() )
+        return;
+
+    // GTK keeps the last EnsureVisible target for a later idle pass.  Re-arm that deferred
+    // target with an invalid item so the idle handler's IsOk() guard skips ExpandAncestors
+    // instead of dereferencing freed memory.  Other ports keep no deferred reference, so
+    // there is nothing to cancel there.
+    EnsureVisible( wxDataViewItem( nullptr ) );
+#endif
+}
+
+
+WX_DATAVIEWCTRL::~WX_DATAVIEWCTRL()
+{
+    // The canceller captures this control, so drop it before the model can outlive us.
+    if( m_ensureVisibleCanceller && GetModel() )
+        GetModel()->RemoveNotifier( m_ensureVisibleCanceller );
+}
+
+
+bool WX_DATAVIEWCTRL::AssociateModel( wxDataViewModel* aModel )
+{
+    // Drop the old canceller before it can fire against the new model.
+    if( m_ensureVisibleCanceller && GetModel() )
+    {
+        GetModel()->RemoveNotifier( m_ensureVisibleCanceller );
+        m_ensureVisibleCanceller = nullptr;
+    }
+
+    bool ret = wxDataViewCtrl::AssociateModel( aModel );
+
+    // Skip on failed association, else the notifier capturing this control would dangle.
+    if( ret && aModel )
+    {
+        m_ensureVisibleCanceller =
+                new WX_ENSURE_VISIBLE_CANCELLER( [this]() { CancelPendingEnsureVisible(); } );
+        aModel->AddNotifier( m_ensureVisibleCanceller );
+    }
+
+    return ret;
+}

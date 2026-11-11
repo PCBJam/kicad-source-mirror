@@ -217,45 +217,6 @@ BOARD_ITEM& RequireBoardItemWithTypeAndId( const BOARD& aBoard, KICAD_T aItemTyp
 }
 
 
-/**
- * A temporary directory that will be deleted when it goes out of scope.
- */
-class TEMPORARY_DIRECTORY
-{
-public:
-    /**
-     * Create a temporary directory with a given prefix and suffix. The directory will be
-     * created in the system temporary directory, and will not be pre-existing.
-     */
-    TEMPORARY_DIRECTORY( const std::string& aNamePrefix, const std::string aSuffix )
-    {
-        int i = 0;
-
-        // Find a unique directory name
-        while( true )
-        {
-            m_path = std::filesystem::temp_directory_path()
-                     / ( aNamePrefix + std::to_string( i ) + aSuffix );
-
-            if( !std::filesystem::exists( m_path ) )
-                break;
-
-            i++;
-        }
-
-        wxASSERT( !std::filesystem::exists( m_path ) );
-        std::filesystem::create_directories( m_path );
-    }
-
-    ~TEMPORARY_DIRECTORY() { std::filesystem::remove_all( m_path ); }
-
-    const std::filesystem::path& GetPath() const { return m_path; }
-
-private:
-    std::filesystem::path m_path;
-};
-
-
 void LoadAndTestBoardFile( const wxString aRelativePath, bool aRoundtrip,
                            std::function<void( BOARD& )> aBoardTestFunction,
                            std::optional<int>            aExpectedBoardVersion )
@@ -493,6 +454,10 @@ void CheckFootprint( const FOOTPRINT* expected, const FOOTPRINT* fp )
             // TODO
             break;
 
+        case PCB_POINT_T:
+            // TODO
+            break;
+
         default:
             BOOST_ERROR( "KICAD_T not known" );
             break;
@@ -696,7 +661,7 @@ void CheckFpZone( const ZONE* expected, const ZONE* zone )
         BOOST_CHECK_EQUAL( expected->GetThermalReliefGap(), zone->GetThermalReliefGap() );
         BOOST_CHECK_EQUAL( expected->GetThermalReliefSpokeWidth(),
                            zone->GetThermalReliefSpokeWidth() );
-        BOOST_CHECK_EQUAL( expected->GetCornerSmoothingType(), zone->GetCornerSmoothingType() );
+        CHECK_ENUM_CLASS_EQUAL( expected->GetCornerSmoothingType(), zone->GetCornerSmoothingType() );
         BOOST_CHECK_EQUAL( expected->GetCornerRadius(), zone->GetCornerRadius() );
         CHECK_ENUM_CLASS_EQUAL( expected->GetIslandRemovalMode(), zone->GetIslandRemovalMode() );
         BOOST_CHECK_EQUAL( expected->GetMinIslandArea(), zone->GetMinIslandArea() );

@@ -1088,14 +1088,57 @@ void PCB_PAINTER::draw( const PCB_ARC* aArc, int aLayer )
 }
 
 
+static bool viaHoleShowsLayerPair( const PCB_VIA* aVia )
+{
+    PCB_LAYER_ID layerTop, layerBottom;
+    aVia->LayerPair( &layerTop, &layerBottom );
+
+    return aVia->GetViaType() == VIATYPE::BLIND || aVia->GetViaType() == VIATYPE::BURIED
+           || ( aVia->GetViaType() == VIATYPE::MICROVIA && ( layerTop != F_Cu || layerBottom != B_Cu ) );
+}
+
+
+bool PCB_PAINTER::HasUniformColor( const VIEW_ITEM* aItem, int aLayer ) const
+{
+    if( aLayer != LAYER_VIA_HOLES && aLayer != LAYER_VIA_HOLEWALLS && aLayer != LAYER_PAD_HOLEWALLS )
+    {
+        return true;
+    }
+
+    if( !aItem->IsBOARD_ITEM() )
+        return true;
+
+    const BOARD_ITEM* item = static_cast<const BOARD_ITEM*>( aItem );
+
+    if( aLayer == LAYER_PAD_HOLEWALLS )
+    {
+        if( item->Type() != PCB_PAD_T )
+            return true;
+
+        const PAD* pad = static_cast<const PAD*>( item );
+
+        return pad->GetDrillSizeX() <= 0 || ( pad->GetSecondaryDrillSizeX() <= 0 && pad->GetTertiaryDrillSizeX() <= 0 );
+    }
+
+    if( item->Type() != PCB_VIA_T )
+        return true;
+
+    const PCB_VIA* via = static_cast<const PCB_VIA*>( item );
+
+    if( aLayer == LAYER_VIA_HOLES )
+        return !viaHoleShowsLayerPair( via );
+
+    return via->GetSecondaryDrillSize().value_or( 0 ) <= 0 && via->GetTertiaryDrillSize().value_or( 0 ) <= 0;
+}
+
+
 void PCB_PAINTER::draw( const PCB_VIA* aVia, int aLayer )
 {
     const BOARD* board = aVia->GetBoard();
     COLOR4D      color = m_pcbSettings.GetColor( aVia, aLayer );
     VECTOR2D     center( aVia->GetStart() );
 
-    if( color == COLOR4D::CLEAR )
-        return;
+    // draw hidden vias transparent not skipped so a recolour restores them without re-tessellating
 
     const int copperLayer = IsViaCopperLayer( aLayer ) ? aLayer - LAYER_VIA_COPPER_START : aLayer;
 
@@ -1104,10 +1147,7 @@ void PCB_PAINTER::draw( const PCB_VIA* aVia, int aLayer )
     aVia->LayerPair( &layerTop, &layerBottom );
 
     // Blind/buried vias (and microvias) will use different hole and label rendering
-    bool isBlindBuried = aVia->GetViaType() == VIATYPE::BLIND
-            || aVia->GetViaType() == VIATYPE::BURIED
-            || ( aVia->GetViaType() == VIATYPE::MICROVIA
-                 && ( layerTop != F_Cu || layerBottom != B_Cu ) );
+    bool isBlindBuried = viaHoleShowsLayerPair( aVia );
 
     // Draw description layer
     if( IsNetnameLayer( aLayer ) )
@@ -2376,7 +2416,7 @@ void PCB_PAINTER::draw( const PCB_SHAPE* aShape, int aLayer )
             m_gal->SetIsStroke( false );
         }
 
-        std::vector<SHAPE*> shapes = aShape->MakeEffectiveShapes( true );
+        std::vector<SHAPE*> shapes = aShape->MakeEffectiveShapesForStroking();
 
         for( SHAPE* shape : shapes )
         {
@@ -2931,6 +2971,15 @@ void PCB_PAINTER::draw( const PCB_GROUP* aGroup, int aLayer )
 }
 
 
+bool KIGFX::ZoneOutlineDrawnOnLayer( bool aOutlineOnly, int aLayer )
+{
+    if( aOutlineOnly )
+        return IsZoneFillLayer( aLayer );
+
+    return !IsZoneFillLayer( aLayer );
+}
+
+
 void PCB_PAINTER::draw( const ZONE* aZone, int aLayer )
 {
     if( aLayer == LAYER_CONFLICTS_SHADOW )
@@ -2968,8 +3017,12 @@ void PCB_PAINTER::draw( const ZONE* aZone, int aLayer )
     if( aZone->IsTeardropArea() )
         displayMode = ZONE_DISPLAY_MODE::SHOW_FILLED;
 
+    // A zone whose only visual is its outline (rule area, or outline-only display) draws it on
+    // the zone layer, above copper, so tracks and pads can't paint over it.
+    bool outlineOnly = aZone->GetIsRuleArea() || displayMode == ZONE_DISPLAY_MODE::SHOW_ZONE_OUTLINE;
+
     // Draw the outline
-    if( !IsZoneFillLayer( aLayer ) )
+    if( ZoneOutlineDrawnOnLayer( outlineOnly, aLayer ) )
     {
         const SHAPE_POLY_SET* outline = aZone->Outline();
         bool allowDrawOutline = aZone->GetHatchStyle() != ZONE_BORDER_DISPLAY_STYLE::INVISIBLE_BORDER;
@@ -3069,6 +3122,43 @@ void PCB_PAINTER::draw( const PCB_BARCODE* aBarcode, int aLayer )
 void PCB_PAINTER::draw( const PCB_DIMENSION_BASE* aDimension, int aLayer )
 {
     const COLOR4D& color = m_pcbSettings.GetColor( aDimension, aLayer );
+
+    if( aLayer == LAYER_LOCKED_ITEM_SHADOW )
+    {
+        m_gal->SetIsFill( true );
+        m_gal->SetIsStroke( true );
+        m_gal->SetFillColor( color );
+        m_gal->SetStrokeColor( color );
+        m_gal->SetLineWidth( m_lockedShadowMargin );
+
+        for( const std::shared_ptr<SHAPE>& shape : aDimension->GetShapes() )
+        {
+            switch( shape->Type() )
+            {
+            case SH_SEGMENT:
+            {
+                const SEG& seg = static_cast<const SHAPE_SEGMENT*>( shape.get() )->GetSeg();
+                m_gal->DrawSegment( seg.A, seg.B, m_lockedShadowMargin );
+                break;
+            }
+
+            case SH_CIRCLE:
+            {
+                int radius = static_cast<const SHAPE_CIRCLE*>( shape.get() )->GetRadius();
+                m_gal->DrawCircle( shape->Centre(), radius );
+                break;
+            }
+
+            default: break;
+            }
+        }
+
+        SHAPE_POLY_SET poly;
+        aDimension->PCB_TEXT::TransformShapeToPolygon( poly, aDimension->GetLayer(), 0, m_maxError, ERROR_OUTSIDE );
+        m_gal->DrawPolygon( poly );
+
+        return;
+    }
 
     m_gal->SetStrokeColor( color );
     m_gal->SetFillColor( color );

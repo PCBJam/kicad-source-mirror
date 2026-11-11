@@ -363,6 +363,14 @@ public:
     void PreloadDesignBlockLibraries( KIWAY* aKiway );
 
     /**
+     * Ask the design block preload to stop and wait for it to finish.
+     *
+     * The coordinator runs on its own thread, so it outlives the thread pool drain at exit
+     * and keeps submitting library workers to the pool.  Call this before that drain.
+     */
+    void CancelDesignBlockPreload();
+
+    /**
      * Register a status bar to receive library load warning messages.
      * Multiple status bars can be registered (one per open frame).
      */
@@ -413,7 +421,9 @@ protected:
     std::unique_ptr<BACKGROUND_JOBS_MONITOR> m_background_jobs_monitor;
     std::unique_ptr<NOTIFICATIONS_MANAGER> m_notifications_manager;
 
+#ifdef KICAD_SCRIPTING
     std::unique_ptr<SCRIPTING> m_python_scripting;
+#endif
 
     /// Check if there is another copy of Kicad running at the same time.
     std::unique_ptr<wxSingleInstanceChecker> m_pgm_checker;

@@ -23,6 +23,7 @@
 
 #include "drc_re_rule_loader.h"
 
+#include <base_units.h>
 #include <reporter.h>
 #include <component_classes/component_class_assignment_rule.h>
 #include <drc/drc_rule_parser.h>
@@ -53,6 +54,12 @@ DRC_RULE_LOADER::DRC_RULE_LOADER()
 double DRC_RULE_LOADER::toMM( int aValue )
 {
     return aValue / 1000000.0;
+}
+
+
+double DRC_RULE_LOADER::toPS( int aValue )
+{
+    return aValue / pcbIUScale.IU_PER_PS;
 }
 
 
@@ -92,15 +99,29 @@ static std::shared_ptr<DRC_RE_BASE_CONSTRAINT_DATA> makeCustomRuleData( const DR
 
 wxString DRC_RULE_LOADER::extractRuleBody( const wxString& aOriginalText )
 {
-    int ruleKeyword = aOriginalText.Find( wxS( "rule " ) );
+    // Comment lines live in the comment field, not in the body.
+    wxArrayString kept;
+
+    for( const wxString& line : wxSplit( aOriginalText, '\n', '\0' ) )
+    {
+        wxString trimmed = line;
+        trimmed.Trim( false );
+
+        if( !trimmed.StartsWith( wxS( "#" ) ) )
+            kept.Add( line );
+    }
+
+    wxString text = wxJoin( kept, '\n', '\0' );
+
+    int ruleKeyword = text.Find( wxS( "rule " ) );
     if( ruleKeyword == wxNOT_FOUND )
         return aOriginalText;
 
-    int bodyStart = aOriginalText.find( '(', ruleKeyword + 5 );
+    int bodyStart = text.find( '(', ruleKeyword + 5 );
     if( bodyStart == (int) wxString::npos )
         return aOriginalText;
 
-    wxString body = aOriginalText.Mid( bodyStart );
+    wxString body = text.Mid( bodyStart );
     body.Trim( true );
 
     if( body.EndsWith( wxS( ")" ) ) )
@@ -312,11 +333,22 @@ DRC_RULE_LOADER::createConstraintData( DRC_RULE_EDITOR_CONSTRAINT_NAME   aPanel,
 
         if( length )
         {
-            double minMM = toMM( length->GetValue().Min() );
-            double optMM = toMM( length->GetValue().Opt() );
-            double maxMM = toMM( length->GetValue().Max() );
-            data->SetOptimumLength( optMM );
-            data->SetTolerance( ( maxMM - minMM ) / 2.0 );
+            bool timeDomain = length->GetOption( DRC_CONSTRAINT::OPTIONS::TIME_DOMAIN );
+
+            auto convert = [&]( int aValue )
+            {
+                return timeDomain ? toPS( aValue ) : toMM( aValue );
+            };
+
+            double min = convert( length->GetValue().Min() );
+            double max = convert( length->GetValue().Max() );
+
+            // A rule without an optimum gets the window center, so saving keeps its min and max.
+            double opt = length->GetValue().HasOpt() ? convert( length->GetValue().Opt() ) : ( min + max ) / 2.0;
+
+            data->SetTimeDomain( timeDomain );
+            data->SetOptimumLength( opt );
+            data->SetTolerance( ( max - min ) / 2.0 );
         }
 
         return data;
@@ -506,8 +538,24 @@ std::vector<DRC_RE_LOADED_PANEL_ENTRY> DRC_RULE_LOADER::LoadRule( const DRC_RULE
     if( aRule.m_Condition )
         condition = aRule.m_Condition->GetExpression();
 
+    // Only the absolute length panel can hold time domain values.
+    bool fitsStructuredPanels = true;
+
+    for( const DRC_CONSTRAINT& constraint : aRule.m_Constraints )
+    {
+        if( constraint.GetOption( DRC_CONSTRAINT::OPTIONS::TIME_DOMAIN )
+            && !( constraint.m_Type == LENGTH_CONSTRAINT && aRule.m_Constraints.size() == 1 ) )
+        {
+            fitsStructuredPanels = false;
+            break;
+        }
+    }
+
     // Match the rule to panels
-    std::vector<DRC_PANEL_MATCH> matches = m_matcher.MatchRule( aRule );
+    std::vector<DRC_PANEL_MATCH> matches;
+
+    if( fitsStructuredPanels )
+        matches = m_matcher.MatchRule( aRule );
 
     for( DRC_PANEL_MATCH& match : matches )
     {
@@ -668,6 +716,9 @@ std::vector<DRC_RE_LOADED_PANEL_ENTRY> DRC_RULE_LOADER::LoadRule( const DRC_RULE
         entry.originalRuleText = aOriginalText;
         entries.push_back( std::move( entry ) );
     }
+
+    for( DRC_RE_LOADED_PANEL_ENTRY& entry : entries )
+        entry.originalEntryCount = static_cast<int>( entries.size() );
 
     return entries;
 }

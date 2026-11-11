@@ -26,6 +26,7 @@
 // Common
 #include <api/api_enums.h>
 #include <api/common/types/enums.pb.h>
+#include <core/mirror.h>
 #include <core/typeinfo.h>
 #include <font/text_attributes.h>
 #include <layer_ids.h>
@@ -36,6 +37,8 @@
 // Board-specific
 #include <api/board/board_types.pb.h>
 #include <api/board/board_commands.pb.h>
+#include <api/common/types/embedded_files.pb.h>
+#include <embedded_files.h>
 #include <board_stackup_manager/board_stackup.h>
 #include <padstack.h>
 #include <pcb_dimension.h>
@@ -98,6 +101,11 @@ BOOST_AUTO_TEST_CASE( PadStackType )
     testEnums<PADSTACK::MODE, kiapi::board::types::PadStackType>();
 }
 
+BOOST_AUTO_TEST_CASE( PadFabricationProperty )
+{
+    testEnums<PAD_PROP, kiapi::board::types::PadFabricationProperty>();
+}
+
 BOOST_AUTO_TEST_CASE( DrillShape )
 {
     testEnums<PAD_DRILL_SHAPE, kiapi::board::types::DrillShape>();
@@ -134,9 +142,9 @@ BOOST_AUTO_TEST_CASE( PlacementRuleSourceType )
     testEnums<PLACEMENT_SOURCE_T, kiapi::board::types::PlacementRuleSourceType>();
 }
 
-BOOST_AUTO_TEST_CASE( TeardropType )
+BOOST_AUTO_TEST_CASE( ZoneTeardropType )
 {
-    testEnums<TEARDROP_TYPE, kiapi::board::types::TeardropType>();
+    testEnums<TEARDROP_TYPE, kiapi::board::types::ZoneTeardropType>();
 }
 
 BOOST_AUTO_TEST_CASE( DimensionTextBorderStyle )
@@ -184,14 +192,29 @@ BOOST_AUTO_TEST_CASE( RatsnestDisplayMode )
     testEnums<RATSNEST_MODE, kiapi::board::commands::RatsnestDisplayMode>();
 }
 
+BOOST_AUTO_TEST_CASE( BoardFlipDirection )
+{
+    testEnums<FLIP_DIRECTION, kiapi::board::commands::BoardFlipDirection>();
+}
+
 BOOST_AUTO_TEST_CASE( BoardStackupLayerType )
 {
     testEnums<BOARD_STACKUP_ITEM_TYPE, kiapi::board::BoardStackupLayerType>();
 }
 
+BOOST_AUTO_TEST_CASE( BoardEdgeConnectorType )
+{
+    testEnums<BS_EDGE_CONNECTOR_CONSTRAINTS, kiapi::board::BoardEdgeConnectorType>();
+}
+
 BOOST_AUTO_TEST_CASE( DrcSeverity )
 {
     testEnums<SEVERITY, kiapi::board::commands::DrcSeverity>();
+}
+
+BOOST_AUTO_TEST_CASE( EmbeddedFileType )
+{
+    testEnums<EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE, kiapi::common::types::EmbeddedFileType>();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

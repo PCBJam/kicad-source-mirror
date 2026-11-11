@@ -136,6 +136,7 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
 
     m_netTiePadGroups                = aFootprint.m_netTiePadGroups;
     m_jumperPadGroups                = aFootprint.m_jumperPadGroups;
+    m_unitInfo                       = aFootprint.m_unitInfo;
     m_duplicatePadNumbersAreJumpers  = aFootprint.m_duplicatePadNumbersAreJumpers;
     m_allowMissingCourtyard          = aFootprint.m_allowMissingCourtyard;
     m_allowSolderMaskBridges         = aFootprint.m_allowSolderMaskBridges;
@@ -181,6 +182,16 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
             ptrMap[field] = existingField;
             *existingField = *field;
             existingField->SetParent( this );
+
+            // The mandatory fields already exist (the ctor above created them, each with a
+            // fresh KIID), so they are ASSIGNED rather than copy-constructed — and
+            // EDA_ITEM::operator= deliberately does not touch the const m_Uuid. Without this
+            // the four mandatory fields silently get NEW uuids on every FOOTPRINT::Clone(),
+            // while pads, zones, drawings and user fields (which go through the copy ctor,
+            // eda_item.cpp `m_Uuid( base.m_Uuid )`) keep theirs. Anything keyed by uuid — our
+            // collab wire, undo/redo bookkeeping, cross-references — sees those four fields
+            // vanish and reappear under new ids.
+            const_cast<KIID&>( existingField->m_Uuid ) = field->m_Uuid;
         }
         else
         {
@@ -249,8 +260,9 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
         }
     }
 
-    for( auto& [ name, file ] : aFootprint.EmbeddedFileMap() )
-        AddFile( new EMBEDDED_FILES::EMBEDDED_FILE( *file ) );
+    // Embedded files are inherited via the EMBEDDED_FILES copy constructor invoked in the
+    // member initializer list above; the underlying file payloads are reference-counted so
+    // cloning a footprint is cheap even when it carries large embedded models or fonts.
 }
 
 
@@ -296,9 +308,6 @@ FOOTPRINT::~FOOTPRINT()
         delete d;
 
     m_drawings.clear();
-
-    if( BOARD* board = GetBoard() )
-        board->IncrementTimeStamp();
 }
 
 
@@ -315,15 +324,13 @@ void FOOTPRINT::Serialize( google::protobuf::Any &aContainer ) const
     footprint.set_locked( IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
                                      : kiapi::common::types::LockedState::LS_UNLOCKED );
 
-    google::protobuf::Any buf;
-    GetField( FIELD_T::REFERENCE )->Serialize( buf );
-    buf.UnpackTo( footprint.mutable_reference_field() );
-    GetField( FIELD_T::VALUE )->Serialize( buf );
-    buf.UnpackTo( footprint.mutable_value_field() );
-    GetField( FIELD_T::DATASHEET )->Serialize( buf );
-    buf.UnpackTo( footprint.mutable_datasheet_field() );
-    GetField( FIELD_T::DESCRIPTION )->Serialize( buf );
-    buf.UnpackTo( footprint.mutable_description_field() );
+    if( const BOARD* board = GetBoard() )
+        footprint.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
+    GetField( FIELD_T::REFERENCE )->Serialize( *footprint.mutable_reference_field() );
+    GetField( FIELD_T::VALUE )->Serialize( *footprint.mutable_value_field() );
+    GetField( FIELD_T::DATASHEET )->Serialize( *footprint.mutable_datasheet_field() );
+    GetField( FIELD_T::DESCRIPTION )->Serialize( *footprint.mutable_description_field() );
 
     types::FootprintAttributes* attrs = footprint.mutable_attributes();
 
@@ -411,6 +418,12 @@ void FOOTPRINT::Serialize( google::protobuf::Any &aContainer ) const
         item->Serialize( *itemMsg );
     }
 
+    for( const PCB_POINT* item : Points() )
+    {
+        google::protobuf::Any* itemMsg = def->add_items();
+        item->Serialize( *itemMsg );
+    }
+
     for( const ZONE* item : Zones() )
     {
         google::protobuf::Any* itemMsg = def->add_items();
@@ -436,6 +449,23 @@ void FOOTPRINT::Serialize( google::protobuf::Any &aContainer ) const
     footprint.set_symbol_sheet_filename( m_sheetfile.ToUTF8() );
     footprint.set_symbol_footprint_filters( m_filters.ToUTF8() );
 
+    kiapi::board::PackEmbeddedFiles( *footprint.mutable_embedded_files(), *this );
+
+    for( const auto& [variantName, variant] : m_variants )
+    {
+        types::FootprintVariant* variantMsg = footprint.add_variants();
+        variantMsg->set_name( variantName.ToUTF8() );
+        variantMsg->set_do_not_populate( variant.GetDNP() );
+        variantMsg->set_exclude_from_bill_of_materials( variant.GetExcludedFromBOM() );
+        variantMsg->set_exclude_from_position_files( variant.GetExcludedFromPosFiles() );
+
+        for( const auto& [fieldName, fieldValue] : variant.GetFields() )
+        {
+            variantMsg->mutable_fields()->insert( { std::string( fieldName.ToUTF8() ),
+                                                    std::string( fieldValue.ToUTF8() ) } );
+        }
+    }
+
     aContainer.PackFrom( footprint );
 }
 
@@ -448,7 +478,7 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &footprint ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( footprint.id().value() );
+    SetUuidDirect( KIID( footprint.id().value() ) );
     SetPosition( VECTOR2I( footprint.position().x_nm(), footprint.position().y_nm() ) );
     SetOrientationDegrees( footprint.orientation().value_degrees() );
     SetLayer( FromProtoEnum<PCB_LAYER_ID, types::BoardLayer>( footprint.layer() ) );
@@ -598,22 +628,7 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
 
     // If this footprint is on a board, uncache all items before clearing
     if( BOARD* board = GetBoard() )
-    {
-        for( PAD* pad : m_pads )
-            board->UncacheItemById( pad->m_Uuid );
-
-        for( BOARD_ITEM* item : m_drawings )
-            board->UncacheItemById( item->m_Uuid );
-
-        for( ZONE* zone : m_zones )
-            board->UncacheItemById( zone->m_Uuid );
-
-        for( PCB_GROUP* group : m_groups )
-            board->UncacheItemById( group->m_Uuid );
-
-        for( PCB_POINT* point : m_points )
-            board->UncacheItemById( point->m_Uuid );
-    }
+        board->UncacheChildrenById( this );
 
     Pads().clear();
     GraphicalItems().clear();
@@ -662,6 +677,28 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
 
         if( item && item->Deserialize( itemMsg ) )
             Add( item.release(), ADD_MODE::APPEND );
+    }
+
+    if( !kiapi::board::UnpackEmbeddedFiles( *this, footprint.embedded_files() ) )
+        return false;
+
+    m_variants.clear();
+
+    for( const types::FootprintVariant& variantMsg : footprint.variants() )
+    {
+        wxString variantName = wxString::FromUTF8( variantMsg.name() );
+
+        if( variantName.IsEmpty() || variantName.CmpNoCase( GetDefaultVariantName() ) == 0 )
+            continue;
+
+        FOOTPRINT_VARIANT& variant = m_variants[variantName];
+        variant.SetName( variantName );
+        variant.SetDNP( variantMsg.do_not_populate() );
+        variant.SetExcludedFromBOM( variantMsg.exclude_from_bill_of_materials() );
+        variant.SetExcludedFromPosFiles( variantMsg.exclude_from_position_files() );
+
+        for( const auto& [fieldName, fieldValue] : variantMsg.fields() )
+            variant.SetFieldValue( wxString::FromUTF8( fieldName ), wxString::FromUTF8( fieldValue ) );
     }
 
     return true;
@@ -786,6 +823,7 @@ void FOOTPRINT::ApplyDefaultSettings( const BOARD& board, bool aStyleFields, boo
         case PCB_BARCODE_T:
             if( aStyleBarcodes )
                 item->StyleFromSettings( board.GetDesignSettings(), true );
+
             break;
 
         default:
@@ -828,7 +866,7 @@ bool FOOTPRINT::FixUuids()
     {
         if( item->m_Uuid == niluuid )
         {
-            const_cast<KIID&>( item->m_Uuid ) = KIID();
+            item->ResetUuidDirect();
             changed = true;
         }
     }
@@ -862,28 +900,11 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
     m_netTiePadGroups                = aOther.m_netTiePadGroups;
     m_duplicatePadNumbersAreJumpers  = aOther.m_duplicatePadNumbersAreJumpers;
     m_jumperPadGroups                = aOther.m_jumperPadGroups;
+    m_unitInfo                       = aOther.m_unitInfo;
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
-    {
-        for( PCB_FIELD* field : m_fields )
-            board->UncacheItemById( field->m_Uuid );
-
-        for( PAD* pad : m_pads )
-            board->UncacheItemById( pad->m_Uuid );
-
-        for( ZONE* zone : m_zones )
-            board->UncacheItemById( zone->m_Uuid );
-
-        for( BOARD_ITEM* item : m_drawings )
-            board->UncacheItemById( item->m_Uuid );
-
-        for( PCB_GROUP* group : m_groups )
-            board->UncacheItemById( group->m_Uuid );
-
-        for( PCB_POINT* point : m_points )
-            board->UncacheItemById( point->m_Uuid );
-    }
+        board->UncacheChildrenById( this );
 
     // Move the fields
     for( PCB_FIELD* field : m_fields )
@@ -1007,29 +1028,12 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
     m_netTiePadGroups                = aOther.m_netTiePadGroups;
     m_duplicatePadNumbersAreJumpers  = aOther.m_duplicatePadNumbersAreJumpers;
     m_jumperPadGroups                = aOther.m_jumperPadGroups;
+    m_unitInfo                       = aOther.m_unitInfo;
     m_variants                       = aOther.m_variants;
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
-    {
-        for( PCB_FIELD* field : m_fields )
-            board->UncacheItemById( field->m_Uuid );
-
-        for( PAD* pad : m_pads )
-            board->UncacheItemById( pad->m_Uuid );
-
-        for( ZONE* zone : m_zones )
-            board->UncacheItemById( zone->m_Uuid );
-
-        for( BOARD_ITEM* item : m_drawings )
-            board->UncacheItemById( item->m_Uuid );
-
-        for( PCB_GROUP* group : m_groups )
-            board->UncacheItemById( group->m_Uuid );
-
-        for( PCB_POINT* point : m_points )
-            board->UncacheItemById( point->m_Uuid );
-    }
+        board->UncacheChildrenById( this );
 
     std::map<EDA_ITEM*, EDA_ITEM*> ptrMap;
 
@@ -1188,12 +1192,20 @@ bool FOOTPRINT::ResolveTextVar( wxString* token, int aDepth ) const
 
     if( token->IsSameAs( wxT( "REFERENCE" ) ) )
     {
-        *token = Reference().GetShownText( false, aDepth + 1 );
+        if( const PCB_FIELD* reference = GetField( FIELD_T::REFERENCE ) )
+            *token = reference->GetShownText( false, aDepth + 1 );
+        else
+            token->Clear();
+
         return true;
     }
     else if( token->IsSameAs( wxT( "VALUE" ) ) )
     {
-        *token = Value().GetShownText( false, aDepth + 1 );
+        if( const PCB_FIELD* value = GetField( FIELD_T::VALUE ) )
+            *token = value->GetShownText( false, aDepth + 1 );
+        else
+            token->Clear();
+
         return true;
     }
     else if( token->IsSameAs( wxT( "LAYER" ) ) )
@@ -1514,9 +1526,12 @@ void FOOTPRINT::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectiv
     aBoardItem->ClearEditFlags();
     aBoardItem->SetParent( this );
 
-    // If this footprint is on a board, update the board's item-by-id cache
-    if( BOARD* board = GetBoard() )
-        board->CacheItemById( aBoardItem );
+    // If this footprint is on a board, update the board's item-by-id cache. Only when the board
+    // indexes this footprint itself (mirrors Remove()): a clone (an undo image, a parse against the
+    // live board) still parents to the board, and caching its children would evict the live
+    // children that share their UUIDs, so ResolveItem() would hand out the clone's copies.
+    if( BOARD* board = GetBoard(); board && board->IsItemIndexedById( this ) )
+        board->CacheItemSubtreeById( aBoardItem );
 
     InvalidateGeometryCaches();
 }
@@ -1619,7 +1634,12 @@ void FOOTPRINT::Remove( BOARD_ITEM* aBoardItem, REMOVE_MODE aMode )
 
     // If this footprint is on a board, update the board's item-by-id cache
     if( BOARD* board = GetBoard() )
-        board->UncacheItemById( aBoardItem->m_Uuid );
+    {
+        if( board->IsItemIndexedById( this ) )
+            board->UncacheItemSubtreeById( aBoardItem );
+
+        board->IncrementTimeStamp();
+    }
 
     aBoardItem->SetFlags( STRUCT_DELETED );
 
@@ -1709,8 +1729,8 @@ std::vector<SEARCH_TERM>& FOOTPRINT::GetSearchTerms()
     m_searchTerms.reserve( 6 );
 
     m_searchTerms.emplace_back( SEARCH_TERM( GetLibNickname(), 4 ) );
-    m_searchTerms.emplace_back( SEARCH_TERM( GetName(), 8 ) );
-    m_searchTerms.emplace_back( SEARCH_TERM( GetLIB_ID().Format(), 16 ) );
+    m_searchTerms.emplace_back( SEARCH_TERM( GetName(), 8, true ) );
+    m_searchTerms.emplace_back( SEARCH_TERM( GetLIB_ID().Format(), 16, true ) );
 
     wxStringTokenizer keywordTokenizer( GetKeywords(), wxS( " \t\r\n" ), wxTOKEN_STRTOK );
 
@@ -1770,24 +1790,22 @@ const BOX2I FOOTPRINT::GetBoundingBox( bool aIncludeText ) const
 {
     const BOARD* board = GetBoard();
 
+    if( board )
     {
         std::lock_guard<std::mutex> lock( m_geometry_cache_mutex );
 
-        if( board )
-        {
-            if( !m_geometry_cache )
-                m_geometry_cache = std::make_unique<FOOTPRINT_GEOMETRY_CACHE_DATA>();
+        if( !m_geometry_cache )
+            m_geometry_cache = std::make_unique<FOOTPRINT_GEOMETRY_CACHE_DATA>();
 
-            if( aIncludeText )
-            {
-                if( m_geometry_cache->bounding_box_timestamp >= board->GetTimeStamp() )
-                    return m_geometry_cache->bounding_box;
-            }
-            else
-            {
-                if( m_geometry_cache->text_excluded_bbox_timestamp >= board->GetTimeStamp() )
-                    return m_geometry_cache->text_excluded_bbox;
-            }
+        if( aIncludeText )
+        {
+            if( m_geometry_cache->bounding_box_timestamp >= board->GetTimeStamp() )
+                return m_geometry_cache->bounding_box;
+        }
+        else
+        {
+            if( m_geometry_cache->text_excluded_bbox_timestamp >= board->GetTimeStamp() )
+                return m_geometry_cache->text_excluded_bbox;
         }
     }
 
@@ -1870,6 +1888,12 @@ const BOX2I FOOTPRINT::GetBoundingBox( bool aIncludeText ) const
             bbox.Merge( text->GetBoundingBox() );
         }
 
+        // A footprint is constructed with its mandatory fields, but they can be removed again
+        // through the editing dialogs or the scripting API, and the const accessors return
+        // nullptr rather than recreating them.
+        const PCB_FIELD* value = GetField( FIELD_T::VALUE );
+        const PCB_FIELD* reference = GetField( FIELD_T::REFERENCE );
+
         // This can be further optimized when aIncludeInvisibleText is true, but currently
         // leaving this as is until it's determined there is a noticeable speed hit.
         bool   valueLayerIsVisible = true;
@@ -1881,24 +1905,30 @@ const BOX2I FOOTPRINT::GetBoundingBox( bool aIncludeText ) const
             // not being present in the current PCB stackup.  Values, references, and all
             // footprint text can also be turned off via the GAL meta-layers, so the 2nd and
             // 3rd "&&" conditionals handle that.
-            valueLayerIsVisible = board->IsLayerVisible( Value().GetLayer() )
-                                  && board->IsElementVisible( LAYER_FP_VALUES )
-                                  && board->IsElementVisible( LAYER_FP_TEXT );
+            if( value )
+            {
+                valueLayerIsVisible = board->IsLayerVisible( value->GetLayer() )
+                                      && board->IsElementVisible( LAYER_FP_VALUES )
+                                      && board->IsElementVisible( LAYER_FP_TEXT );
+            }
 
-            refLayerIsVisible = board->IsLayerVisible( Reference().GetLayer() )
-                                && board->IsElementVisible( LAYER_FP_REFERENCES )
-                                && board->IsElementVisible( LAYER_FP_TEXT );
+            if( reference )
+            {
+                refLayerIsVisible = board->IsLayerVisible( reference->GetLayer() )
+                                    && board->IsElementVisible( LAYER_FP_REFERENCES )
+                                    && board->IsElementVisible( LAYER_FP_TEXT );
+            }
         }
 
 
-        if( ( Value().IsVisible() && valueLayerIsVisible ) || noDrawItems )
+        if( value && ( ( value->IsVisible() && valueLayerIsVisible ) || noDrawItems ) )
         {
-            bbox.Merge( Value().GetBoundingBox() );
+            bbox.Merge( value->GetBoundingBox() );
         }
 
-        if( ( Reference().IsVisible() && refLayerIsVisible ) || noDrawItems )
+        if( reference && ( ( reference->IsVisible() && refLayerIsVisible ) || noDrawItems ) )
         {
-            bbox.Merge( Reference().GetBoundingBox() );
+            bbox.Merge( reference->GetBoundingBox() );
         }
     }
 
@@ -1988,6 +2018,8 @@ SHAPE_POLY_SET FOOTPRINT::GetBoundingHull() const
 
     if( board )
     {
+        std::lock_guard<std::mutex> lock( m_geometry_cache_mutex );
+
         if( m_geometry_cache && m_geometry_cache->hull_timestamp >= board->GetTimeStamp() )
             return m_geometry_cache->hull;
     }
@@ -2000,10 +2032,7 @@ SHAPE_POLY_SET FOOTPRINT::GetBoundingHull() const
             continue;
 
         if( item->Type() != PCB_FIELD_T && item->Type() != PCB_REFERENCE_IMAGE_T )
-        {
-            item->TransformShapeToPolygon( rawPolys, UNDEFINED_LAYER, 0, ARC_LOW_DEF,
-                                           ERROR_OUTSIDE );
-        }
+            item->TransformShapeToPolygon( rawPolys, UNDEFINED_LAYER, 0, ARC_LOW_DEF, ERROR_OUTSIDE );
 
         // We intentionally exclude footprint fields from the bounding hull.
     }
@@ -2054,19 +2083,23 @@ SHAPE_POLY_SET FOOTPRINT::GetBoundingHull() const
     std::vector<VECTOR2I> convex_hull;
     BuildConvexHull( convex_hull, rawPolys );
 
-    if( !m_geometry_cache )
-        m_geometry_cache = std::make_unique<FOOTPRINT_GEOMETRY_CACHE_DATA>();
+    {
+        std::lock_guard<std::mutex> lock( m_geometry_cache_mutex );
 
-    m_geometry_cache->hull.RemoveAllContours();
-    m_geometry_cache->hull.NewOutline();
+        if( !m_geometry_cache )
+            m_geometry_cache = std::make_unique<FOOTPRINT_GEOMETRY_CACHE_DATA>();
 
-    for( const VECTOR2I& pt : convex_hull )
-        m_geometry_cache->hull.Append( pt );
+        m_geometry_cache->hull.RemoveAllContours();
+        m_geometry_cache->hull.NewOutline();
 
-    if( board )
-        m_geometry_cache->hull_timestamp = board->GetTimeStamp();
+        for( const VECTOR2I& pt : convex_hull )
+            m_geometry_cache->hull.Append( pt );
 
-    return m_geometry_cache->hull;
+        if( board )
+            m_geometry_cache->hull_timestamp = board->GetTimeStamp();
+
+        return m_geometry_cache->hull;
+    }
 }
 
 
@@ -2615,29 +2648,20 @@ INSPECT_RESULT FOOTPRINT::Visit( INSPECTOR inspector, void* testData,
             break;
 
         case PCB_PAD_T:
-            if( IterateForward<PAD*>( m_pads, inspector, testData, { scanType } )
-                    == INSPECT_RESULT::QUIT )
-            {
+            if( IterateForward<PAD*>( m_pads, inspector, testData, { scanType } ) == INSPECT_RESULT::QUIT )
                 return INSPECT_RESULT::QUIT;
-            }
 
             break;
 
         case PCB_ZONE_T:
-            if( IterateForward<ZONE*>( m_zones, inspector, testData, { scanType } )
-                    == INSPECT_RESULT::QUIT )
-            {
+            if( IterateForward<ZONE*>( m_zones, inspector, testData, { scanType } ) == INSPECT_RESULT::QUIT )
                 return INSPECT_RESULT::QUIT;
-            }
 
             break;
 
         case PCB_FIELD_T:
-            if( IterateForward<PCB_FIELD*>( m_fields, inspector, testData, { scanType } )
-                == INSPECT_RESULT::QUIT )
-            {
+            if( IterateForward<PCB_FIELD*>( m_fields, inspector, testData, { scanType } ) == INSPECT_RESULT::QUIT )
                 return INSPECT_RESULT::QUIT;
-            }
 
             break;
 
@@ -2654,11 +2678,8 @@ INSPECT_RESULT FOOTPRINT::Visit( INSPECTOR inspector, void* testData,
         case PCB_TABLECELL_T:
             if( !drawingsScanned )
             {
-                if( IterateForward<BOARD_ITEM*>( m_drawings, inspector, testData, aScanTypes )
-                        == INSPECT_RESULT::QUIT )
-                {
+                if( IterateForward<BOARD_ITEM*>( m_drawings, inspector, testData, aScanTypes ) == INSPECT_RESULT::QUIT )
                     return INSPECT_RESULT::QUIT;
-                }
 
                 drawingsScanned = true;
             }
@@ -2666,20 +2687,14 @@ INSPECT_RESULT FOOTPRINT::Visit( INSPECTOR inspector, void* testData,
             break;
 
         case PCB_GROUP_T:
-            if( IterateForward<PCB_GROUP*>( m_groups, inspector, testData, { scanType } )
-                    == INSPECT_RESULT::QUIT )
-            {
+            if( IterateForward<PCB_GROUP*>( m_groups, inspector, testData, { scanType } ) == INSPECT_RESULT::QUIT )
                 return INSPECT_RESULT::QUIT;
-            }
 
             break;
 
         case PCB_POINT_T:
-            if( IterateForward<PCB_POINT*>( m_points, inspector, testData, { scanType } )
-                    == INSPECT_RESULT::QUIT )
-            {
+            if( IterateForward<PCB_POINT*>( m_points, inspector, testData, { scanType } ) == INSPECT_RESULT::QUIT )
                 return INSPECT_RESULT::QUIT;
-            }
 
             break;
 
@@ -2947,7 +2962,7 @@ void FOOTPRINT::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
     SetPosition( finalPos );
 
     // Flip layer
-    BOARD_ITEM::SetLayer( GetBoard()->FlipLayer( GetLayer() ) );
+    BOARD_ITEM::SetLayer( GetBoard() ? GetBoard()->FlipLayer( GetLayer() ) : FlipLayer( GetLayer() ) );
 
     // Calculate the new orientation, and then clear it for pad flipping.
     EDA_ANGLE newOrientation = -m_orient;
@@ -3144,7 +3159,7 @@ BOARD_ITEM* FOOTPRINT::Duplicate( bool addToParentGroup, BOARD_COMMIT* aCommit )
 
     dupe->RunOnChildren( [&]( BOARD_ITEM* child )
                             {
-                                const_cast<KIID&>( child->m_Uuid ) = KIID();
+                                child->ResetUuidDirect();
                             },
                             RECURSE_MODE::RECURSE );
 
@@ -3162,7 +3177,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_PAD_T:
     {
         PAD* new_pad = new PAD( *static_cast<const PAD*>( aItem ) );
-        const_cast<KIID&>( new_pad->m_Uuid ) = KIID();
+        new_pad->ResetUuidDirect();
 
         if( addToFootprint )
             m_pads.push_back( new_pad );
@@ -3174,7 +3189,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_ZONE_T:
     {
         ZONE* new_zone = new ZONE( *static_cast<const ZONE*>( aItem ) );
-        const_cast<KIID&>( new_zone->m_Uuid ) = KIID();
+        new_zone->ResetUuidDirect();
 
         if( addToFootprint )
             m_zones.push_back( new_zone );
@@ -3186,7 +3201,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_POINT_T:
     {
         PCB_POINT* new_point = new PCB_POINT( *static_cast<const PCB_POINT*>( aItem ) );
-        const_cast<KIID&>( new_point->m_Uuid ) = KIID();
+        new_point->ResetUuidDirect();
 
         if( addToFootprint )
             m_points.push_back( new_point );
@@ -3199,7 +3214,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_TEXT_T:
     {
         PCB_TEXT* new_text = new PCB_TEXT( *static_cast<const PCB_TEXT*>( aItem ) );
-        const_cast<KIID&>( new_text->m_Uuid ) = KIID();
+        new_text->ResetUuidDirect();
 
         if( aItem->Type() == PCB_FIELD_T )
         {
@@ -3222,7 +3237,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_SHAPE_T:
     {
         PCB_SHAPE* new_shape = new PCB_SHAPE( *static_cast<const PCB_SHAPE*>( aItem ) );
-        const_cast<KIID&>( new_shape->m_Uuid ) = KIID();
+        new_shape->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_shape );
@@ -3234,7 +3249,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_BARCODE_T:
     {
         PCB_BARCODE* new_barcode = new PCB_BARCODE( *static_cast<const PCB_BARCODE*>( aItem ) );
-        const_cast<KIID&>( new_barcode->m_Uuid ) = KIID();
+        new_barcode->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_barcode );
@@ -3246,7 +3261,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_REFERENCE_IMAGE_T:
     {
         PCB_REFERENCE_IMAGE* new_image = new PCB_REFERENCE_IMAGE( *static_cast<const PCB_REFERENCE_IMAGE*>( aItem ) );
-        const_cast<KIID&>( new_image->m_Uuid ) = KIID();
+        new_image->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_image );
@@ -3258,7 +3273,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_TEXTBOX_T:
     {
         PCB_TEXTBOX* new_textbox = new PCB_TEXTBOX( *static_cast<const PCB_TEXTBOX*>( aItem ) );
-        const_cast<KIID&>( new_textbox->m_Uuid ) = KIID();
+        new_textbox->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_textbox );
@@ -3800,8 +3815,11 @@ void FOOTPRINT::BuildNetTieCache()
         if( it == map.end() || it->second < 0 )
             continue;
 
-        for( size_t jj = ii + 1; jj < m_pads.size(); ++jj )
+        for( size_t jj = 0; jj < m_pads.size(); ++jj )
         {
+            if( jj == ii )
+                continue;
+
             PAD* other = m_pads[ jj ];
 
             auto it2 = map.find( other->GetNumber() );
@@ -4748,6 +4766,13 @@ void FOOTPRINT::EmbedFonts()
     for( KIFONT::OUTLINE_FONT* font : GetFonts() )
     {
         EMBEDDED_FILES::EMBEDDED_FILE* file = GetEmbeddedFiles()->AddFile( font->GetFileName(), false );
+
+        if( !file )
+        {
+            wxLogTrace( "EMBED", "Failed to add font file: %s", font->GetFileName() );
+            continue;
+        }
+
         file->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::FONT;
     }
 }

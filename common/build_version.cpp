@@ -43,7 +43,10 @@ extern std::string GetCurlLibVersion();
 
 #include <Standard_Version.hxx>
 
+// ngspice header - only include when ngspice is available
+#if defined(NGSPICE_BUILD_VERSION) || defined(NGSPICE_HAVE_CONFIG_H) || defined(NGSPICE_PACKAGE_VERSION)
 #include <ngspice/sharedspice.h>
+#endif
 
 // The include file version.h is always created even if the repo version cannot be
 // determined.  In this case KICAD_VERSION_FULL will default to the KICAD_VERSION

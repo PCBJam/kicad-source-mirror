@@ -49,6 +49,7 @@
  */
 
 #include <gr_text.h>
+#include <increment.h>
 #include <math/util.h>      // for KiROUND
 #include <view/view.h>
 #include <title_block.h>
@@ -342,16 +343,22 @@ bool DS_DATA_ITEM::IsInsidePage( int ii ) const
 {
     DS_DATA_MODEL& model = DS_DATA_MODEL::GetTheInstance();
 
-    for( const VECTOR2D& pos : { GetStartPos( ii ), GetEndPos( ii ) } )
-    {
-        if( model.m_RB_Corner.x < pos.x || model.m_LT_Corner.x > pos.x )
-            return false;
+    BOX2D page( model.m_LT_Corner, model.m_RB_Corner - model.m_LT_Corner );
 
-        if( model.m_RB_Corner.y < pos.y || model.m_LT_Corner.y > pos.y )
+    // The start of the run is a legitimate position even when it lies in the page
+    // margin, so cull a repeat only where the run walks off the page
+    page.Merge( GetStartPos( 0 ) );
+
+    // Text and bitmap have no real end point, so only test it for lines and rects.
+    if( GetType() == DS_SEGMENT || GetType() == DS_RECT )
+    {
+        page.Merge( GetEndPos( 0 ) );
+
+        if( !page.Contains( GetEndPos( ii ) ) )
             return false;
     }
 
-    return true;
+    return page.Contains( GetStartPos( ii ) );
 }
 
 
@@ -488,19 +495,16 @@ bool DS_DATA_ITEM_POLYGONS::IsInsidePage( int ii ) const
 {
     DS_DATA_MODEL& model = DS_DATA_MODEL::GetTheInstance();
 
+    BOX2D page( model.m_LT_Corner, model.m_RB_Corner - model.m_LT_Corner );
+
+    // The start of the run is a legitimate position even when it lies in the page
+    // margin, so cull a repeat only where the run walks off the page
+    page.Merge( GetStartPos( 0 ) + m_minCoord );
+    page.Merge( GetStartPos( 0 ) + m_maxCoord );
+
     VECTOR2D pos = GetStartPos( ii );
-    pos += m_minCoord;  // left top pos of bounding box
 
-    if( model.m_LT_Corner.x > pos.x || model.m_LT_Corner.y > pos.y )
-        return false;
-
-    pos = GetStartPos( ii );
-    pos += m_maxCoord;  // right bottom pos of bounding box
-
-    if( model.m_RB_Corner.x < pos.x || model.m_RB_Corner.y < pos.y )
-        return false;
-
-    return true;
+    return page.Contains( pos + m_minCoord ) && page.Contains( pos + m_maxCoord );
 }
 
 
@@ -619,17 +623,16 @@ int DS_DATA_ITEM_TEXT::GetPenSizeIU()
 
 void DS_DATA_ITEM_TEXT::IncrementLabel( int aIncr )
 {
-    int last = m_TextBase.Len() -1;
+    STRING_INCREMENTER incrementer;
+    incrementer.SetSkipIOSQXZ( false );      // step through every letter
+    incrementer.SetAlphabeticMaxIndex( -1 ); // no upper bound on label length
 
-    wxChar lbchar = m_TextBase[last];
-    m_FullText = m_TextBase;
-    m_FullText.RemoveLast();
-
-    if( lbchar >= '0' &&  lbchar <= '9' )
-        // A number is expected:
-        m_FullText << (int)( aIncr + lbchar - '0' );
+    // Step the rightmost letter or number, carrying within its own type so a
+    // letter rolls z -> aa instead of running into punctuation.
+    if( std::optional<wxString> stepped = incrementer.Increment( m_TextBase, aIncr, 0 ) )
+        m_FullText = *stepped;
     else
-        m_FullText << (wxChar) ( aIncr + lbchar );
+        m_FullText = m_TextBase;
 }
 
 

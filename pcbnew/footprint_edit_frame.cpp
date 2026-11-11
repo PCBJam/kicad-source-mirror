@@ -82,6 +82,13 @@
 #include <wx/filedlg.h>
 #include <wx/hyperlink.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (libs 0031): the notice and copy button for a footprint of a read-only library come
+// from pcbjam/wasm/bindings/part_copy_footprint.h. False keeps KiCad's own.
+extern "C" bool pcbjam_footprint_readonly_notice( FOOTPRINT_EDIT_FRAME* aFrame,
+                                                  WX_INFOBAR* aInfobar ) __attribute__(( weak ));
+#endif
+
 BEGIN_EVENT_TABLE( FOOTPRINT_EDIT_FRAME, PCB_BASE_FRAME )
     EVT_MENU( wxID_CLOSE, FOOTPRINT_EDIT_FRAME::CloseFootprintEditor )
     EVT_MENU( wxID_EXIT, FOOTPRINT_EDIT_FRAME::OnExitKiCad )
@@ -263,8 +270,13 @@ FOOTPRINT_EDIT_FRAME::FOOTPRINT_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_auimgr.GetPane( "SelectionFilter" ).Show( m_show_layer_manager_tools );
     m_auimgr.GetPane( PropertiesPaneName() ).Show( GetSettings()->m_AuiPanels.show_properties );
 
+    wxAuiPaneInfo& selectionFilterPane = m_auimgr.GetPane( wxS( "SelectionFilter" ) );
+
     // The selection filter doesn't need to grow in the vertical direction when docked
-    m_auimgr.GetPane( "SelectionFilter" ).dock_proportion = 0;
+    selectionFilterPane.dock_proportion = 0;
+
+    // wx 3.3.3 turns a -1 min height into 1, and a legacy perspective restores one
+    selectionFilterPane.min_size.y = m_selectionFilterPanel->GetBestSize().y;
 
     m_acceptedExts.emplace( FILEEXT::KiCadFootprintLibPathExtension, &ACTIONS::ddAddLibrary );
     m_acceptedExts.emplace( FILEEXT::KiCadFootprintFileExtension, &PCB_ACTIONS::ddImportFootprint );
@@ -622,6 +634,10 @@ void FOOTPRINT_EDIT_FRAME::updateEnabledLayers()
 
 void FOOTPRINT_EDIT_FRAME::ReloadFootprint( FOOTPRINT* aFootprint )
 {
+    // Cancel a mid-draw tool before the footprint it points into is freed (#24975).
+    if( GetToolManager() )
+        GetToolManager()->ResetTools( TOOL_BASE::MODEL_RELOAD );
+
     GetBoard()->DeleteAllFootprints();
 
     m_originalFootprintCopy.reset( static_cast<FOOTPRINT*>( aFootprint->Clone() ) );
@@ -675,6 +691,12 @@ void FOOTPRINT_EDIT_FRAME::ReloadFootprint( FOOTPRINT* aFootprint )
 
                     if( WX_INFOBAR* infobar = GetInfoBar() )
                     {
+#ifdef __EMSCRIPTEN__
+                        if( pcbjam_footprint_readonly_notice
+                                && pcbjam_footprint_readonly_notice( this, infobar ) )
+                            return;
+#endif
+
                         link = _( "Save as editable copy" );
 
                         const auto saveAsEditableCopy =
@@ -1149,6 +1171,20 @@ void FOOTPRINT_EDIT_FRAME::initLibraryTree()
 {
     FOOTPRINT_LIBRARY_ADAPTER* footprints = PROJECT_PCB::FootprintLibAdapter( &Prj() );
 
+    // Footprint libraries are preloaded only for the face the app booted into
+    // (single_top.cpp preloads KIFACE( KifaceType( topFrame ) )). Opening this frame
+    // from a schematic session goes through Kiway().Player( FRAME_FOOTPRINT_EDITOR ),
+    // which starts FACE_PCB lazily and never preloads — so nothing has walked the
+    // libraries and the tree comes up EMPTY: GetLibraryNames() only reports rows whose
+    // status is LOADED, and Sync() skips everything else.
+    //
+    // Same reasoning and same remedy as FOOTPRINT_LIST_IMPL::ReadFootprintFiles().
+    // AsyncLoad() self-skips already-loaded rows, so the pcbnew / standalone-fpedit
+    // boots are unaffected, and enumerateLibrary() is a no-op on this port (bodies
+    // still lazy-load through GetFootprints()), so this stays cheap.
+    footprints->AsyncLoad();
+    footprints->BlockUntilLoaded();
+
     m_adapter = FP_TREE_SYNCHRONIZING_ADAPTER::Create( this, footprints );
     auto adapter = static_cast<FP_TREE_SYNCHRONIZING_ADAPTER*>( m_adapter.get() );
 
@@ -1162,6 +1198,7 @@ void FOOTPRINT_EDIT_FRAME::SyncLibraryTree( [[maybe_unused]] bool aProgress )
     auto          adapter = static_cast<FP_TREE_SYNCHRONIZING_ADAPTER*>( m_adapter.get() );
     LIB_ID        target = GetTargetFPID();
     bool          targetSelected = ( target == GetLibTree()->GetSelectedLibId() );
+    std::vector<LIB_ID>        expanded = GetLibTree()->GetExpandedLibraries();
 
     // Unselect before syncing to avoid null reference in the adapter
     // if a selected item is removed during the sync
@@ -1171,6 +1208,10 @@ void FOOTPRINT_EDIT_FRAME::SyncLibraryTree( [[maybe_unused]] bool aProgress )
     adapter->Sync( footprints );
 
     GetLibTree()->Regenerate( true );
+
+    // Sync() collapsed the tree, so re-expand the libraries that were open before it.
+    for( const LIB_ID& libId : expanded )
+        GetLibTree()->ExpandLibId( libId );
 
     if( target.IsValid() )
     {

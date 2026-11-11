@@ -32,12 +32,18 @@
 #include <properties/property.h>
 #include <stroke_params.h>
 #include <trigo.h>
+#include <frame_type.h>
 #include <api/serializable.h>
 
 class LINE_READER;
 class EDA_DRAW_FRAME;
 class FOOTPRINT;
 class MSG_PANEL_ITEM;
+
+namespace kiapi::common::types
+{
+    class GraphicShape;
+}
 
 using KIGFX::COLOR4D;
 
@@ -113,6 +119,9 @@ public:
 
     void Serialize( google::protobuf::Any &aContainer ) const override;
     bool Deserialize( const google::protobuf::Any &aContainer ) override;
+
+    void Serialize( kiapi::common::types::GraphicShape& aOutput ) const;
+    bool Deserialize( const kiapi::common::types::GraphicShape& aInput );
 
     wxString ShowShape() const;
 
@@ -282,6 +291,8 @@ public:
      */
     void SetArcAngleAndEnd( const EDA_ANGLE& aAngle, bool aCheckNegativeAngle = false );
 
+    virtual void SetArcAngle( const EDA_ANGLE& aAngle ) { SetArcAngleAndEnd( aAngle, true ); }
+
     EDA_ANGLE GetArcAngle() const;
 
     EDA_ANGLE GetSegmentAngle() const;
@@ -397,6 +408,16 @@ public:
         return makeEffectiveShapes( false, false, true );
     }
 
+    /**
+     * Make a set of SHAPE objects to hand to STROKE_PARAMS::Stroke().
+     *
+     * A Bezier comes back as a single SHAPE_LINE_CHAIN so the pattern runs continuously along
+     * the curve instead of restarting at every point of its polyline approximation.
+     *
+     * Caller owns the objects.
+     */
+    std::vector<SHAPE*> MakeEffectiveShapesForStroking() const;
+
     void ShapeGetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PANEL_ITEM>& aList );
 
     void SetRectangleHeight( const int& aHeight );
@@ -429,12 +450,10 @@ public:
      * @param aClearance is the clearance around the pad.
      * @param aError is the maximum deviation from a true arc.
      * @param aErrorLoc whether any approximation error should be placed inside or outside
-     * @param ignoreLineWidth is used for edge cut items where the line width is only for
-     *                        visualization
+     * @param ignoreLineWidth is used for edge cut items where the line width is only for visualization
      */
-    void TransformShapeToPolygon( SHAPE_POLY_SET& aBuffer, int aClearance, int aError,
-                                  ERROR_LOC aErrorLoc, bool ignoreLineWidth = false,
-                                  bool includeFill = false ) const;
+    void TransformShapeToPolygon( SHAPE_POLY_SET& aBuffer, int aClearance, int aError, ERROR_LOC aErrorLoc,
+                                  bool ignoreLineWidth = false, bool includeFill = false ) const;
 
     int Compare( const EDA_SHAPE* aOther ) const;
 
@@ -443,7 +462,7 @@ public:
     bool operator==( const EDA_SHAPE& aOther ) const;
 
 protected:
-    wxString getFriendlyName() const;
+    wxString getFriendlyName( FRAME_T aFrameType ) const;
 
     void     setPosition( const VECTOR2I& aPos );
     VECTOR2I getPosition() const;

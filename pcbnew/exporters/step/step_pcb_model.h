@@ -39,6 +39,7 @@
 #include <math/vector3.h>
 #include <geometry/shape_poly_set.h>
 #include <board_stackup_manager/board_stackup.h>
+#include <reporter.h>
 
 /**
  * Default distance between points to treat them as separate ones (mm)
@@ -301,6 +302,12 @@ private:
     void getBoardBodyZPlacement( double& aZPos, double& aThickness );
 
     /**
+     * @return the board body thickness in mm, summed from the stackup dielectric and inner
+     * copper layers so the result does not depend on the order of the stackup items.
+     */
+    double getStackupBodyThickness() const;
+
+    /**
      * Load a 3D model data.
      *
      * @param aBaseName is the model name to set.
@@ -383,6 +390,11 @@ private:
 
     /// The current output format for created file
     OUTPUT_FORMAT m_outFmt;
+
+    /// Thread-safe wrapper around the caller's reporter.  CreatePCB fuses and cuts on worker
+    /// threads that report through m_reporter, so it points at this wrapper rather than the raw
+    /// reporter to serialize those calls.
+    SYNC_REPORTER m_syncReporter;
     REPORTER*     m_reporter;
 };
 

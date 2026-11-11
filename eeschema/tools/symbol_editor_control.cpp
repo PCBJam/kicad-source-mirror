@@ -48,6 +48,12 @@
 #include <wx/filedlg.h>
 #include <kiplatform/ui.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam (libs 0031): before Save / Save All write parts of a read-only library, our modal
+// copies them to a team library (pcbjam/wasm/bindings/part_copy_symbol.h). False = stop here.
+extern "C" bool pcbjam_symbol_save_gate( SYMBOL_EDIT_FRAME* aFrame, bool aSaveAll ) __attribute__(( weak ));
+#endif
+
 
 bool SYMBOL_EDITOR_CONTROL::Init()
 {
@@ -130,11 +136,10 @@ bool SYMBOL_EDITOR_CONTROL::Init()
 
                         LIB_SYMBOL_LIBRARY_MANAGER& libMgr = editFrame->GetLibManager();
                         const LIB_SYMBOL* sym = libMgr.GetSymbol( sel.GetLibItemName(), sel.GetLibNickname() );
-                        wxArrayString     derived;
 
-                        libMgr.GetDerivedSymbolNames( sel.GetLibItemName(), sel.GetLibNickname(), derived );
-
-                        return ( sym && sym->IsDerived() ) || !derived.IsEmpty();
+                        // This runs on every menu evaluation, so ask for the answer and not the list
+                        return ( sym && sym->IsDerived() )
+                               || libMgr.HasDerivedSymbols( sel.GetLibItemName(), sel.GetLibNickname() );
                     }
 
                     return false;
@@ -357,6 +362,13 @@ int SYMBOL_EDITOR_CONTROL::Save( const TOOL_EVENT& aEvt )
         return 0;
 
     SYMBOL_EDIT_FRAME* editFrame = getEditFrame<SYMBOL_EDIT_FRAME>();
+
+#ifdef __EMSCRIPTEN__
+    if( ( aEvt.IsAction( &SCH_ACTIONS::save ) || aEvt.IsAction( &SCH_ACTIONS::saveAll ) )
+            && pcbjam_symbol_save_gate
+            && !pcbjam_symbol_save_gate( editFrame, aEvt.IsAction( &SCH_ACTIONS::saveAll ) ) )
+        return 0;
+#endif
 
     if( aEvt.IsAction( &SCH_ACTIONS::save ) )
         editFrame->Save();

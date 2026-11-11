@@ -1617,6 +1617,10 @@ int DRAWING_TOOL::DrawDimension( const TOOL_EVENT& aEvent )
                 preview.Clear();
                 m_view->Update( &preview );
 
+                // Snap guides persist in the grid helper until the tool exits, so abandoning the
+                // dimension mid-draw must clear them or they linger on screen.
+                grid.FullReset();
+
                 delete dimension;
                 dimension = nullptr;
                 step = SET_ORIGIN;
@@ -2668,6 +2672,10 @@ bool DRAWING_TOOL::drawShape( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic,
                 twoPointMgr.SetEnd( aCommittedGraphics->top()->GetEnd() );
                 aCommittedGraphics->pop();
 
+                // Snap guides persist in the grid helper until the tool exits, so a mid-draw
+                // backup must clear them or they linger on screen.
+                grid.FullReset();
+
                 getViewControls()->WarpMouseCursor( twoPointMgr.GetEnd(), true );
 
                 if( PICKED_ITEMS_LIST* undo = m_frame->PopCommandFromUndoList() )
@@ -2923,6 +2931,9 @@ bool DRAWING_TOOL::drawArc( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic,
         }
         else if( evt->IsAction( &PCB_ACTIONS::deleteLastPoint ) )
         {
+            // Snap guides persist in the grid helper until the tool exits, so a mid-draw backup
+            // must clear them or they linger on screen.
+            grid.FullReset();
             arcManager.RemoveLastPoint();
         }
         else if( evt->IsMotion() )
@@ -3255,6 +3266,9 @@ std::unique_ptr<PCB_SHAPE> DRAWING_TOOL::drawOneBezier( const TOOL_EVENT&   aToo
         }
         else if( evt->IsAction( &PCB_ACTIONS::deleteLastPoint ) )
         {
+            // Snap guides persist in the grid helper until the tool exits, so a mid-draw backup
+            // must clear them or they linger on screen.
+            grid.FullReset();
             bezierManager.RemoveLastPoint();
 
             if( bezierManager.GetStep() < KIGFX::PREVIEW::BEZIER_GEOM_MANAGER::SET_END )
@@ -3480,6 +3494,11 @@ int DRAWING_TOOL::DrawZone( const TOOL_EVENT& aEvent )
                 polyGeomMgr.Reset();
                 started = false;
                 grid.ClearSkipPoint();
+
+                // Snap guides persist in the grid helper until the tool exits, so abandoning the
+                // outline mid-draw must clear them or they linger on screen.
+                grid.FullReset();
+
                 m_controls->SetAutoPan( false );
                 m_controls->CaptureCursor( false );
             };
@@ -3609,6 +3628,10 @@ int DRAWING_TOOL::DrawZone( const TOOL_EVENT& aEvent )
                              || evt->IsAction( &ACTIONS::doDelete )
                              || evt->IsAction( &ACTIONS::undo ) ) )
         {
+            // Snap guides persist in the grid helper until the tool exits, so dropping a corner
+            // must clear them or they linger on screen.
+            grid.FullReset();
+
             if( std::optional<VECTOR2I> last = polyGeomMgr.DeleteLastCorner() )
             {
                 cursorPos = last.value();
@@ -3829,30 +3852,39 @@ int DRAWING_TOOL::DrawVia( const TOOL_EVENT& aEvent )
                 return false;
             }
 
+            bool skipCopper = false;
+
             if( connectedItem )
             {
                 int connectedItemNet = connectedItem->GetNetCode();
 
-                if( connectedItemNet == 0 || connectedItemNet == aVia->GetNetCode() )
+                if( connectedItemNet != 0 && connectedItemNet == aVia->GetNetCode() )
                     return false;
+
+                // A netless item can take the via's net, but its hole still keeps the via out.
+                if( connectedItemNet == 0 )
+                    skipCopper = true;
             }
 
-            for( PCB_LAYER_ID layer : aOther->GetLayerSet() )
+            if( !skipCopper )
             {
-                // Reference images are "on" a copper layer but are not actually part of it
-                if( !IsCopperLayer( layer ) || aOther->Type() == PCB_REFERENCE_IMAGE_T )
-                    continue;
-
-                constraint = m_drcEngine->EvalRules( CLEARANCE_CONSTRAINT, aVia,  aOther, layer );
-                clearance = constraint.GetValue().Min();
-
-                if( clearance >= 0 )
+                for( PCB_LAYER_ID layer : aOther->GetLayerSet() )
                 {
-                    std::shared_ptr<SHAPE> viaShape = aVia->GetEffectiveShape( layer );
-                    std::shared_ptr<SHAPE> otherShape = aOther->GetEffectiveShape( layer );
+                    // Reference images are "on" a copper layer but are not actually part of it
+                    if( !IsCopperLayer( layer ) || aOther->Type() == PCB_REFERENCE_IMAGE_T )
+                        continue;
 
-                    if( viaShape->Collide( otherShape.get(), sub_e( clearance ) ) )
-                        return true;
+                    constraint = m_drcEngine->EvalRules( CLEARANCE_CONSTRAINT, aVia,  aOther, layer );
+                    clearance = constraint.GetValue().Min();
+
+                    if( clearance >= 0 )
+                    {
+                        std::shared_ptr<SHAPE> viaShape = aVia->GetEffectiveShape( layer );
+                        std::shared_ptr<SHAPE> otherShape = aOther->GetEffectiveShape( layer );
+
+                        if( viaShape->Collide( otherShape.get(), sub_e( clearance ) ) )
+                            return true;
+                    }
                 }
             }
 
@@ -4330,7 +4362,7 @@ int DRAWING_TOOL::DrawVia( const TOOL_EVENT& aEvent )
                 track->SetEnd( viaPos );
 
                 PCB_TRACK* newTrack = dynamic_cast<PCB_TRACK*>( track->Clone() );
-                const_cast<KIID&>( newTrack->m_Uuid ) = KIID();
+                newTrack->ResetUuidDirect();
 
                 newTrack->SetStart( viaPos );
                 newTrack->SetEnd( trackEnd );

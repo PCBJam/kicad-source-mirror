@@ -24,6 +24,7 @@
  */
 
 #include <base_units.h>
+#include <api/api_pcb_utils.h>
 #include <bitmaps.h>
 #include <math/util.h>      // for KiROUND
 #include <eda_draw_frame.h>
@@ -123,7 +124,7 @@ PAD::PAD( const PAD& aOther ) :
 {
     PAD::operator=( aOther );
 
-    const_cast<KIID&>( m_Uuid ) = aOther.m_Uuid;
+    SetUuidDirect( aOther.m_Uuid );
 }
 
 
@@ -196,9 +197,7 @@ void PAD::Serialize( google::protobuf::Any &aContainer ) const
     pad.mutable_pad_to_die_length()->set_value_nm( GetPadToDieLength() );
     pad.mutable_pad_to_die_delay()->set_value_as( GetPadToDieDelay() );
 
-    google::protobuf::Any padStackMsg;
-    m_padStack.Serialize( padStackMsg );
-    padStackMsg.UnpackTo( pad.mutable_pad_stack() );
+    m_padStack.Serialize( *pad.mutable_pad_stack() );
 
     if( GetLocalClearance().has_value() )
         pad.mutable_copper_clearance_override()->set_value_nm( *GetLocalClearance() );
@@ -209,6 +208,18 @@ void PAD::Serialize( google::protobuf::Any &aContainer ) const
     {
         pad.mutable_symbol_pin()->set_type( ToProtoEnum<ELECTRICAL_PINTYPE, ElectricalPinType>( pt->first ) );
         pad.mutable_symbol_pin()->set_no_connect( pt->second );
+    }
+
+    pad.set_fab_property( ToProtoEnum<PAD_PROP, PadFabricationProperty>( GetProperty() ) );
+
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        pad.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+
+    kiapi::board::PackTeardropSettings( *pad.mutable_teardrop(), GetTeardropParams() );
+
+    {
+        std::unique_lock lock( m_dataMutex );
+        kiapi::board::PackZoneLayerOverrides( pad.mutable_zone_layer_overrides(), m_zoneLayerOverrides );
     }
 
     aContainer.PackFrom( pad );
@@ -222,7 +233,7 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &pad ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( pad.id().value() );
+    SetUuidDirect( KIID( pad.id().value() ) );
     SetPosition( kiapi::common::UnpackVector2( pad.position() ) );
     UnpackNet( pad.net() );
     SetLocked( pad.locked() == kiapi::common::types::LockedState::LS_LOCKED );
@@ -230,10 +241,12 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
     SetNumber( wxString::FromUTF8( pad.number() ) );
     SetPadToDieLength( pad.pad_to_die_length().value_nm() );
     SetPadToDieDelay( pad.pad_to_die_delay().value_as() );
+    SetProperty( FromProtoEnum<PAD_PROP>( pad.fab_property() ) );
 
     google::protobuf::Any padStackWrapper;
     padStackWrapper.PackFrom( pad.pad_stack() );
     m_padStack.Deserialize( padStackWrapper );
+    SetOrientation( m_padStack.GetOrientation() );
 
     SetLayer( m_padStack.StartLayer() );
 
@@ -251,6 +264,18 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
 
         if( pad.symbol_pin().no_connect() )
             m_pinType += wxT( "+no_connect" );
+    }
+
+    if( pad.has_teardrop() )
+        kiapi::board::UnpackTeardropSettings( GetTeardropParams(), pad.teardrop() );
+    else
+        SetTeardropsEnabled( false );
+
+    ClearZoneLayerOverrides();
+
+    {
+        std::unique_lock lock( m_dataMutex );
+        kiapi::board::UnpackZoneLayerOverrides( m_zoneLayerOverrides, pad.zone_layer_overrides() );
     }
 
     return true;
@@ -468,6 +493,9 @@ bool PAD::FlashLayer( int aLayer, bool aOnlyCheckIfPermitted ) const
             }
         }
     }
+
+    if( GetAttribute() == PAD_ATTRIB::PTH && ( layer == F_Mask || layer == B_Mask ) )
+        return true;
 
     if( LSET::FrontBoardTechMask().test( aLayer ) )
         aLayer = F_Cu;
@@ -2377,6 +2405,14 @@ std::vector<int> PAD::ViewGetLayers() const
             layers.push_back( LAYER_PAD_NETNAMES );
         else
             layers.push_back( LAYER_PAD_BK_NETNAMES );
+    }
+    else if( cuLayers.count() == 1 )
+    {
+        PCB_LAYER_ID layer = cuLayers.Seq().front();
+
+        layers.push_back( LAYER_PAD_COPPER_START + layer );
+        layers.push_back( LAYER_CLEARANCE_START + layer );
+        layers.push_back( LAYER_PAD_NETNAMES );
     }
 
     // Check non-copper layers. This list should include all the layers that the

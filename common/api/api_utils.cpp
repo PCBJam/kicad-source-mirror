@@ -20,8 +20,11 @@
 
 #include <magic_enum.hpp>
 #include <api/api_utils.h>
+#include <api/api_enums.h>
+
 #include <geometry/shape_poly_set.h>
 #include <kiid.h>
+#include <stroke_params.h>
 #include <wx/log.h>
 
 const wxChar* const traceApi = wxT( "KICAD_API" );
@@ -38,12 +41,15 @@ KICOMMON_API std::optional<KICAD_T> TypeNameFromAny( const google::protobuf::Any
         { "type.googleapis.com/kiapi.board.types.Via", PCB_VIA_T },
         { "type.googleapis.com/kiapi.board.types.BoardText", PCB_TEXT_T },
         { "type.googleapis.com/kiapi.board.types.BoardTextBox", PCB_TEXTBOX_T },
+        { "type.googleapis.com/kiapi.board.types.Table", PCB_TABLE_T },
+        { "type.googleapis.com/kiapi.board.types.TableCell", PCB_TABLECELL_T },
         { "type.googleapis.com/kiapi.board.types.BoardGraphicShape", PCB_SHAPE_T },
         { "type.googleapis.com/kiapi.board.types.Barcode", PCB_BARCODE_T },
         { "type.googleapis.com/kiapi.board.types.Pad", PCB_PAD_T },
         { "type.googleapis.com/kiapi.board.types.Zone", PCB_ZONE_T },
         { "type.googleapis.com/kiapi.board.types.Dimension", PCB_DIMENSION_T },
         { "type.googleapis.com/kiapi.board.types.ReferenceImage", PCB_REFERENCE_IMAGE_T },
+        { "type.googleapis.com/kiapi.board.types.ReferencePoint", PCB_POINT_T },
         { "type.googleapis.com/kiapi.board.types.Group", PCB_GROUP_T },
         { "type.googleapis.com/kiapi.board.types.Field", PCB_FIELD_T },
         { "type.googleapis.com/kiapi.board.types.FootprintInstance", PCB_FOOTPRINT_T },
@@ -118,11 +124,8 @@ KICOMMON_API BOX2I UnpackBox2( const types::Box2& aInput )
 
 KICOMMON_API void PackPolyLine( types::PolyLine& aOutput, const SHAPE_LINE_CHAIN& aSlc )
 {
-    for( int vertex = 0; vertex < aSlc.PointCount(); vertex = aSlc.NextShape( vertex ) )
+    for( int vertex = 0; vertex < aSlc.PointCount(); ++vertex )
     {
-        if( vertex < 0 )
-            break;
-
         if( aSlc.IsArcStart( vertex ) )
         {
             types::PolyLineNode* node = aOutput.mutable_nodes()->Add();
@@ -250,6 +253,28 @@ KICOMMON_API KIID_PATH UnpackSheetPath( const types::SheetPath& aInput )
         output.push_back( KIID( sheet.value() ) );
 
     return output;
+}
+
+
+KICOMMON_API void PackStroke( types::StrokeAttributes& aOutput, const STROKE_PARAMS& aInput )
+{
+    aOutput.mutable_width()->set_value_nm( aInput.GetWidth() );
+    aOutput.set_style( ToProtoEnum<LINE_STYLE, types::StrokeLineStyle>( aInput.GetLineStyle() ) );
+
+    if( aInput.GetColor() != KIGFX::COLOR4D::UNSPECIFIED )
+        PackColor( *aOutput.mutable_color(), aInput.GetColor() );
+}
+
+
+KICOMMON_API void UnpackStroke( STROKE_PARAMS& aOutput, const types::StrokeAttributes& aInput )
+{
+    aOutput.SetWidth( aInput.width().value_nm() );
+    aOutput.SetLineStyle( FromProtoEnum<LINE_STYLE, types::StrokeLineStyle>( aInput.style() ) );
+
+    if( aInput.has_color() )
+        aOutput.SetColor( UnpackColor( aInput.color() ) );
+    else
+        aOutput.SetColor( KIGFX::COLOR4D::UNSPECIFIED );
 }
 
 } // namespace kiapi::common

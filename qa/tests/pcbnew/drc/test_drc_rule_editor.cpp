@@ -337,6 +337,63 @@ BOOST_AUTO_TEST_CASE( ValidateViaStyleInvalidNegativeValues )
     BOOST_CHECK( foundNegativeError );
 }
 
+// Deleting one entry of a rule the loader split must not bring it back on save.
+BOOST_AUTO_TEST_CASE( DeletedSplitEntryStaysDeleted )
+{
+    wxString rules = wxS( "(version 1)\n"
+                          "(rule \"Combo\"\n"
+                          "  (condition \"A.NetClass == 'HV'\")\n"
+                          "  (constraint clearance (min 0.5mm))\n"
+                          "  (constraint track_width (opt 0.3mm)))\n" );
+
+    DRC_RULE_LOADER loader;
+
+    std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFromString( rules );
+
+    BOOST_REQUIRE_EQUAL( entries.size(), 2 );
+
+    // The user deletes the sibling that does not hold the original rule text.
+    auto deleted = std::find_if( entries.begin(), entries.end(),
+                                 []( const DRC_RE_LOADED_PANEL_ENTRY& aEntry )
+                                 {
+                                     return aEntry.originalRuleText.IsEmpty();
+                                 } );
+
+    BOOST_REQUIRE( deleted != entries.end() );
+    entries.erase( deleted );
+
+    DRC_RULE_SAVER saver;
+    wxString       saved = saver.GenerateRulesText( entries, nullptr );
+
+    int constraints = 0;
+
+    for( size_t pos = saved.find( wxS( "(constraint" ) ); pos != wxString::npos;
+         pos = saved.find( wxS( "(constraint" ), pos + 1 ) )
+    {
+        constraints++;
+    }
+
+    BOOST_CHECK_EQUAL( constraints, 1 );
+}
+
+
+// A negative optimum is an error, not an absent field.
+BOOST_AUTO_TEST_CASE( ValidateDiffPairRejectsNegativeOptimums )
+{
+    DRC_RE_ROUTING_DIFF_PAIR_CONSTRAINT_DATA negWidth( 0, 0, "NegWidth", -0.2, 0.0, 0.2, 0.02, 0.0 );
+
+    BOOST_CHECK( !negWidth.Validate().isValid );
+
+    DRC_RE_ROUTING_DIFF_PAIR_CONSTRAINT_DATA negGap( 0, 0, "NegGap", 0.2, 0.02, -0.2, 0.0, 0.0 );
+
+    BOOST_CHECK( !negGap.Validate().isValid );
+
+    // Zero still means the field was left empty.
+    DRC_RE_ROUTING_DIFF_PAIR_CONSTRAINT_DATA gapOnly( 0, 0, "GapOnly", 0.0, 0.0, 0.2, 0.02, 0.0 );
+
+    BOOST_CHECK( gapOnly.Validate().isValid );
+}
+
 BOOST_AUTO_TEST_CASE( FactoryOverwrite )
 {
     // Register a parser
@@ -2507,6 +2564,150 @@ BOOST_AUTO_TEST_CASE( RuleLoaderPermittedLayersStandardLoadsStructured )
     BOOST_REQUIRE( layerData );
     BOOST_CHECK( layerData->GetTopLayerEnabled() );
     BOOST_CHECK( layerData->GetBottomLayerEnabled() );
+}
+
+
+// A time domain length rule loads into the length panel with its values in ps.
+BOOST_AUTO_TEST_CASE( RuleLoaderTimeDomainLengthLoadsStructured )
+{
+    wxString ruleText = "(version 1)\n"
+                        "(rule \"clk_delay\"\n"
+                        "    (constraint length (min 210ps) (max 230ps))\n"
+                        ")";
+
+    DRC_RULE_LOADER                        loader;
+    std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFromString( ruleText );
+
+    BOOST_REQUIRE_EQUAL( entries.size(), 1 );
+    BOOST_CHECK_EQUAL( entries[0].panelType, ABSOLUTE_LENGTH );
+
+    auto data = std::dynamic_pointer_cast<DRC_RE_ABSOLUTE_LENGTH_TWO_CONSTRAINT_DATA>( entries[0].constraintData );
+    BOOST_REQUIRE( data );
+    BOOST_CHECK( data->IsTimeDomain() );
+    BOOST_CHECK_CLOSE( data->GetOptimumLength(), 220.0, 0.0001 );
+    BOOST_CHECK_CLOSE( data->GetTolerance(), 10.0, 0.0001 );
+}
+
+
+BOOST_AUTO_TEST_CASE( RoundTripTimeDomainLength )
+{
+    DRC_RE_ABSOLUTE_LENGTH_TWO_CONSTRAINT_DATA original( 0, 0, 220.0, 10.0, "clk_delay" );
+    original.SetConstraintCode( "length" );
+    original.SetTimeDomain( true );
+
+    RULE_GENERATION_CONTEXT ctx;
+    ctx.ruleName = original.GetRuleName();
+    ctx.constraintCode = original.GetConstraintCode();
+
+    wxString ruleText = original.GenerateRule( ctx );
+
+    BOOST_CHECK( ruleText.Contains( wxS( "210ps" ) ) );
+    BOOST_CHECK( ruleText.Contains( wxS( "220ps" ) ) );
+    BOOST_CHECK( ruleText.Contains( wxS( "230ps" ) ) );
+
+    DRC_RULE_LOADER                        loader;
+    std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFromString( ruleText );
+
+    BOOST_REQUIRE_EQUAL( entries.size(), 1 );
+
+    auto parsed = std::dynamic_pointer_cast<DRC_RE_ABSOLUTE_LENGTH_TWO_CONSTRAINT_DATA>( entries[0].constraintData );
+    BOOST_REQUIRE( parsed );
+    BOOST_CHECK( parsed->IsTimeDomain() );
+    BOOST_CHECK_CLOSE( parsed->GetOptimumLength(), 220.0, 0.0001 );
+    BOOST_CHECK_CLOSE( parsed->GetTolerance(), 10.0, 0.0001 );
+}
+
+
+// A rule with no optimum must keep its min and max through an open and save cycle.
+BOOST_AUTO_TEST_CASE( RoundTripLengthWithoutOpt )
+{
+    wxString ruleText = "(version 1)\n"
+                        "(rule \"len_window\"\n"
+                        "    (constraint length (min 30mm) (max 50mm))\n"
+                        ")";
+
+    DRC_RULE_LOADER                        loader;
+    std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFromString( ruleText );
+
+    BOOST_REQUIRE_EQUAL( entries.size(), 1 );
+    BOOST_CHECK_EQUAL( entries[0].panelType, ABSOLUTE_LENGTH );
+
+    auto data = std::dynamic_pointer_cast<DRC_RE_ABSOLUTE_LENGTH_TWO_CONSTRAINT_DATA>( entries[0].constraintData );
+    BOOST_REQUIRE( data );
+    BOOST_CHECK_CLOSE( data->GetOptimumLength(), 40.0, 0.0001 );
+    BOOST_CHECK_CLOSE( data->GetTolerance(), 10.0, 0.0001 );
+
+    RULE_GENERATION_CONTEXT ctx;
+    ctx.ruleName = entries[0].ruleName;
+    ctx.constraintCode = data->GetConstraintCode();
+
+    wxString saved = data->GenerateRule( ctx );
+
+    BOOST_CHECK( saved.Contains( wxS( "30mm" ) ) );
+    BOOST_CHECK( saved.Contains( wxS( "40mm" ) ) );
+    BOOST_CHECK( saved.Contains( wxS( "50mm" ) ) );
+}
+
+
+// A commented out constraint must not appear in the body as active rule text.
+BOOST_AUTO_TEST_CASE( RuleBodyExcludesCommentLines )
+{
+    wxString ruleText = "(rule \"length_DDR_Byte0\"\n"
+                        "\t# byte lane 0\n"
+                        "\t# (constraint length (min 29.5mm) (max 30.5mm) (opt 30mm))\n"
+                        "(constraint length (min 210ps) (max 230ps) (opt 223ps))\n"
+                        "\t# tightened after bring-up\n"
+                        "\t(condition \"A.NetClass == 'DDR4_BYTE0'\"))";
+
+    wxString body = DRC_RULE_LOADER::extractRuleBody( ruleText );
+
+    BOOST_CHECK( body.StartsWith( wxS( "(constraint length (min 210ps)" ) ) );
+    BOOST_CHECK( !body.Contains( wxS( "29.5mm" ) ) );
+    BOOST_CHECK( !body.Contains( wxS( "byte lane" ) ) );
+    BOOST_CHECK( !body.Contains( wxS( "bring-up" ) ) );
+    BOOST_CHECK( body.Contains( wxS( "condition" ) ) );
+
+    wxString comment = DRC_RULE_LOADER::extractRuleComment( ruleText );
+
+    BOOST_CHECK( comment.Contains( wxS( "byte lane 0" ) ) );
+    BOOST_CHECK( comment.Contains( wxS( "29.5mm" ) ) );
+    BOOST_CHECK( comment.Contains( wxS( "bring-up" ) ) );
+}
+
+
+// The matched length pair panel still cannot hold time, so a ps skew stays as text.
+BOOST_AUTO_TEST_CASE( RuleLoaderTimeDomainSkewStillFallsBackToCustom )
+{
+    wxString ruleText = "(version 1)\n"
+                        "(rule \"pair_ps\"\n"
+                        "    (constraint length (min 10mm) (opt 11mm) (max 12mm))\n"
+                        "    (constraint skew (max 5ps))\n"
+                        ")";
+
+    DRC_RULE_LOADER                        loader;
+    std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFromString( ruleText );
+
+    BOOST_REQUIRE_EQUAL( entries.size(), 1 );
+    BOOST_CHECK_EQUAL( entries[0].panelType, CUSTOM_RULE );
+
+    auto customData = std::dynamic_pointer_cast<DRC_RE_CUSTOM_RULE_CONSTRAINT_DATA>( entries[0].constraintData );
+    BOOST_REQUIRE( customData );
+    BOOST_CHECK( customData->GetRuleText().Contains( wxS( "5ps" ) ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( RuleLoaderSpatialLengthStaysStructured )
+{
+    wxString ruleText = "(version 1)\n"
+                        "(rule \"len_mm\"\n"
+                        "    (constraint length (min 30mm) (opt 40mm) (max 50mm))\n"
+                        ")";
+
+    DRC_RULE_LOADER                        loader;
+    std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFromString( ruleText );
+
+    BOOST_REQUIRE_EQUAL( entries.size(), 1 );
+    BOOST_CHECK_EQUAL( entries[0].panelType, ABSOLUTE_LENGTH );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

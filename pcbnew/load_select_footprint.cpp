@@ -41,6 +41,7 @@ using namespace std::placeholders;
 #include <lib_id.h>
 #include <macros.h>
 #include <pcb_edit_frame.h>
+#include <pcb_text.h>
 #include <pcbnew_settings.h>
 #include <board_design_settings.h>
 #include <drc/drc_item.h>
@@ -114,7 +115,7 @@ bool FOOTPRINT_EDIT_FRAME::LoadFootprintFromBoard( FOOTPRINT* aFootprint )
             {
                 KIID newId;
                 m_boardFootprintUuids[ newId ] = aItem->m_Uuid;
-                const_cast<KIID&>( aItem->m_Uuid ) = newId;
+                aItem->SetUuid( newId );
             };
 
     newFootprint = (FOOTPRINT*) aFootprint->Clone();    // Keep existing uuids
@@ -161,6 +162,13 @@ bool FOOTPRINT_EDIT_FRAME::LoadFootprintFromBoard( FOOTPRINT* aFootprint )
     // Put it in orientation 0,
     // because this is the default orientation in Footprint Editor, and in libs
     newFootprint->SetOrientation( ANGLE_0 );
+    newFootprint->RunOnChildren(
+            [&]( BOARD_ITEM* aItem )
+            {
+                if( aItem->Type() == PCB_TEXT_T )
+                    static_cast<PCB_TEXT*>( aItem )->KeepUpright();
+            },
+            RECURSE_MODE::RECURSE );
 
     Zoom_Automatique( false );
 
@@ -443,5 +451,4 @@ void PCB_BASE_FRAME::PlaceFootprint( FOOTPRINT* aFootprint, bool aRecreateRatsne
 
     SetMsgPanel( aFootprint );
 }
-
 

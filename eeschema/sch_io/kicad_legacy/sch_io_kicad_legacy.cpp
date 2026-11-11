@@ -1514,6 +1514,7 @@ void SCH_IO_KICAD_LEGACY::SaveSchematicFile( const wxString& aFileName, SCH_SHEE
     m_out = &formatter;     // no ownership
 
     Format( aSheet );
+    formatter.Finish();
 
     aSheet->GetScreen()->SetFileExists( true );
 }
@@ -1859,9 +1860,6 @@ void SCH_IO_KICAD_LEGACY::saveSheet( SCH_SHEET* aSheet )
     for( const SCH_SHEET_PIN* pin : aSheet->GetPins() )
     {
         int type, side;
-
-        if( pin->GetText().IsEmpty() )
-            break;
 
         switch( pin->GetSide() )
         {

@@ -30,6 +30,7 @@
 #include <drc/drc_item.h>
 #include <drc/drc_rule.h>
 #include <board.h>
+#include <pad.h>
 #include <pcb_marker.h>
 #include <i18n_utility.h>
 
@@ -61,9 +62,8 @@ DRC_ITEM DRC_ITEM::itemsNotAllowed( DRCE_ALLOWED_ITEMS,
         _HKI( "Items not allowed" ),
         wxT( "items_not_allowed" ) );
 
-DRC_ITEM DRC_ITEM::textOnEdgeCuts( DRCE_TEXT_ON_EDGECUTS,
-        _HKI( "Text (or dimension) on Edge.Cuts layer" ),
-        wxT( "text_on_edge_cuts" ) );
+DRC_ITEM DRC_ITEM::textOnEdgeCuts( DRCE_TEXT_ON_EDGECUTS, _HKI( "Text or graphic on Edge.Cuts layer" ),
+                                   wxT( "text_on_edge_cuts" ) );
 
 DRC_ITEM DRC_ITEM::clearance( DRCE_CLEARANCE,
         _HKI( "Clearance violation" ),
@@ -522,6 +522,91 @@ wxString DRC_ITEM::GetViolatingRuleDesc( bool aTranslate ) const
         return wxString::Format( aTranslate ? _( "Rule: %s" ) : wxString( wxT( "Rule: %s" ) ), m_violatingRule->m_Name );
     else
         return aTranslate ? _( "Local override" ) : wxString( wxT( "Local override" ) );
+}
+
+
+void DRC_ITEM::GetViolationLayers( BOARD* aBoard, const std::shared_ptr<RC_ITEM>& aItem, PCB_MARKER* aMarker,
+                                   PCB_LAYER_ID& aPrincipalLayer, LSET& aViolationLayers )
+{
+    auto getActiveLayers = []( BOARD_ITEM* it ) -> LSET
+    {
+        if( it->Type() == PCB_PAD_T )
+        {
+            PAD* pad = static_cast<PAD*>( it );
+            LSET layers;
+
+            for( int layer : it->GetLayerSet() )
+            {
+                if( pad->FlashLayer( layer ) )
+                    layers.set( layer );
+            }
+
+            return layers;
+        }
+        else
+        {
+            return it->GetLayerSet();
+        }
+    };
+
+    aPrincipalLayer = UNDEFINED_LAYER;
+    aViolationLayers = LSET();
+
+    BOARD_ITEM* a = aBoard->ResolveItem( aItem->GetMainItemID(), true );
+    BOARD_ITEM* b = aBoard->ResolveItem( aItem->GetAuxItemID(), true );
+    BOARD_ITEM* c = aBoard->ResolveItem( aItem->GetAuxItem2ID(), true );
+    BOARD_ITEM* d = aBoard->ResolveItem( aItem->GetAuxItem3ID(), true );
+
+    if( aItem->GetErrorCode() == DRCE_MALFORMED_COURTYARD )
+    {
+        if( a && ( a->GetFlags() & MALFORMED_B_COURTYARD ) > 0 && ( a->GetFlags() & MALFORMED_F_COURTYARD ) == 0 )
+        {
+            aPrincipalLayer = B_CrtYd;
+        }
+        else
+        {
+            aPrincipalLayer = F_CrtYd;
+        }
+    }
+    else if( aItem->GetErrorCode() == DRCE_INVALID_OUTLINE || aItem->GetErrorCode() == DRCE_EDGE_CLEARANCE )
+    {
+        aPrincipalLayer = Edge_Cuts;
+    }
+    else
+    {
+        // The marker's layer is set by the test provider
+        if( aMarker )
+        {
+            PCB_LAYER_ID markerLayer = aMarker->GetLayer();
+
+            if( markerLayer > UNDEFINED_LAYER )
+                aPrincipalLayer = markerLayer;
+        }
+
+        // Fall back to intersecting the layer sets of the contributing items
+        if( aPrincipalLayer <= UNDEFINED_LAYER )
+        {
+            if( a || b || c || d )
+                aViolationLayers = LSET::AllLayersMask();
+
+            for( BOARD_ITEM* it : { a, b, c, d } )
+            {
+                if( !it )
+                    continue;
+
+                LSET layersList = getActiveLayers( it );
+                aViolationLayers &= layersList;
+
+                if( aPrincipalLayer <= UNDEFINED_LAYER && layersList.count() )
+                    aPrincipalLayer = layersList.Seq().front();
+            }
+        }
+    }
+
+    if( aViolationLayers.count() )
+        aPrincipalLayer = aViolationLayers.Seq().front();
+    else if( aPrincipalLayer >= 0 )
+        aViolationLayers.set( aPrincipalLayer );
 }
 
 

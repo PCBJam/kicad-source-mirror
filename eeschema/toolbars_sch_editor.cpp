@@ -32,7 +32,9 @@
 #include <bitmaps.h>
 #include <eeschema_id.h>
 #include <pgm_base.h>
+#ifdef KICAD_SCRIPTING
 #include <python_scripting.h>
+#endif
 #include <tool/action_menu.h>
 #include <tool/tool_manager.h>
 #include <settings/common_settings.h>
@@ -254,7 +256,11 @@ void SCH_EDIT_FRAME::configureToolbars()
             [this]( ACTION_TOOLBAR* aToolbar )
             {
                 // Add scripting console and API plugins
+#ifdef KICAD_SCRIPTING
                 bool scriptingAvailable = SCRIPTING::IsWxAvailable();
+#else
+                bool scriptingAvailable = false;
+#endif
 
 #ifdef KICAD_IPC_API
                 bool haveApiPlugins = Pgm().GetCommonSettings()->m_Api.enable_server
@@ -379,10 +385,13 @@ void SCH_EDIT_FRAME::onVariantSelected( wxCommandEvent& aEvent )
 }
 
 
-bool SCH_EDIT_FRAME::ShowAddVariantDialog()
+bool SCH_EDIT_FRAME::ShowAddVariantDialog( wxWindow* aParent )
 {
+    if( !aParent )
+        aParent = this;
+
     // Create a dialog with both name and description fields
-    wxDialog dlg( this, wxID_ANY, _( "New Design Variant" ), wxDefaultPosition, wxDefaultSize,
+    wxDialog dlg( aParent, wxID_ANY, _( "New Design Variant" ), wxDefaultPosition, wxDefaultSize,
                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER );
 
     wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );

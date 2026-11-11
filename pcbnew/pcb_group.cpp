@@ -57,17 +57,26 @@ PCB_GROUP::PCB_GROUP( BOARD_ITEM* aParent, KICAD_T idtype, PCB_LAYER_ID aLayer )
 
 void PCB_GROUP::Serialize( google::protobuf::Any &aContainer ) const
 {
-    using namespace kiapi::board::types;
-    Group group;
+    using namespace kiapi::common::types;
+    kiapi::board::types::Group group;
 
     group.mutable_id()->set_value( m_Uuid.AsStdString() );
     group.set_name( GetName().ToUTF8() );
+    group.set_locked( IsLocked() ? LockedState::LS_LOCKED : LockedState::LS_UNLOCKED );
 
     for( EDA_ITEM* item : GetItems() )
     {
         kiapi::common::types::KIID* itemId = group.add_items();
         itemId->set_value( item->m_Uuid.AsStdString() );
     }
+
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        group.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+    else if( const BOARD* board = GetBoard() )
+        group.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
+    if( HasDesignBlockLink() )
+        group.mutable_lib_id()->CopyFrom( kiapi::common::LibIdToProto( GetDesignBlockLibId() ) );
 
     aContainer.PackFrom( group );
 }
@@ -80,8 +89,9 @@ bool PCB_GROUP::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &group ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( group.id().value() );
+    SetUuidDirect( KIID( group.id().value() ) );
     SetName( wxString( group.name().c_str(), wxConvUTF8 ) );
+    SetLocked( group.locked() == kiapi::common::types::LockedState::LS_LOCKED );
 
     BOARD* board = GetBoard();
 
@@ -95,6 +105,9 @@ bool PCB_GROUP::Deserialize( const google::protobuf::Any &aContainer )
         if( BOARD_ITEM* item = board->ResolveItem( id, true ) )
             AddItem( item );
     }
+
+    if( group.has_lib_id() )
+        SetDesignBlockLibId( kiapi::common::LibIdFromProto( group.lib_id() ) );
 
     return true;
 }
@@ -222,7 +235,9 @@ PCB_GROUP* PCB_GROUP::DeepDuplicate( bool addToParentGroup, BOARD_COMMIT* aCommi
 
     for( EDA_ITEM* member : m_items )
     {
-        if( member->Type() == PCB_GROUP_T )
+        // A PCB_GENERATOR owns member items that are not in this group's m_items, so a shallow
+        // copy would leave the duplicate referencing the original's members.
+        if( member->Type() == PCB_GROUP_T || member->Type() == PCB_GENERATOR_T )
             newGroup->AddItem( static_cast<PCB_GROUP*>( member )->DeepDuplicate( IGNORE_PARENT_GROUP ) );
         else
             newGroup->AddItem( static_cast<BOARD_ITEM*>( member )->Duplicate( IGNORE_PARENT_GROUP ) );
@@ -388,6 +403,21 @@ void PCB_GROUP::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 
 void PCB_GROUP::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
+    // Footprints have no mirror, only flip. If the group holds one, leave the whole group alone
+    // rather than mirror the rest and tear it apart.
+    bool hasFootprint = false;
+
+    RunOnChildren(
+            [&]( BOARD_ITEM* aChild )
+            {
+                if( aChild->Type() == PCB_FOOTPRINT_T )
+                    hasFootprint = true;
+            },
+            RECURSE_MODE::RECURSE );
+
+    if( hasFootprint )
+        return;
+
     for( EDA_ITEM* item : m_items )
         static_cast<BOARD_ITEM*>( item )->Mirror( aCentre, aFlipDirection );
 }

@@ -33,7 +33,13 @@ if( MINGW )
     list( APPEND SG_FILES ${CMAKE_SOURCE_DIR}/common/streamwrapper.cpp )
 endif( MINGW )
 
-add_library( kicad_3dsg SHARED ${SG_FILES} )
+if( EMSCRIPTEN )
+    # WASM statically links everything into a single module; a SHARED side-module
+    # would need MAIN_MODULE/SIDE_MODULE + dlopen, which this build doesn't use.
+    add_library( kicad_3dsg STATIC ${SG_FILES} )
+else()
+    add_library( kicad_3dsg SHARED ${SG_FILES} )
+endif()
 
 if( APPLE )
     # puts library into the main kicad.app bundle in build tree

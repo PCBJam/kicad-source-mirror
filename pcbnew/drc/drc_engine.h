@@ -81,6 +81,7 @@ class NETCLASS;
 class NETLIST;
 class NETINFO_ITEM;
 class PROGRESS_REPORTER;
+class ZONE;
 class REPORTER;
 class wxFileName;
 
@@ -289,6 +290,7 @@ public:
     REPORTER* GetLogReporter() const { return m_logReporter; }
 
     bool QueryWorstConstraint( DRC_CONSTRAINT_T aRuleId, DRC_CONSTRAINT& aConstraint, bool aUnconditionalOnly = false );
+    bool HasConditionalConstraint( DRC_CONSTRAINT_T aConstraintId );
     bool HasUserDefinedPhysicalConstraint();
     std::set<int> QueryDistinctConstraints( DRC_CONSTRAINT_T aConstraintId );
 
@@ -350,6 +352,11 @@ private:
         DRC_RULE_CONDITION*        condition;
         std::shared_ptr<DRC_RULE>  parentRule;
         DRC_CONSTRAINT             constraint;
+
+        // Pre-resolved zone pointer for implicit keepout disallow rules.  Duplicate zone UUIDs
+        // make an item-by-id lookup return the wrong same-UUID zone, so self-exclusion has to
+        // compare against the rule's own zone.
+        ZONE*                      implicitKeepoutZone = nullptr;
     };
 
     void loadImplicitRules();

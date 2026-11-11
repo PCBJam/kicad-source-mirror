@@ -26,6 +26,7 @@
 #include <wx/bitmap.h>
 #include <wx/image.h>
 #include <wx/icon.h>
+#include <wx/splitter.h>
 #include <wx/dialog.h>
 #include <wx/statbmp.h>
 
@@ -43,9 +44,13 @@ class DIALOG_TEMPLATE_SELECTOR_BASE : public DIALOG_SHIM
 		wxStaticText* m_labelRecentTemplates;
 		wxScrolledWindow* m_scrolledMRU;
 		wxBoxSizer* m_sizerMRU;
+		wxSplitterWindow* m_splitter;
 		wxPanel* m_panelTemplates;
 		wxSearchCtrl* m_searchCtrl;
 		wxChoice* m_filterChoice;
+		wxButton* m_browseButton;
+		wxButton* m_clearBrowseButton;
+		wxStaticText* m_browsedPathLabel;
 		wxScrolledWindow* m_scrolledTemplates;
 		wxBoxSizer* m_sizerTemplateList;
 		wxPanel* m_panelPreview;
@@ -60,6 +65,8 @@ class DIALOG_TEMPLATE_SELECTOR_BASE : public DIALOG_SHIM
 		virtual void OnSearchCtrlCancel( wxCommandEvent& event ) { event.Skip(); }
 		virtual void OnSearchCtrl( wxCommandEvent& event ) { event.Skip(); }
 		virtual void OnFilterChanged( wxCommandEvent& event ) { event.Skip(); }
+		virtual void onBrowseClicked( wxCommandEvent& event ) { event.Skip(); }
+		virtual void onClearBrowsedClicked( wxCommandEvent& event ) { event.Skip(); }
 		virtual void OnBackClicked( wxCommandEvent& event ) { event.Skip(); }
 
 
@@ -68,6 +75,12 @@ class DIALOG_TEMPLATE_SELECTOR_BASE : public DIALOG_SHIM
 		DIALOG_TEMPLATE_SELECTOR_BASE( wxWindow* parent, wxWindowID id = wxID_ANY, const wxString& title = _("Project Template Selector"), const wxPoint& pos = wxDefaultPosition, const wxSize& size = wxSize( 900,600 ), long style = wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER );
 
 		~DIALOG_TEMPLATE_SELECTOR_BASE();
+
+		void m_splitterOnIdle( wxIdleEvent& )
+		{
+			m_splitter->SetSashPosition( 300 );
+			m_splitter->Disconnect( wxEVT_IDLE, wxIdleEventHandler( DIALOG_TEMPLATE_SELECTOR_BASE::m_splitterOnIdle ), NULL, this );
+		}
 
 };
 

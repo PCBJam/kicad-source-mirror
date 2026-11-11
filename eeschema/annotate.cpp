@@ -35,6 +35,7 @@
 #include <sch_reference_list.h>
 #include <tools/sch_selection.h>
 #include <tools/sch_selection_tool.h>
+#include <tools/pcbjam_sch_remote_lock.h> // pcbjam: remote soft-locks
 #include <tool/tool_manager.h>
 #include <dialog_erc.h>
 
@@ -141,7 +142,8 @@ void SCH_EDIT_FRAME::DeleteAnnotation( ANNOTATE_SCOPE_T aAnnotateScope, bool aRe
     case ANNOTATE_SELECTION:
     {
         SCH_SELECTION_TOOL* selTool = m_toolManager->GetTool<SCH_SELECTION_TOOL>();
-        SCH_SELECTION&      selection = selTool->RequestSelection();
+        SCH_SELECTION&      selection = PCBJAM_SCH_REMOTE_LOCK::Trim( selTool->RequestSelection(),
+                                                                      selTool );
         SCH_SHEET_LIST      selectedSheets;
 
         for( EDA_ITEM* item : selection.Items() )

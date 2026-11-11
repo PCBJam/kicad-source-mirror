@@ -547,15 +547,10 @@ int EESCHEMA_JOBS_HANDLER::JobExportBom( JOB* aJob )
     aJob->SetTitleBlock( sch->RootScreen()->GetTitleBlock() );
     sch->Project().ApplyTextVars( aJob->GetVarOverrides() );
 
-    wxString currentVariant;
+    wxString currentVariant = aBomJob->GetSelectedVariant();
 
-    if( !aBomJob->m_variantNames.empty() )
-    {
-        currentVariant = aBomJob->m_variantNames.front();
-
-        if( currentVariant != wxS( "all" ) )
-            sch->SetCurrentVariant( currentVariant );
-    }
+    if( !currentVariant.IsEmpty() && currentVariant != wxS( "all" ) )
+        sch->SetCurrentVariant( currentVariant );
 
     // Annotation warning check
     SCH_REFERENCE_LIST referenceList;
@@ -588,31 +583,26 @@ int EESCHEMA_JOBS_HANDLER::JobExportBom( JOB* aJob )
 
     // Build our data model
     FIELDS_EDITOR_GRID_DATA_MODEL dataModel( referenceList, nullptr );
+    dataModel.SetCurrentVariant( currentVariant );
 
     // Mandatory fields first
     for( FIELD_T fieldId : MANDATORY_FIELDS )
-    {
-        dataModel.AddColumn( GetCanonicalFieldName( fieldId ),
-                             GetDefaultFieldName( fieldId, DO_TRANSLATE ), false, currentVariant );
-    }
+        dataModel.AddColumn( GetCanonicalFieldName( fieldId ), GetDefaultFieldName( fieldId, DO_TRANSLATE ), false );
 
     // Generated/virtual fields (e.g. ${QUANTITY}, ${ITEM_NUMBER}) present only in the fields table
     dataModel.AddColumn( FIELDS_EDITOR_GRID_DATA_MODEL::QUANTITY_VARIABLE,
-                         GetGeneratedFieldDisplayName( FIELDS_EDITOR_GRID_DATA_MODEL::QUANTITY_VARIABLE ),
-                         false, currentVariant );
+                         GetGeneratedFieldDisplayName( FIELDS_EDITOR_GRID_DATA_MODEL::QUANTITY_VARIABLE ), false );
     dataModel.AddColumn( FIELDS_EDITOR_GRID_DATA_MODEL::ITEM_NUMBER_VARIABLE,
-                         GetGeneratedFieldDisplayName( FIELDS_EDITOR_GRID_DATA_MODEL::ITEM_NUMBER_VARIABLE ),
-                         false, currentVariant );
+                         GetGeneratedFieldDisplayName( FIELDS_EDITOR_GRID_DATA_MODEL::ITEM_NUMBER_VARIABLE ), false );
 
     // Attribute fields (boolean flags on symbols)
-    dataModel.AddColumn( wxS( "${DNP}" ), GetGeneratedFieldDisplayName( wxS( "${DNP}" ) ),
-                         false, currentVariant );
+    dataModel.AddColumn( wxS( "${DNP}" ), GetGeneratedFieldDisplayName( wxS( "${DNP}" ) ), false );
     dataModel.AddColumn( wxS( "${EXCLUDE_FROM_BOM}" ), GetGeneratedFieldDisplayName( wxS( "${EXCLUDE_FROM_BOM}" ) ),
-                         false, currentVariant );
+                         false );
     dataModel.AddColumn( wxS( "${EXCLUDE_FROM_BOARD}" ), GetGeneratedFieldDisplayName( wxS( "${EXCLUDE_FROM_BOARD}" ) ),
-                         false, currentVariant );
+                         false );
     dataModel.AddColumn( wxS( "${EXCLUDE_FROM_SIM}" ), GetGeneratedFieldDisplayName( wxS( "${EXCLUDE_FROM_SIM}" ) ),
-                         false, currentVariant );
+                         false );
 
     // User field names in symbols second
     std::set<wxString> userFieldNames;
@@ -629,7 +619,7 @@ int EESCHEMA_JOBS_HANDLER::JobExportBom( JOB* aJob )
     }
 
     for( const wxString& fieldName : userFieldNames )
-        dataModel.AddColumn( fieldName, GetGeneratedFieldDisplayName( fieldName ), true, currentVariant );
+        dataModel.AddColumn( fieldName, GetGeneratedFieldDisplayName( fieldName ), true );
 
     // Add any templateFieldNames which aren't already present in the userFieldNames
     for( const TEMPLATE_FIELDNAME& templateFieldname :
@@ -638,7 +628,7 @@ int EESCHEMA_JOBS_HANDLER::JobExportBom( JOB* aJob )
         if( userFieldNames.count( templateFieldname.m_Name ) == 0 )
         {
             dataModel.AddColumn( templateFieldname.m_Name, GetGeneratedFieldDisplayName( templateFieldname.m_Name ),
-                                 false, currentVariant );
+                                 false );
         }
     }
 
@@ -856,7 +846,8 @@ int EESCHEMA_JOBS_HANDLER::JobExportBom( JOB* aJob )
         std::vector<wxString> singleVariant = { variantName };
         dataModel.SetVariantNames( singleVariant );
         dataModel.SetCurrentVariant( variantName );
-        dataModel.ApplyBomPreset( preset, variantName );
+        dataModel.UpdateReferences( dataModel.GetReferenceList() );
+        dataModel.ApplyBomPreset( preset );
 
         wxString outPath;
 
@@ -1096,16 +1087,42 @@ int EESCHEMA_JOBS_HANDLER::JobSymExportSvg( JOB* aJob )
     wxFileName fn( svgJob->m_libraryPath );
     fn.MakeAbsolute();
 
-    SCH_IO_KICAD_SEXPR_LIB_CACHE schLibrary( fn.GetFullPath() );
+    // When the input is a single symbol file we restrict plotting to the symbols defined in
+    // that file. Stays empty (no restriction) when the input is a whole library.
+    wxString singleFileFilter;
+
+    auto schLibrary = std::make_unique<SCH_IO_KICAD_SEXPR_LIB_CACHE>( fn.GetFullPath() );
 
     try
     {
-        schLibrary.Load();
+        schLibrary->Load();
     }
     catch( ... )
     {
-        m_reporter->Report( _( "Unable to load library\n" ), RPT_SEVERITY_ERROR );
-        return CLI::EXIT_CODES::ERR_UNKNOWN;
+        // A single file holding a derived symbol whose parent is in a sibling file cannot load
+        // alone. Retry against the enclosing directory, then plot only this file's symbols.
+        bool recovered = false;
+
+        if( !fn.IsDir() && wxDir::Exists( fn.GetPath() ) )
+        {
+            try
+            {
+                schLibrary = std::make_unique<SCH_IO_KICAD_SEXPR_LIB_CACHE>( fn.GetPath() );
+                schLibrary->Load();
+                singleFileFilter = fn.GetFullPath();
+                recovered = true;
+            }
+            catch( ... )
+            {
+                // Fall through to the generic load error below.
+            }
+        }
+
+        if( !recovered )
+        {
+            m_reporter->Report( _( "Unable to load library\n" ), RPT_SEVERITY_ERROR );
+            return CLI::EXIT_CODES::ERR_UNKNOWN;
+        }
     }
 
     if( m_progressReporter )
@@ -1116,7 +1133,7 @@ int EESCHEMA_JOBS_HANDLER::JobSymExportSvg( JOB* aJob )
     if( !svgJob->m_symbol.IsEmpty() )
     {
         // See if the selected symbol exists
-        symbol = schLibrary.GetSymbol( svgJob->m_symbol );
+        symbol = schLibrary->GetSymbol( svgJob->m_symbol );
 
         if( !symbol )
         {
@@ -1153,10 +1170,21 @@ int EESCHEMA_JOBS_HANDLER::JobSymExportSvg( JOB* aJob )
     else
     {
         // Just plot all the symbols we can
-        const LIB_SYMBOL_MAP& libSymMap = schLibrary.GetSymbolMap();
+        const LIB_SYMBOL_MAP&               libSymMap = schLibrary->GetSymbolMap();
+        const std::map<wxString, wxString>& sourceFiles = schLibrary->GetSymbolSourceFiles();
+        const wxFileName                    filterFile( singleFileFilter );
 
         for( const auto& [name, libSymbol] : libSymMap )
         {
+            // When a single file was requested, skip symbols that came from sibling files.
+            if( !singleFileFilter.IsEmpty() )
+            {
+                auto srcIt = sourceFiles.find( name );
+
+                if( srcIt == sourceFiles.end() || !wxFileName( srcIt->second ).SameAs( filterFile ) )
+                    continue;
+            }
+
             if( m_progressReporter )
             {
                 m_progressReporter->AdvancePhase( wxString::Format( _( "Exporting %s" ), name ) );

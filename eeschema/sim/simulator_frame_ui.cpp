@@ -59,6 +59,13 @@
 #include <magic_enum.hpp>
 #include <widgets/wx_infobar.h>
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/kicad_editor_embind.cpp): notifies the
+// web app after a successful save so it can persist the MEMFS bytes. Same hook as the
+// schematic save in files-io.cpp.
+extern "C" void kicadCollabOnSave( const char* aPath );
+#endif
+
 
 SIM_TRACE_TYPE operator|( SIM_TRACE_TYPE aFirst, SIM_TRACE_TYPE aSecond )
 {
@@ -2840,6 +2847,12 @@ bool SIMULATOR_FRAME_UI::SaveWorkbook( const wxString& aPath )
     // Store the filename of the last saved workbook.
     if( res )
     {
+#ifdef __EMSCRIPTEN__
+        // Every workbook save (close prompt, Save, Save As) ends here; without this the
+        // .wbk stays MEMFS-only and is gone on reload while the project still points at it.
+        kicadCollabOnSave( filename.GetFullPath().utf8_str() );
+#endif
+
         filename.MakeRelativeTo( m_schematicFrame->Prj().GetProjectPath() );
         simulator()->Settings()->SetWorkbookFilename( filename.GetFullPath() );
     }
@@ -3283,6 +3296,8 @@ void SIMULATOR_FRAME_UI::OnSimUpdate()
     if( SIM_PLOT_TAB* plotTab = dynamic_cast<SIM_PLOT_TAB*>( GetCurrentSimTab() ) )
         plotTab->ResetScales( true );
 
+    // Drop any buffered output from the previous run and clear the console widget.
+    m_simulatorFrame->TakeSimReportMessages();
     m_simConsole->Clear();
 
     prepareMultiRunState();
@@ -3294,9 +3309,15 @@ void SIMULATOR_FRAME_UI::OnSimUpdate()
 }
 
 
-void SIMULATOR_FRAME_UI::OnSimReport( const wxString& aMsg )
+void SIMULATOR_FRAME_UI::FlushSimConsole()
 {
-    m_simConsole->AppendText( aMsg + "\n" );
+    // AppendText is slow on MSW, so we use the buffered report lines
+    wxString messages = m_simulatorFrame->TakeSimReportMessages();
+
+    if( messages.IsEmpty() )
+        return;
+
+    m_simConsole->AppendText( messages );
     m_simConsole->SetInsertionPointEnd();
 }
 
@@ -3330,6 +3351,8 @@ std::vector<wxString> SIMULATOR_FRAME_UI::Signals() const
 
 void SIMULATOR_FRAME_UI::OnSimRefresh( bool aFinal )
 {
+    FlushSimConsole();
+
     if( aFinal )
         m_refreshTimer.Stop();
 
@@ -3543,6 +3566,13 @@ void SIMULATOR_FRAME_UI::OnSimRefresh( bool aFinal )
         m_simConsole->SetInsertionPointEnd();
         simulator()->Command( "print all" );
     }
+
+    // Non-plottable analyses (op, pz, tf, sens, disto) still create an ngspice plot; record its
+    // name so a rerun can destroy it instead of leaking the vectors.  Plottable tabs already
+    // stored their (possibly noise-adjusted) plot name above.  A shared/stale plot name is caught
+    // when destroying, not here.
+    if( aFinal && !SIM_TAB::IsPlottable( simType ) )
+        simTab->SetSpicePlotName( simulator()->CurrentPlotName() );
 
     if( storeMultiRun )
     {

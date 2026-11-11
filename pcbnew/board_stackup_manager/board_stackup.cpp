@@ -32,6 +32,7 @@
 #include <google/protobuf/any.pb.h>
 #include <api/board/board.pb.h>
 #include <api/api_enums.h>
+#include <api/api_utils.h>
 
 
 bool DIELECTRIC_PRMS::operator==( const DIELECTRIC_PRMS& aOther ) const
@@ -419,10 +420,9 @@ bool BOARD_STACKUP::operator==( const BOARD_STACKUP& aOther ) const
 }
 
 
-void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
+void BOARD_STACKUP::Serialize( kiapi::board::BoardStackup& stackup ) const
 {
     using namespace kiapi::board;
-    BoardStackup stackup;
 
     for( const BOARD_STACKUP_ITEM* item : m_list )
     {
@@ -430,8 +430,19 @@ void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
 
         layer->mutable_thickness()->set_value_nm( item->GetThickness() );
         layer->set_layer( ToProtoEnum<PCB_LAYER_ID, types::BoardLayer>( item->GetBrdLayerId() ) );
-        layer->set_type(
-                ToProtoEnum<BOARD_STACKUP_ITEM_TYPE, BoardStackupLayerType>( item->GetType() ) );
+        layer->set_enabled( item->IsEnabled() );
+        layer->set_type( ToProtoEnum<BOARD_STACKUP_ITEM_TYPE, BoardStackupLayerType>( item->GetType() ) );
+
+        if( item->IsColorEditable() )
+        {
+            wxString colorStr = item->GetColor( 0 );
+
+            if( IsPrmSpecified( colorStr ) )
+            {
+                KIGFX::COLOR4D color( colorStr );
+                kiapi::common::PackColor( *layer->mutable_color(), color );
+            }
+        }
 
         switch( item->GetType() )
         {
@@ -444,7 +455,16 @@ void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
 
         case BS_ITEM_TYPE_DIELECTRIC:
         {
-            BoardStackupDielectricLayer* dielectric = layer->mutable_dielectric()->New();
+            BoardStackupDielectricLayer* dielectric = layer->mutable_dielectric();
+
+            const wxString& typeName = item->GetTypeName();
+
+            if( typeName == KEY_CORE )
+                dielectric->set_type( BoardStackupDielectricType::BSDT_CORE );
+            else if( typeName == KEY_PREPREG )
+                dielectric->set_type( BoardStackupDielectricType::BSDT_PREPREG );
+            else
+                dielectric->set_type( BoardStackupDielectricType::BSDT_NONE );
 
             for( int i = 0; i < item->GetSublayersCount(); ++i )
             {
@@ -453,8 +473,27 @@ void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
                 props->set_loss_tangent( item->GetLossTangent( i ) );
                 props->set_material_name( item->GetMaterial( i ).ToUTF8() );
                 props->mutable_thickness()->set_value_nm( item->GetThickness( i ) );
+
+                props->set_thickness_locked( item->IsThicknessLocked( i ) );
             }
 
+            break;
+        }
+
+        case BS_ITEM_TYPE_SOLDERMASK:
+        {
+            BoardStackupSoldermaskLayer* soldermask = layer->mutable_soldermask();
+            soldermask->set_epsilon_r( item->GetEpsilonR( 0 ) );
+            soldermask->set_loss_tangent( item->GetLossTangent( 0 ) );
+            soldermask->set_material_name( item->GetMaterial( 0 ).ToUTF8() );
+            soldermask->mutable_thickness()->set_value_nm( item->GetThickness( 0 ) );
+            break;
+        }
+
+        case BS_ITEM_TYPE_SILKSCREEN:
+        {
+            BoardStackupSilkscreenLayer* silkscreen = layer->mutable_silkscreen();
+            silkscreen->set_material_name( item->GetMaterial( 0 ).ToUTF8() );
             break;
         }
 
@@ -463,11 +502,38 @@ void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
         }
     }
 
+    stackup.mutable_finish()->set_type_name( m_FinishType.ToUTF8() );
+    stackup.mutable_impedance()->set_is_controlled( m_HasDielectricConstrains );
+
+    BoardEdgeSettings* edge = stackup.mutable_edge();
+    edge->mutable_connector()->set_type(
+            ToProtoEnum<BS_EDGE_CONNECTOR_CONSTRAINTS, BoardEdgeConnectorType>( m_EdgeConnectorConstraints ) );
+    edge->mutable_plating()->set_has_edge_plating( m_EdgePlating );
+
+}
+
+
+void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::board::BoardStackup stackup;
+    Serialize( stackup );
     aContainer.PackFrom( stackup );
 }
 
 
 bool BOARD_STACKUP::Deserialize( const google::protobuf::Any& aContainer )
+{
+    // Read-only for now
+    kiapi::board::BoardStackup stackup;
+
+    if( !aContainer.UnpackTo( &stackup ) )
+        return false;
+
+    return Deserialize( stackup );
+}
+
+
+bool BOARD_STACKUP::Deserialize( const kiapi::board::BoardStackup& aInput )
 {
     // Read-only for now
     return false;

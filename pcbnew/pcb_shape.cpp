@@ -90,11 +90,21 @@ void PCB_SHAPE::Serialize( google::protobuf::Any &aContainer ) const
     msg.mutable_id()->set_value( m_Uuid.AsStdString() );
     msg.set_locked( IsLocked() ? types::LockedState::LS_LOCKED : types::LockedState::LS_UNLOCKED );
 
-    google::protobuf::Any any;
-    EDA_SHAPE::Serialize( any );
-    any.UnpackTo( msg.mutable_shape() );
+    EDA_SHAPE::Serialize( *msg.mutable_shape() );
 
-    // TODO m_hasSolderMask and m_solderMaskMargin
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        msg.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+    else if( const BOARD* board = GetBoard() )
+        msg.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+
+    if( HasSolderMask() )
+    {
+        SolderMaskOverrides* sm = msg.mutable_solder_mask();
+        sm->set_expose_copper( true );
+
+        if( GetLocalSolderMaskMargin().has_value() )
+            sm->mutable_solder_mask_margin()->set_value_nm( GetLocalSolderMaskMargin().value() );
+    }
 
     aContainer.PackFrom( msg );
 }
@@ -122,16 +132,27 @@ bool PCB_SHAPE::Deserialize( const google::protobuf::Any &aContainer )
     m_proxyItem = false;
     m_endsSwapped = false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    SetUuidDirect( KIID( msg.id().value() ) );
     SetLocked( msg.locked() == types::LS_LOCKED );
     SetLayer( FromProtoEnum<PCB_LAYER_ID, BoardLayer>( msg.layer() ) );
     UnpackNet( msg.net() );
 
-    google::protobuf::Any any;
-    any.PackFrom( msg.shape() );
-    EDA_SHAPE::Deserialize( any );
+    EDA_SHAPE::Deserialize( msg.shape() );
 
-    // TODO m_hasSolderMask and m_solderMaskMargin
+    if( msg.has_solder_mask() )
+    {
+        SetHasSolderMask( msg.solder_mask().expose_copper() );
+
+        if( msg.solder_mask().has_solder_mask_margin() )
+            SetLocalSolderMaskMargin( msg.solder_mask().solder_mask_margin().value_nm() );
+        else
+            SetLocalSolderMaskMargin( {} );
+    }
+    else
+    {
+        SetHasSolderMask( false );
+        SetLocalSolderMaskMargin( {} );
+    }
 
     return true;
 }

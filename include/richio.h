@@ -29,6 +29,7 @@
 // "richio" after its author, Richard Hollenbeck, aka Dick Hollenbeck.
 
 
+#include <memory>
 #include <vector>
 #include <core/utf8.h>
 
@@ -42,6 +43,8 @@
 #include <kicommon.h>
 #include <io/kicad/kicad_io_utils.h>
 
+
+class SIBLING_TEMP_FILE;
 
 /**
  * Nominally opens a file and reads it into a string.  But unlike other facilities, this handles
@@ -463,6 +466,12 @@ private:
 /**
  * Used for text file output.
  *
+ * Writes through a sibling temp file and atomically renames onto the final target in
+ * Finish(). A crash, throw, or power loss between construction and Finish() leaves the
+ * final target byte-identical to its prior contents -- never truncated. Finish() must be
+ * called to save; otherwise the destructor discards the temp file and leaves the target
+ * untouched.
+ *
  * It is about 8 times faster than STREAM_OUTPUTFORMATTER for file streams.
  */
 class KICOMMON_API FILE_OUTPUTFORMATTER : public OUTPUTFORMATTER
@@ -475,18 +484,33 @@ public:
      *              for text files that are to be created here and now.
      * @param aQuoteChar is a char used for quoting problematic strings (with whitespace or
      *                   special characters in them).
-     * @throw IO_ERROR if the file cannot be opened.
+     * @throw IO_ERROR if the sibling temp file cannot be created.
      */
     FILE_OUTPUTFORMATTER( const wxString& aFileName, const wxChar* aMode = wxT( "wt" ),
                           char aQuoteChar = '"' );
 
     ~FILE_OUTPUTFORMATTER();
 
+    /**
+     * Flushes the temp file to disk and atomically renames it over the final target path.
+     * After a successful return the final target contains the bytes written. A failure
+     * before the rename leaves the original contents intact; a directory-flush failure
+     * after the rename throws even though the new contents are already visible, because
+     * only their durability is in doubt.
+     *
+     * Finish() must be called at most once. Calling it again (whether the commit succeeded
+     * or failed) is a programming error.
+     *
+     * @return true on successful commit.
+     * @throw IO_ERROR if fsync, close, rename, or the directory flush fails.
+     */
+    bool Finish() override;
+
 protected:
     void write( const char* aOutBuf, int aCount ) override;
 
-    FILE*       m_fp;               ///< takes ownership
-    wxString    m_filename;
+    ///< sibling temp file, committed by Finish()
+    std::unique_ptr<SIBLING_TEMP_FILE> m_tempFile;
 };
 
 
@@ -500,8 +524,19 @@ public:
     ~PRETTIFIED_FILE_OUTPUTFORMATTER();
 
     /**
-     * Performs prettification and writes the stored buffer to the file.
-     * @return true if the write succeeded.
+     * Runs prettification over the buffered bytes, writes them to the sibling temp file,
+     * fsyncs, and atomically renames the temp file over the final target. A crash or
+     * power loss anywhere in this sequence leaves the final target byte-identical to its
+     * prior contents. A failure before the rename leaves the original contents intact; a
+     * directory-flush failure after the rename throws even though the new contents are
+     * already visible, because only their durability is in doubt.
+     *
+     * Finish() must be called at most once. Calling it again (whether the commit succeeded
+     * or failed) is a programming error.
+     *
+     * @return true on successful commit.
+     * @throw IO_ERROR if prettification, fwrite, fsync, close, rename, or the
+     *        directory flush fails.
      */
     bool Finish() override;
 
@@ -509,9 +544,10 @@ protected:
     void write( const char* aOutBuf, int aCount ) override;
 
 private:
-    FILE* m_fp;
-    std::string m_buf;
-    KICAD_FORMAT::FORMAT_MODE m_mode;
+    ///< sibling temp file, committed by Finish()
+    std::unique_ptr<SIBLING_TEMP_FILE> m_tempFile;
+    std::string                        m_buf;
+    KICAD_FORMAT::FORMAT_MODE          m_mode;
 };
 
 

@@ -176,6 +176,51 @@ PADSTACK::MODE FromProtoEnum( types::PadStackType aValue )
 
 
 template<>
+PAD_PROP FromProtoEnum( types::PadFabricationProperty aValue )
+{
+    switch( aValue )
+    {
+    case types::PadFabricationProperty::PFP_UNKNOWN:
+    case types::PadFabricationProperty::PFP_NONE:            return PAD_PROP::NONE;
+    case types::PadFabricationProperty::PFP_BGA:             return PAD_PROP::BGA;
+    case types::PadFabricationProperty::PFP_FIDUCIAL_GLOBAL: return PAD_PROP::FIDUCIAL_GLBL;
+    case types::PadFabricationProperty::PFP_FIDUCIAL_LOCAL:  return PAD_PROP::FIDUCIAL_LOCAL;
+    case types::PadFabricationProperty::PFP_TESTPOINT:       return PAD_PROP::TESTPOINT;
+    case types::PadFabricationProperty::PFP_HEATSINK:        return PAD_PROP::HEATSINK;
+    case types::PadFabricationProperty::PFP_CASTELLATED:     return PAD_PROP::CASTELLATED;
+    case types::PadFabricationProperty::PFP_MECHANICAL:      return PAD_PROP::MECHANICAL;
+    case types::PadFabricationProperty::PFP_PRESSFIT:        return PAD_PROP::PRESSFIT;
+
+    default:
+        wxCHECK_MSG( false, PAD_PROP::NONE,
+                     "Unhandled case in FromProtoEnum<types::PadFabricationProperty>" );
+    }
+}
+
+
+template<>
+types::PadFabricationProperty ToProtoEnum( PAD_PROP aValue )
+{
+    switch( aValue )
+    {
+    case PAD_PROP::NONE:           return types::PadFabricationProperty::PFP_NONE;
+    case PAD_PROP::BGA:            return types::PadFabricationProperty::PFP_BGA;
+    case PAD_PROP::FIDUCIAL_GLBL:  return types::PadFabricationProperty::PFP_FIDUCIAL_GLOBAL;
+    case PAD_PROP::FIDUCIAL_LOCAL: return types::PadFabricationProperty::PFP_FIDUCIAL_LOCAL;
+    case PAD_PROP::TESTPOINT:      return types::PadFabricationProperty::PFP_TESTPOINT;
+    case PAD_PROP::HEATSINK:       return types::PadFabricationProperty::PFP_HEATSINK;
+    case PAD_PROP::CASTELLATED:    return types::PadFabricationProperty::PFP_CASTELLATED;
+    case PAD_PROP::MECHANICAL:     return types::PadFabricationProperty::PFP_MECHANICAL;
+    case PAD_PROP::PRESSFIT:       return types::PadFabricationProperty::PFP_PRESSFIT;
+
+    default:
+        wxCHECK_MSG( false, types::PadFabricationProperty::PFP_UNKNOWN,
+                     "Unhandled case in ToProtoEnum<PAD_PROP>" );
+    }
+}
+
+
+template<>
 types::ViaType ToProtoEnum( VIATYPE aValue )
 {
     switch( aValue )
@@ -362,6 +407,39 @@ ZONE_FILL_MODE FromProtoEnum( types::ZoneFillMode aValue )
 
 
 template<>
+types::ZoneCornerSmoothingMode ToProtoEnum( ZONE_SETTINGS::CORNER_SMOOTHING aValue )
+{
+    switch( aValue )
+    {
+    case ZONE_SETTINGS::CORNER_SMOOTHING::NO_SMOOTHING:    return types::ZoneCornerSmoothingMode::ZCSM_NONE;
+    case ZONE_SETTINGS::CORNER_SMOOTHING::CHAMFER: return types::ZoneCornerSmoothingMode::ZCSM_CHAMFER;
+    case ZONE_SETTINGS::CORNER_SMOOTHING::FILLET:  return types::ZoneCornerSmoothingMode::ZCSM_FILLET;
+
+    default:
+        wxCHECK_MSG( false, types::ZoneCornerSmoothingMode::ZCSM_UNKNOWN,
+                     "Unhandled case in ToProtoEnum<ZONE_SETTINGS::CORNER_SMOOTHING>" );
+    }
+}
+
+
+template<>
+ZONE_SETTINGS::CORNER_SMOOTHING FromProtoEnum( types::ZoneCornerSmoothingMode aValue )
+{
+    switch( aValue )
+    {
+    case types::ZoneCornerSmoothingMode::ZCSM_UNKNOWN:
+    case types::ZoneCornerSmoothingMode::ZCSM_NONE:     return ZONE_SETTINGS::CORNER_SMOOTHING::NO_SMOOTHING;
+    case types::ZoneCornerSmoothingMode::ZCSM_CHAMFER:  return ZONE_SETTINGS::CORNER_SMOOTHING::CHAMFER;
+    case types::ZoneCornerSmoothingMode::ZCSM_FILLET:   return ZONE_SETTINGS::CORNER_SMOOTHING::FILLET;
+
+    default:
+        wxCHECK_MSG( false, ZONE_SETTINGS::CORNER_SMOOTHING::NO_SMOOTHING,
+                     "Unhandled case in FromProtoEnum<ZoneCornerSmoothingMode>" );
+    }
+}
+
+
+template<>
 types::ZoneBorderStyle ToProtoEnum( ZONE_BORDER_DISPLAY_STYLE aValue )
 {
     switch( aValue )
@@ -446,36 +524,36 @@ PLACEMENT_SOURCE_T FromProtoEnum( types::PlacementRuleSourceType aValue )
 
 
 template<>
-types::TeardropType ToProtoEnum( TEARDROP_TYPE aValue )
+types::ZoneTeardropType ToProtoEnum( TEARDROP_TYPE aValue )
 {
     switch( aValue )
     {
-    case TEARDROP_TYPE::TD_NONE:        return types::TeardropType::TDT_NONE;
-    case TEARDROP_TYPE::TD_UNSPECIFIED: return types::TeardropType::TDT_UNSPECIFIED;
-    case TEARDROP_TYPE::TD_VIAPAD:      return types::TeardropType::TDT_VIA_PAD;
-    case TEARDROP_TYPE::TD_TRACKEND:    return types::TeardropType::TDT_TRACK_END;
+    case TEARDROP_TYPE::TD_NONE:        return types::ZoneTeardropType::ZTDT_NONE;
+    case TEARDROP_TYPE::TD_UNSPECIFIED: return types::ZoneTeardropType::ZTDT_UNSPECIFIED;
+    case TEARDROP_TYPE::TD_VIAPAD:      return types::ZoneTeardropType::ZTDT_VIA_PAD;
+    case TEARDROP_TYPE::TD_TRACKEND:    return types::ZoneTeardropType::ZTDT_TRACK_END;
 
     default:
-        wxCHECK_MSG( false, types::TeardropType::TDT_UNKNOWN,
+        wxCHECK_MSG( false, types::ZoneTeardropType::ZTDT_UNKNOWN,
                      "Unhandled case in ToProtoEnum<TEARDROP_TYPE>");
     }
 }
 
 
 template<>
-TEARDROP_TYPE FromProtoEnum( types::TeardropType aValue )
+TEARDROP_TYPE FromProtoEnum( types::ZoneTeardropType aValue )
 {
     switch( aValue )
     {
-    case types::TeardropType::TDT_UNKNOWN:
-    case types::TeardropType::TDT_NONE:         return TEARDROP_TYPE::TD_NONE;
-    case types::TeardropType::TDT_UNSPECIFIED:  return TEARDROP_TYPE::TD_UNSPECIFIED;
-    case types::TeardropType::TDT_VIA_PAD:      return TEARDROP_TYPE::TD_VIAPAD;
-    case types::TeardropType::TDT_TRACK_END:    return TEARDROP_TYPE::TD_TRACKEND;
+    case types::ZoneTeardropType::ZTDT_UNKNOWN:
+    case types::ZoneTeardropType::ZTDT_NONE:         return TEARDROP_TYPE::TD_NONE;
+    case types::ZoneTeardropType::ZTDT_UNSPECIFIED:  return TEARDROP_TYPE::TD_UNSPECIFIED;
+    case types::ZoneTeardropType::ZTDT_VIA_PAD:      return TEARDROP_TYPE::TD_VIAPAD;
+    case types::ZoneTeardropType::ZTDT_TRACK_END:    return TEARDROP_TYPE::TD_TRACKEND;
 
     default:
         wxCHECK_MSG( false, TEARDROP_TYPE::TD_NONE,
-                     "Unhandled case in FromProtoEnum<types::ZoneHatchBorderMode>" );
+                     "Unhandled case in FromProtoEnum<types::ZoneTeardropType>" );
     }
 }
 
@@ -825,6 +903,38 @@ BOARD_STACKUP_ITEM_TYPE FromProtoEnum( BoardStackupLayerType aValue )
     default:
         wxCHECK_MSG( false, BS_ITEM_TYPE_UNDEFINED,
                      "Unhandled case in FromProtoEnum<BoardStackupLayerType>" );
+    }
+}
+
+
+template<>
+BoardEdgeConnectorType ToProtoEnum( BS_EDGE_CONNECTOR_CONSTRAINTS aValue )
+{
+    switch( aValue )
+    {
+    case BS_EDGE_CONNECTOR_NONE:     return BoardEdgeConnectorType::BECT_NONE;
+    case BS_EDGE_CONNECTOR_IN_USE:   return BoardEdgeConnectorType::BECT_PLAIN;
+    case BS_EDGE_CONNECTOR_BEVELLED: return BoardEdgeConnectorType::BECT_BEVELED;
+
+    default:
+        wxCHECK_MSG( false, BoardEdgeConnectorType::BECT_UNKNOWN,
+                     "Unhandled case in ToProtoEnum<BS_EDGE_CONNECTOR_CONSTRAINTS>" );
+    }
+}
+
+
+template<>
+BS_EDGE_CONNECTOR_CONSTRAINTS FromProtoEnum( BoardEdgeConnectorType aValue )
+{
+    switch( aValue )
+    {
+    case BoardEdgeConnectorType::BECT_NONE:    return BS_EDGE_CONNECTOR_NONE;
+    case BoardEdgeConnectorType::BECT_PLAIN:   return BS_EDGE_CONNECTOR_IN_USE;
+    case BoardEdgeConnectorType::BECT_BEVELED: return BS_EDGE_CONNECTOR_BEVELLED;
+
+    default:
+        wxCHECK_MSG( false, BS_EDGE_CONNECTOR_NONE,
+                     "Unhandled case in FromProtoEnum<BoardEdgeConnectorType>" );
     }
 }
 

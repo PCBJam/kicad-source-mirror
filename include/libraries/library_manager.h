@@ -23,6 +23,7 @@
 
 #include <future>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 
 #include <kicommon.h>
@@ -149,6 +150,9 @@ public:
 
     virtual std::optional<LIB_STATUS> LoadOne( LIB_DATA* aLib ) = 0;
 
+    /// Validates that a library is loadable.  May not necessarily load the library!
+    virtual std::optional<LIB_STATUS> CheckLibrary( LIB_DATA* aLib ) { return LoadOne( aLib ); }
+
     /// Returns async load progress between 0.0 and 1.0, or nullopt if load is not in progress
     std::optional<float> AsyncLoadProgress() const;
 
@@ -184,7 +188,7 @@ public:
 
     virtual bool SupportsConfigurationDialog( const wxString& aNickname ) const { return false; }
 
-    virtual void ShowConfigurationDialog( const wxString& aNickname, wxWindow* aParent ) const {};
+    virtual int ShowConfigurationDialog( const wxString& aNickname, wxWindow* aParent ) const { return wxID_CANCEL; }
 
     virtual std::optional<LIBRARY_ERROR> LibraryError( const wxString& aNickname ) const;
 
@@ -229,6 +233,15 @@ protected:
     virtual LIBRARY_RESULT<IO_BASE*> createPlugin( const LIBRARY_TABLE_ROW* row ) = 0;
 
     virtual IO_BASE* plugin( const LIB_DATA* aRow ) = 0;
+
+    /// Serializes access to a library's shared plugin instance so its single mutable cache is not
+    /// raced by concurrent enumerate/load/save/delete calls from the loader pool, preview panels
+    /// and tree refreshes. Keyed by nickname, a safe over-approximation of the real resource (the
+    /// plugin instance): sharing one mutex across two distinct resources can only over-serialize,
+    /// never under-protect. Static because global-library plugins are shared process-wide.
+    /// Recursive because database/http libraries resolve references back through the adapter into
+    /// other plugins' LoadSymbol paths while already holding their own mutex.
+    static std::recursive_mutex& pluginMutex( const wxString& aNickname );
 
     LIBRARY_MANAGER& m_manager;
 
@@ -381,11 +394,13 @@ public:
     /**
      * Return true if a library table row was added by the Plugin and Content Manager.
      *
-     * PCM-managed rows are identified by the unexpanded URI template referencing the
-     * versioned 3RD_PARTY env var (as produced by PCM_LIB_TRAVERSER). Matching on the
-     * URI template, rather than on the expanded absolute path, prevents false positives
-     * when a user library uses a different env var whose expanded path is a descendant
-     * of the 3RD_PARTY directory (e.g. KICAD_USER_LIB pointing inside KICAD10_3RD_PARTY).
+     * PCM-managed rows are identified by the full unexpanded URI template emitted by
+     * PCM_LIB_TRAVERSER, namely ${KICADn_3RD_PARTY}/<category>/<pkgid>/<library> where
+     * <category> is one of the PCM content folders and <library> carries the matching
+     * library extension. Matching the full template, rather than the expanded absolute
+     * path or the env-var prefix alone, prevents false positives both when a user library
+     * uses a different env var whose expanded path is a descendant of the 3RD_PARTY
+     * directory and when a user repurposes KICADn_3RD_PARTY for their own libraries.
      */
     static bool IsPcmManagedRow( const LIBRARY_TABLE_ROW& aRow );
 

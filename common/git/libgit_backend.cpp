@@ -82,6 +82,21 @@ static std::string getFormattedCommitDate( const git_time& aTime )
 void LIBGIT_BACKEND::Init()
 {
     git_libgit2_init();
+
+    // libgit2 sets no timeout of its own, so an unreachable remote parks a fetch in connect()
+    // or recv() for as long as the OS allows.  SSH remotes stay bounded only by libssh2.
+
+#if ( LIBGIT2_VER_MAJOR > 1 ) || ( LIBGIT2_VER_MAJOR == 1 && LIBGIT2_VER_MINOR >= 7 )
+    constexpr int connectTimeoutMs = 10000;
+    constexpr int transferTimeoutMs = 30000;
+
+    if( git_libgit2_opts( GIT_OPT_SET_SERVER_CONNECT_TIMEOUT, connectTimeoutMs ) != GIT_OK
+            || git_libgit2_opts( GIT_OPT_SET_SERVER_TIMEOUT, transferTimeoutMs ) != GIT_OK )
+    {
+        wxLogTrace( traceGit, "LIBGIT_BACKEND::Init(): could not set server timeouts: %s",
+                    KIGIT_COMMON::GetLastGitError() );
+    }
+#endif
 }
 
 
@@ -160,6 +175,7 @@ bool LIBGIT_BACKEND::Clone( GIT_CLONE_HANDLER* aHandler )
     cloneOptions.fetch_opts.callbacks.transfer_progress = transfer_progress_cb;
     cloneOptions.fetch_opts.callbacks.credentials = credentials_cb;
     cloneOptions.fetch_opts.callbacks.payload = aHandler;
+    cloneOptions.fetch_opts.proxy_opts.type = GIT_PROXY_AUTO;
 
     aHandler->TestedTypes() = 0;
     aHandler->ResetNextKey();
@@ -503,12 +519,16 @@ PushResult LIBGIT_BACKEND::Push( GIT_PUSH_HANDLER* aHandler, bool aForce )
     remoteCallbacks.push_transfer_progress = push_transfer_progress_cb;
     remoteCallbacks.credentials = credentials_cb;
     remoteCallbacks.payload = aHandler;
+
+    git_proxy_options proxyOpts;
+    git_proxy_init_options( &proxyOpts, GIT_PROXY_OPTIONS_VERSION );
+    proxyOpts.type = GIT_PROXY_AUTO;
     common->SetCancelled( false );
 
     aHandler->TestedTypes() = 0;
     aHandler->ResetNextKey();
 
-    if( git_remote_connect( remote, GIT_DIRECTION_PUSH, &remoteCallbacks, nullptr, nullptr ) )
+    if( git_remote_connect( remote, GIT_DIRECTION_PUSH, &remoteCallbacks, &proxyOpts, nullptr ) )
     {
         aHandler->AddErrorString( wxString::Format( _( "Could not connect to remote: %s" ),
                                                     KIGIT_COMMON::GetLastGitError() ) );
@@ -518,6 +538,7 @@ PushResult LIBGIT_BACKEND::Push( GIT_PUSH_HANDLER* aHandler, bool aForce )
     git_push_options pushOptions;
     git_push_init_options( &pushOptions, GIT_PUSH_OPTIONS_VERSION );
     pushOptions.callbacks = remoteCallbacks;
+    pushOptions.proxy_opts.type = GIT_PROXY_AUTO;
 
     git_reference* head = nullptr;
 
@@ -1075,12 +1096,18 @@ bool LIBGIT_BACKEND::PerformFetch( GIT_PULL_HANDLER* aHandler, bool aSkipLock )
     remoteCallbacks.transfer_progress = transfer_progress_cb;
     remoteCallbacks.credentials = credentials_cb;
     remoteCallbacks.payload = aHandler;
-    aHandler->GetCommon()->SetCancelled( false );
+
+    git_proxy_options proxyOpts;
+    git_proxy_init_options( &proxyOpts, GIT_PROXY_OPTIONS_VERSION );
+    proxyOpts.type = GIT_PROXY_AUTO;
+
+    // Do not SetCancelled( false ) here.  A close or a preference change can raise the flag
+    // after this fetch starts, and clearing it would strand the caller on the transfer.
 
     aHandler->TestedTypes() = 0;
     aHandler->ResetNextKey();
 
-    if( git_remote_connect( remote, GIT_DIRECTION_FETCH, &remoteCallbacks, nullptr, nullptr ) )
+    if( git_remote_connect( remote, GIT_DIRECTION_FETCH, &remoteCallbacks, &proxyOpts, nullptr ) )
     {
         wxString errorMsg = KIGIT_COMMON::GetLastGitError();
         wxLogTrace( traceGit, "GIT_PULL_HANDLER::PerformFetch() - Failed to connect to remote: %s", errorMsg );
@@ -1544,6 +1571,79 @@ PullResult LIBGIT_BACKEND::handleMerge( GIT_PULL_HANDLER* aHandler,
 }
 
 
+static PullResult rebaseOnto( GIT_PULL_HANDLER* aHandler, git_repository* aRepo, const git_annotated_commit* aOnto )
+{
+    git_signature* signature = nullptr;
+
+    if( git_signature_default( &signature, aRepo ) != GIT_OK )
+    {
+        aHandler->AddErrorString( _( "Could not create a commit signature.  Set user.name and user.email in your "
+                                     "git configuration." ) );
+        return PullResult::Error;
+    }
+
+    KIGIT::GitSignaturePtr signaturePtr( signature );
+    git_rebase_options     rebase_opts;
+    git_rebase_init_options( &rebase_opts, GIT_REBASE_OPTIONS_VERSION );
+    git_rebase* rebase = nullptr;
+
+    if( git_rebase_init( &rebase, aRepo, nullptr, aOnto, nullptr, &rebase_opts ) != GIT_OK )
+    {
+        aHandler->AddErrorString( wxString::Format( _( "Rebase failed to start: %s" ),
+                                                    KIGIT_COMMON::GetLastGitError() ) );
+        return PullResult::Error;
+    }
+
+    KIGIT::GitRebasePtr   rebasePtr( rebase );
+    git_rebase_operation* op = nullptr;
+    int                   nextResult = GIT_OK;
+
+    while( ( nextResult = git_rebase_next( &op, rebase ) ) == GIT_OK )
+    {
+        git_oid commit_oid;
+        int     commitResult = git_rebase_commit( &commit_oid, rebase, nullptr, signature, nullptr, nullptr );
+
+        // Upstream already has this change, so replaying it would be an empty commit
+        if( commitResult == GIT_EAPPLIED )
+            continue;
+
+        if( commitResult != GIT_OK )
+        {
+            wxString gitError = KIGIT_COMMON::GetLastGitError();
+            git_rebase_abort( rebase );
+
+            if( commitResult == GIT_EUNMERGED )
+            {
+                aHandler->AddErrorString( _( "The rebase ran into conflicts.  This is best resolved from a "
+                                             "git command line." ) );
+                return PullResult::Conflict;
+            }
+
+            aHandler->AddErrorString( wxString::Format( _( "Rebase commit failed: %s" ), gitError ) );
+            return PullResult::Error;
+        }
+    }
+
+    if( nextResult != GIT_ITEROVER )
+    {
+        wxString gitError = KIGIT_COMMON::GetLastGitError();
+        git_rebase_abort( rebase );
+        aHandler->AddErrorString( wxString::Format( _( "Rebase failed: %s" ), gitError ) );
+        return PullResult::Error;
+    }
+
+    if( git_rebase_finish( rebase, signature ) != GIT_OK )
+    {
+        wxString gitError = KIGIT_COMMON::GetLastGitError();
+        git_rebase_abort( rebase );
+        aHandler->AddErrorString( wxString::Format( _( "Rebase finish failed: %s" ), gitError ) );
+        return PullResult::Error;
+    }
+
+    return PullResult::Success;
+}
+
+
 PullResult LIBGIT_BACKEND::handleRebase( GIT_PULL_HANDLER* aHandler,
                                          const git_annotated_commit** aMergeHeads,
                                          size_t aMergeHeadsCount )
@@ -1557,43 +1657,7 @@ PullResult LIBGIT_BACKEND::handleRebase( GIT_PULL_HANDLER* aHandler,
         return PullResult::DirtyWorkdir;
     }
 
-    git_rebase_options rebase_opts;
-    git_rebase_init_options( &rebase_opts, GIT_REBASE_OPTIONS_VERSION );
-
-    git_rebase* rebase = nullptr;
-
-    if( git_rebase_init( &rebase, aHandler->GetRepo(), nullptr, aMergeHeads[0], nullptr, &rebase_opts ) )
-    {
-        wxString errorMsg = KIGIT_COMMON::GetLastGitError();
-        aHandler->AddErrorString( wxString::Format( _( "Rebase failed to start: %s" ), errorMsg ) );
-        return PullResult::MergeFailed;
-    }
-
-    KIGIT::GitRebasePtr rebasePtr( rebase );
-
-    while( true )
-    {
-        git_rebase_operation* op = nullptr;
-
-        if( git_rebase_next( &op, rebase ) != 0 )
-            break;
-
-        if( git_rebase_commit( nullptr, rebase, nullptr, nullptr, nullptr, nullptr ) )
-        {
-            wxString errorMsg = KIGIT_COMMON::GetLastGitError();
-            aHandler->AddErrorString( wxString::Format( _( "Rebase commit failed: %s" ), errorMsg ) );
-            return PullResult::MergeFailed;
-        }
-    }
-
-    if( git_rebase_finish( rebase, nullptr ) )
-    {
-        wxString errorMsg = KIGIT_COMMON::GetLastGitError();
-        aHandler->AddErrorString( wxString::Format( _( "Rebase finish failed: %s" ), errorMsg ) );
-        return PullResult::MergeFailed;
-    }
-
-    return PullResult::Success;
+    return rebaseOnto( aHandler, aHandler->GetRepo(), aMergeHeads[0] );
 }
 
 
@@ -1699,67 +1763,8 @@ PullResult LIBGIT_BACKEND::RebaseOntoUpstream( GIT_PULL_HANDLER* aHandler )
     }
 
     KIGIT::GitAnnotatedCommitPtr ontoPtr( onto );
-    git_signature*               signature = nullptr;
 
-    if( git_signature_default( &signature, repo ) != GIT_OK )
-    {
-        aHandler->AddErrorString( _( "Could not create a commit signature.  Set user.name and "
-                                     "user.email in your git configuration." ) );
-        return PullResult::Error;
-    }
-
-    KIGIT::GitSignaturePtr signaturePtr( signature );
-    git_rebase_options     rebase_opts;
-    git_rebase_init_options( &rebase_opts, GIT_REBASE_OPTIONS_VERSION );
-    git_rebase* rebase = nullptr;
-
-    if( git_rebase_init( &rebase, repo, nullptr, onto, nullptr, &rebase_opts ) != GIT_OK )
-    {
-        aHandler->AddErrorString(
-                wxString::Format( _( "Rebase failed to start: %s" ), KIGIT_COMMON::GetLastGitError() ) );
-        return PullResult::Error;
-    }
-
-    KIGIT::GitRebasePtr   rebasePtr( rebase );
-    git_rebase_operation* op = nullptr;
-
-    while( git_rebase_next( &op, rebase ) == GIT_OK )
-    {
-        git_index* index = nullptr;
-
-        if( git_repository_index( &index, repo ) == GIT_OK )
-        {
-            KIGIT::GitIndexPtr indexPtr( index );
-
-            if( git_index_has_conflicts( index ) )
-            {
-                git_rebase_abort( rebase );
-                aHandler->AddErrorString( _( "The rebase ran into conflicts.  This is best "
-                                             "resolved from a git command line." ) );
-                return PullResult::Conflict;
-            }
-        }
-
-        git_oid commit_oid;
-
-        if( git_rebase_commit( &commit_oid, rebase, nullptr, signature, nullptr, nullptr ) != GIT_OK )
-        {
-            git_rebase_abort( rebase );
-            aHandler->AddErrorString( _( "The rebase ran into conflicts.  This is best "
-                                         "resolved from a git command line." ) );
-            return PullResult::Conflict;
-        }
-    }
-
-    if( git_rebase_finish( rebase, signature ) != GIT_OK )
-    {
-        git_rebase_abort( rebase );
-        aHandler->AddErrorString(
-                wxString::Format( _( "Rebase finish failed: %s" ), KIGIT_COMMON::GetLastGitError() ) );
-        return PullResult::Error;
-    }
-
-    return PullResult::Success;
+    return rebaseOnto( aHandler, repo, onto );
 }
 
 

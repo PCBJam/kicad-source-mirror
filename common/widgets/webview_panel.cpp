@@ -23,6 +23,9 @@
 #include <tool/tool_base.h>
 
 #include <widgets/webview_panel.h>
+
+#if wxUSE_WEBVIEW
+
 #include <wx/evtloop.h>
 #include <wx/sizer.h>
 #include <wx/webviewarchivehandler.h>
@@ -342,3 +345,52 @@ void WEBVIEW_PANEL::OnError( wxWebViewEvent& aEvt )
     m_loadError = true;
     wxLogTrace( "webview", "WebView error: %s", aEvt.GetString() );
 }
+
+#else  // !wxUSE_WEBVIEW
+
+// No webview backend available (e.g. WASM / wxUSE_WEBVIEW=0). Provide stub
+// implementations so the panel compiles and links as an empty panel; the
+// remote-symbol feature that hosts it is non-functional without a browser engine.
+
+WEBVIEW_PANEL::WEBVIEW_PANEL( wxWindow* aParent, wxWindowID aId, const wxPoint& aPos, const wxSize& aSize,
+                              const int aStyle, TOOL_MANAGER* aToolManager, TOOL_BASE* aTool ) :
+        wxPanel( aParent, aId, aPos, aSize, aStyle ),
+        m_initialized( false ),
+        m_handleExternalLinks( false ),
+        m_loadError( false ),
+        m_loadedEventBound( false ),
+        m_toolManager( aToolManager ),
+        m_tool( aTool )
+{
+}
+
+WEBVIEW_PANEL::~WEBVIEW_PANEL()
+{
+}
+
+void WEBVIEW_PANEL::BindLoadedEvent()
+{
+}
+
+void WEBVIEW_PANEL::LoadURL( const wxString& aURL )
+{
+    (void) aURL;
+}
+
+void WEBVIEW_PANEL::SetPage( const wxString& aHtmlContent )
+{
+    (void) aHtmlContent;
+}
+
+bool WEBVIEW_PANEL::AddMessageHandler( const wxString& aName, MESSAGE_HANDLER aHandler )
+{
+    (void) aName;
+    (void) aHandler;
+    return false;
+}
+
+void WEBVIEW_PANEL::ClearMessageHandlers()
+{
+}
+
+#endif // wxUSE_WEBVIEW

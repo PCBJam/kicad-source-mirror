@@ -22,12 +22,15 @@ set( KIAPI_PROTO_SRCS
     common/envelope.proto
 
     common/types/base_types.proto
+    common/types/embedded_files.proto
     common/types/enums.proto
     common/types/project_settings.proto
+    common/types/variants.proto
 
     common/commands/base_commands.proto
     common/commands/editor_commands.proto
     common/commands/project_commands.proto
+    common/commands/variant_commands.proto
 
     board/board.proto
     board/board_commands.proto
@@ -60,8 +63,14 @@ add_custom_command( COMMAND ${CMAKE_COMMAND} -E make_directory ${KIAPI_CPP_BASEP
     OUTPUT ${KIAPI_CPP_SRCS} ${KIAPI_CPP_HEADERS}
     )
 
-# kiapi must be a shared DLL because the protobuf messages can only be initialized once
-add_library( kiapi SHARED
+# kiapi must be a shared DLL because the protobuf messages can only be initialized once.
+# WASM has no shared-library support, so it links kiapi statically (single binary) instead.
+if( EMSCRIPTEN )
+    set( _KIAPI_TYPE STATIC )
+else()
+    set( _KIAPI_TYPE SHARED )
+endif()
+add_library( kiapi ${_KIAPI_TYPE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/import_export.h
     ${KIAPI_CPP_SRCS}
     ${KIAPI_CPP_HEADERS}

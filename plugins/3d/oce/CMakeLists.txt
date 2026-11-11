@@ -12,7 +12,23 @@
 # export WXTRACE="PLUGIN_OCE"
 #
 
-add_library( s3d_plugin_oce MODULE
+set( S3D_PLUGIN_OCE_TYPE MODULE )
+
+if( EMSCRIPTEN )
+    # WASM has no dlopen: build as a static archive consumed by the registry in
+    # 3d-viewer/3d_cache/pcbjam_static_3d_plugins.cpp.  oce.cpp is the single TU
+    # holding every flat C export (loadmodel.cpp is untouched — its OCCT includes
+    # must not see the renames); prefix oce3d_* to avoid collisions.
+    # FILE_DATA renamed for the same ODR reason as in vrml/CMakeLists.txt: both
+    # plugin TUs define a different `struct FILE_DATA` with an inline ctor; the
+    # static link dedupes the linkonce ctor and vrml's list initialized oce's
+    # (so .step never entered the extension map).
+    set( S3D_PLUGIN_OCE_TYPE STATIC )
+    set_source_files_properties( oce.cpp PROPERTIES COMPILE_DEFINITIONS
+        "GetKicadPluginClass=oce3d_GetKicadPluginClass;GetClassVersion=oce3d_GetClassVersion;CheckClassVersion=oce3d_CheckClassVersion;GetKicadPluginName=oce3d_GetKicadPluginName;GetPluginVersion=oce3d_GetPluginVersion;GetNExtensions=oce3d_GetNExtensions;GetModelExtension=oce3d_GetModelExtension;GetNFilters=oce3d_GetNFilters;GetFileFilter=oce3d_GetFileFilter;CanRender=oce3d_CanRender;Load=oce3d_Load;FILE_DATA=OCE3D_FILE_DATA" )
+endif()
+
+add_library( s3d_plugin_oce ${S3D_PLUGIN_OCE_TYPE}
         oce.cpp
         loadmodel.cpp
         )

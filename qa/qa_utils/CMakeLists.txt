@@ -24,6 +24,8 @@ set( QA_UTIL_COMMON_SRC
     utility_program.cpp
     error_handlers.cpp
 
+    env_var_utils.cpp
+    file_utils.cpp
     uuid_test_utils.cpp
 
     geometry/geometry.cpp
@@ -58,6 +60,7 @@ target_link_libraries( qa_utils
     Boost::unit_test_framework
     ${wxWidgets_LIBRARIES}
     ${LIBBOOST_UNIT_TEST_LIB}
+    ZLIB::ZLIB
 )
 
 # Pass in the default data location

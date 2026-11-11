@@ -302,6 +302,14 @@ bool PL_EDITOR_FRAME::InsertDrawingSheetFile( const wxString& aFullFileName )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Implemented in the wasm layer (wasm/bindings/pl_editor_embind.cpp): notifies the
+// web app after a successful save so it can persist the MEMFS bytes. Same pattern
+// as kicadCollabOnModify in pl_editor_frame.cpp.
+extern "C" void kicadCollabOnSave( const char* aPath );
+#endif
+
+
 bool PL_EDITOR_FRAME::SaveDrawingSheetFile( const wxString& aFullFileName )
 {
     if( !aFullFileName.IsEmpty() )
@@ -331,6 +339,11 @@ bool PL_EDITOR_FRAME::SaveDrawingSheetFile( const wxString& aFullFileName )
 
         GetScreen()->SetContentModified( false );
         UpdateTitleAndInfo();
+
+#ifdef __EMSCRIPTEN__
+        kicadCollabOnSave( aFullFileName.utf8_str() );
+#endif
+
         return true;
     }
 

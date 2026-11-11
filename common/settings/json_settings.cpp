@@ -24,6 +24,7 @@
 #include <utility>
 #include <sstream>
 
+#include <kiplatform/io.h>
 #include <locale_io.h>
 #include <gal/color4d.h>
 #include <settings/json_settings.h>
@@ -360,18 +361,27 @@ bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
 
     m_modified = false;
 
-    // If we migrated, clean up the legacy file (with no extension)
+    // If we migrated, clean up the legacy file (with no extension). Save the migrated
+    // contents FIRST so that if the save fails we still have the legacy file on disk to
+    // fall back to -- otherwise a crash mid-migration leaves the user with neither copy.
     if( m_writeFile && ( legacy_migrated || migrated ) )
     {
-        if( legacy_migrated && m_deleteLegacyAfterMigration && !wxRemoveFile( path.GetFullPath() ) )
-        {
-            wxLogTrace( traceSettings, wxT( "Warning: could not remove legacy file %s" ),
-                        path.GetFullPath() );
-        }
-
-        // And write-out immediately so that we don't lose data if the program later crashes.
         if( m_deleteLegacyAfterMigration )
-            SaveToFile( aDirectory, true );
+        {
+            bool savedMigrated = SaveToFile( aDirectory, true );
+
+            if( savedMigrated && legacy_migrated && !wxRemoveFile( path.GetFullPath() ) )
+            {
+                wxLogTrace( traceSettings, wxT( "Warning: could not remove legacy file %s" ),
+                            path.GetFullPath() );
+            }
+            else if( !savedMigrated )
+            {
+                wxLogTrace( traceSettings,
+                            wxT( "Migrated save of %s failed; leaving legacy file intact" ),
+                            GetFullFilename() );
+            }
+        }
     }
 
     return success;
@@ -465,16 +475,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
         return false;
     }
 
-    bool modified = false;
-
-    for( NESTED_SETTINGS* settings : m_nested_settings )
-    {
-        wxCHECK2( settings, continue );
-
-        modified |= settings->SaveToFile();
-    }
-
-    modified |= Store();
+    bool modified = flushToStore();
 
     if( !modified && !aForce && path.FileExists() )
     {
@@ -492,35 +493,46 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
 
     wxLogTrace( traceSettings, wxT( "Saving %s" ), GetFullFilename() );
 
-    LOCALE_IO dummy;
     bool success = true;
-
-    nlohmann::json toSave = m_internals->m_original;
-
-
-    for( PARAM_BASE* param : m_params )
-    {
-        if( param->ClearUnknownKeys() )
-        {
-            nlohmann::json_pointer p = JSON_SETTINGS_INTERNALS::PointerFromString( param->GetJsonPath() );
-
-            toSave[p] = nlohmann::json( {} );
-        }
-    }
-
-    toSave.update( m_internals->begin(), m_internals->end(), /* merge_objects = */ true );
 
     try
     {
-        std::stringstream buffer;
-        buffer << std::setw( 2 ) << toSave << std::endl;
+        std::string  payload = formatFileContents();
+        wxString     writeError;
 
-        wxFFileOutputStream fileStream( path.GetFullPath(), "wb" );
-
-        if( !fileStream.IsOk()
-                || !fileStream.WriteAll( buffer.str().c_str(), buffer.str().size() ) )
+        // Last-chance skip for the case where the dirty heuristic fired but the serialized payload
+        // still equals the on-disk bytes (e.g. key reordering or normalization). Avoids bumping the
+        // project file timestamps for a no-op rewrite; see #24402. A genuine change yields a
+        // differing payload and is always written.
+        if( !aForce && path.FileExists() )
         {
-            wxLogTrace( traceSettings, wxT( "Warning: could not save %s" ), GetFullFilename() );
+            std::ifstream existing( path.GetFullPath().fn_str(), std::ios::in | std::ios::binary );
+
+            if( existing )
+            {
+                std::string current( ( std::istreambuf_iterator<char>( existing ) ),
+                                     std::istreambuf_iterator<char>() );
+
+                // Only trust an equal comparison from a clean read; on any read error fall through
+                // and write, preferring data safety over avoiding a rewrite.
+                if( !existing.bad() && current == payload )
+                {
+                    wxLogTrace( traceSettings,
+                                wxT( "%s on-disk contents match payload, skipping write" ),
+                                GetFullFilename() );
+
+                    m_modified = false;
+
+                    return false;
+                }
+            }
+        }
+
+        if( !KIPLATFORM::IO::AtomicWriteFile( path.GetFullPath(), payload.data(), payload.size(),
+                                              &writeError ) )
+        {
+            wxLogTrace( traceSettings, wxT( "Warning: could not save %s: %s" ), GetFullFilename(),
+                        writeError );
             success = false;
         }
     }
@@ -540,6 +552,45 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
         m_modified = false;
 
     return success;
+}
+
+
+bool JSON_SETTINGS::flushToStore()
+{
+    bool modified = false;
+
+    for( NESTED_SETTINGS* settings : m_nested_settings )
+    {
+        wxCHECK2( settings, continue );
+
+        modified |= settings->SaveToFile();
+    }
+
+    modified |= Store();
+
+    return modified;
+}
+
+
+std::string JSON_SETTINGS::formatFileContents()
+{
+    LOCALE_IO dummy;
+
+    nlohmann::json toSave = m_internals->m_original;
+
+    for( PARAM_BASE* param : m_params )
+    {
+        if( param->ClearUnknownKeys() )
+        {
+            nlohmann::json_pointer p = JSON_SETTINGS_INTERNALS::PointerFromString( param->GetJsonPath() );
+
+            toSave[p] = nlohmann::json::object();
+        }
+    }
+
+    toSave.update( m_internals->begin(), m_internals->end(), /* merge_objects = */ true );
+
+    return toSave.dump( 2 ) + '\n';
 }
 
 
@@ -933,6 +984,11 @@ void JSON_SETTINGS::ReleaseNestedSettings( NESTED_SETTINGS* aSettings )
     if( it != m_nested_settings.end() )
     {
         wxLogTrace( traceSettings, wxT( "Flush and release %s" ), ( *it )->GetFilename() );
+
+        // Flush the nested state into the parent and propagate genuine dirtiness so a later parent
+        // save persists it; the nested object is gone by then, so this is the parent's only signal.
+        // Default-fill of params absent from an older file no longer reports modified, so releasing
+        // an unchanged nested setting on editor close does not falsely dirty the parent (#24402).
         m_modified |= ( *it )->SaveToFile();
         m_nested_settings.erase( it );
     }

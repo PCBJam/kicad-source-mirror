@@ -220,7 +220,7 @@ private:
     int m_nextPublicKey;
     bool m_secretFetched;
 
-    std::atomic<bool> m_cancel;  // Set to true when the user cancels an operation
+    std::atomic<bool> m_cancel{ false };  // Set to true when the user cancels an operation
 
     // Create a dummy flag to tell if we have tested ssh agent credentials separately
     // from the ssh key credentials
@@ -241,5 +241,19 @@ extern "C" APIEXPORT int fetchhead_foreach_cb( const char*, const char*,
                                                const git_oid* aOID, unsigned int aIsMerge, void* aPayload );
 extern "C" APIEXPORT int credentials_cb( git_cred** aOut, const char* aUrl, const char* aUsername,
                                          unsigned int aAllowedTypes, void* aPayload );
+
+
+namespace KIGIT
+{
+
+/**
+ * Report whether an SSH private key is protected by a passphrase.
+ *
+ * @p aKeyText is the whole contents of the private key file. Anything not
+ * recognised as a private key is reported as unencrypted.
+ */
+APIEXPORT bool IsPrivateKeyEncrypted( const wxString& aKeyText );
+
+} // namespace KIGIT
 
 #endif // _GIT_COMMON_H_

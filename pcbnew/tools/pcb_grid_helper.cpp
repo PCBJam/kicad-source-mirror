@@ -166,6 +166,7 @@ PCB_GRID_HELPER::PCB_GRID_HELPER( TOOL_MANAGER* aToolMgr, MAGNETIC_SETTINGS* aMa
     KIGFX::VIEW*            view = m_toolMgr->GetView();
     KIGFX::RENDER_SETTINGS* settings = view->GetPainter()->GetSettings();
     KIGFX::COLOR4D          auxItemsColor = settings->GetLayerColor( LAYER_AUX_ITEMS );
+    KIGFX::COLOR4D          anchorColor = settings->GetLayerColor( LAYER_ANCHOR );
 
     m_viewAxis.SetSize( 20000 );
     m_viewAxis.SetStyle( KIGFX::ORIGIN_VIEWITEM::CROSS );
@@ -179,6 +180,7 @@ PCB_GRID_HELPER::PCB_GRID_HELPER( TOOL_MANAGER* aToolMgr, MAGNETIC_SETTINGS* aMa
     m_viewSnapPoint.SetColor( auxItemsColor );
     m_viewSnapPoint.SetDrawAtZero( true );
     view->Add( &m_viewSnapPoint );
+    getSnapManager().SetSnapGuideColors( anchorColor, anchorColor.Brightened( 0.2 ) );
     view->SetVisible( &m_viewSnapPoint, false );
 
     if( m_toolMgr->GetModel() )
@@ -1307,6 +1309,25 @@ static bool PadstackUniqueLayerAppliesToLayer( const PADSTACK& aPadStack, PCB_LA
 };
 
 
+std::vector<PCB_GRID_HELPER::ANCHOR_SPEC> PCB_GRID_HELPER::GetArcAnchors( const PCB_ARC& aArc,
+                                                                         bool aFrom )
+{
+    std::vector<ANCHOR_SPEC> anchors;
+
+    // The stored midpoint is grid-aligned when the arc is; expose it alongside the endpoints so
+    // BestDragOrigin picks a grid-aligned corner as the drag/paste reference.
+    anchors.push_back( { aArc.GetMid(), CORNER | SNAPPABLE, POINT_TYPE::PT_MID } );
+
+    // The derived geometric center is rarely grid-aligned. It stays available as a drag origin for
+    // other items (aFrom=false) but is never offered as this arc's own origin, which was the cause
+    // of pasted arcs landing off grid.
+    if( !aFrom )
+        anchors.push_back( { aArc.GetCenter(), ORIGIN, POINT_TYPE::PT_CENTER } );
+
+    return anchors;
+}
+
+
 void PCB_GRID_HELPER::computeAnchors( BOARD_ITEM* aItem, const VECTOR2I& aRefPos, bool aFrom,
                                       const PCB_SELECTION_FILTER_OPTIONS* aSelectionFilter )
 {
@@ -1747,7 +1768,18 @@ void PCB_GRID_HELPER::computeAnchors( BOARD_ITEM* aItem, const VECTOR2I& aRefPos
 
             addAnchor( track->GetStart(), CORNER | SNAPPABLE, track, POINT_TYPE::PT_END );
             addAnchor( track->GetEnd(), CORNER | SNAPPABLE, track, POINT_TYPE::PT_END );
-            addAnchor( track->GetCenter(), ORIGIN, track, POINT_TYPE::PT_MID );
+
+            if( aItem->Type() == PCB_ARC_T )
+            {
+                PCB_ARC* arc = static_cast<PCB_ARC*>( aItem );
+
+                for( const ANCHOR_SPEC& spec : GetArcAnchors( *arc, aFrom ) )
+                    addAnchor( spec.pos, spec.flags, arc, spec.pointType );
+            }
+            else
+            {
+                addAnchor( track->GetCenter(), ORIGIN, track, POINT_TYPE::PT_MID );
+            }
         }
 
         break;

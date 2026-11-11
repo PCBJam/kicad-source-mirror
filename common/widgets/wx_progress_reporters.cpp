@@ -28,6 +28,11 @@
 #include <widgets/wx_event_utils.h>
 #include <widgets/wx_progress_reporters.h>
 
+#ifdef __EMSCRIPTEN__
+// pcbjam web shell (wasm/bindings): 0 while a file open is in flight.
+extern "C" int pcbjam_progress_may_yield() __attribute__(( weak ));
+#endif
+
 
 WX_PROGRESS_REPORTER::WX_PROGRESS_REPORTER( wxWindow* aParent, const wxString& aTitle,
                                             int aNumPhases, int aCanAbort,
@@ -43,7 +48,9 @@ WX_PROGRESS_REPORTER::WX_PROGRESS_REPORTER( wxWindow* aParent, const wxString& a
                                                          // causes all sorts of grief
                                    aCanAbort | wxPD_ELAPSED_TIME ),
         m_appProgressIndicator( aParent ),
-        m_messageWidth( 0 )
+        m_messageWidth( 0 ),
+        m_updateThrottle( std::chrono::milliseconds( 100 ) ),
+        m_lastUpdateResult( true )
 {
     // wxAppProgressIndicator doesn't like value > max, ever. However there are some risks
     // with multithreaded setting of those values making a mess
@@ -59,6 +66,21 @@ WX_PROGRESS_REPORTER::~WX_PROGRESS_REPORTER()
 
 bool WX_PROGRESS_REPORTER::updateUI()
 {
+#ifdef __EMSCRIPTEN__
+    // pcbjam: no dialog Update() (a yield) or timer drain while a file open is in
+    // flight. A sleep in the load followed by the timer drain runs due wx timers
+    // nested inside the half-built load, which can spin the browser forever.
+    // DRC, fill and ERC never run during an open, so they keep their dialog.
+    if( pcbjam_progress_may_yield && !pcbjam_progress_may_yield() )
+        return !m_cancelled.load() && m_lastUpdateResult.load();
+#endif
+
+    if( !shouldRefresh( m_progress.load(), m_maxProgress.load(), m_phase.load(), m_numPhases.load(),
+                        m_updateThrottle ) )
+    {
+        return !m_cancelled.load() && m_lastUpdateResult.load();
+    }
+
     int cur = CurrentProgress();
 
     if( cur < 0 || cur > 1000 )
@@ -67,27 +89,27 @@ bool WX_PROGRESS_REPORTER::updateUI()
     SetRange( 1000 );
 
     wxString message;
+    bool     messageChanged;
 
     {
         std::lock_guard<std::mutex> guard( m_mutex );
         message = m_rptMessage;
+        messageChanged = m_messageChanged.exchange( false );
     }
 
     // Perhaps the window size is too small if the new message to display is bigger
     // than the previous message. in this case, resize the WX_PROGRESS_REPORTER window
     // GetTextExtent has probably bugs in wxWidgets < 3.1.6, so calling it only when
     // the message has changed is mandatory
-    if( m_messageChanged )
+    if( messageChanged )
     {
-        int  newWidth = GetTextExtent( m_rptMessage ).x;
+        int newWidth = GetTextExtent( message ).x;
 
         if( newWidth > m_messageWidth )
         {
             m_messageWidth = newWidth;
             Fit();
         }
-
-        m_messageChanged = false;
     }
 
     // Allowing interaction with other windows has unintended consequences
@@ -97,6 +119,8 @@ bool WX_PROGRESS_REPORTER::updateUI()
     bool diag = WX_PROGRESS_REPORTER_BASE::Update( cur, message );
 
     DrainPendingEvents();
+
+    m_lastUpdateResult.store( diag );
 
     return diag;
 }

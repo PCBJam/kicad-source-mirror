@@ -133,15 +133,14 @@ bool NETCLASS::operator==( const NETCLASS& other ) const
 }
 
 
-void NETCLASS::Serialize( google::protobuf::Any &aContainer ) const
+void NETCLASS::Serialize( kiapi::common::project::NetClass& nc ) const
 {
     using namespace kiapi::common;
-    project::NetClass nc;
 
     nc.set_name( m_Name.ToUTF8() );
     nc.set_priority( m_Priority );
 
-    nc.set_type( m_constituents.empty() ? project::NCT_EXPLICIT : project::NCT_IMPLICIT );
+    nc.set_type( m_constituents.size() <= 1 ? project::NCT_EXPLICIT : project::NCT_IMPLICIT );
 
     for( NETCLASS* member : m_constituents )
         nc.add_constituents( member->GetName() );
@@ -201,17 +200,21 @@ void NETCLASS::Serialize( google::protobuf::Any &aContainer ) const
         //         static_cast<LINE_STYLE>( *m_lineStyle ) ) );
     }
 
+}
+
+
+void NETCLASS::Serialize( google::protobuf::Any &aContainer ) const
+{
+    kiapi::common::project::NetClass nc;
+    Serialize( nc );
     aContainer.PackFrom( nc );
 }
 
 
-bool NETCLASS::Deserialize( const google::protobuf::Any &aContainer )
+bool NETCLASS::Deserialize( const kiapi::common::project::NetClass& nc )
 {
     using namespace kiapi::common;
-    project::NetClass nc;
 
-    if( !aContainer.UnpackTo( &nc ) )
-        return false;
 
     m_Name = wxString::FromUTF8( nc.name() );
     m_Priority = nc.priority();
@@ -220,7 +223,7 @@ bool NETCLASS::Deserialize( const google::protobuf::Any &aContainer )
     if( nc.type() == project::NCT_IMPLICIT )
         return false;
 
-    SetConstituentNetclasses( {} );
+    SetConstituentNetclasses( { this } );
 
     if( nc.board().has_clearance() )
         m_Clearance = nc.board().clearance().value_nm();
@@ -266,6 +269,17 @@ bool NETCLASS::Deserialize( const google::protobuf::Any &aContainer )
     //     m_lineStyle = static_cast<int>( FromProtoEnum<LINE_STYLE>( nc.schematic().line_style() ) );
 
     return true;
+}
+
+
+bool NETCLASS::Deserialize( const google::protobuf::Any &aContainer )
+{
+    kiapi::common::project::NetClass nc;
+
+    if( !aContainer.UnpackTo( &nc ) )
+        return false;
+
+    return Deserialize( nc );
 }
 
 

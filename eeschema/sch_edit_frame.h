@@ -36,7 +36,6 @@
 #include <wx/treectrl.h>
 #include <wx/utils.h>
 #include <wx/filename.h>
-#include <wx/generic/treectlg.h>
 
 #include <core/typeinfo.h>
 #include <eda_base_frame.h>
@@ -44,6 +43,7 @@
 #include <math/box2.h>
 #include <sch_base_frame.h>
 #include <template_fieldnames.h>
+#include <widgets/net_navigator_tree.h>
 
 class SCH_ITEM;
 class EDA_ITEM;
@@ -276,7 +276,7 @@ public:
      *
      * @return true if a variant was created, false if cancelled or invalid input
      */
-    bool ShowAddVariantDialog();
+    bool ShowAddVariantDialog( wxWindow* aParent = nullptr );
 
     void onVariantSelected( wxCommandEvent& aEvent );
 
@@ -322,8 +322,8 @@ public:
         return m_highlightedConn;
     }
 
-    void SetHighlightedConnection( const wxString& aConnection,
-                                   const NET_NAVIGATOR_ITEM_DATA* aSelection = nullptr );
+    void SetHighlightedConnection( const wxString& aConnection, const NET_NAVIGATOR_ITEM_DATA* aSelection = nullptr,
+                                   bool aForceNetNavigatorRefresh = false );
 
     void DirtyHighlightedConnection() { m_highlightedConnChanged = true; }
 
@@ -929,6 +929,8 @@ protected:
      */
     bool doAutoSave() override;
 
+    bool canRunAutoSave() const override;
+
     void configureToolbars() override;
 
     void doReCreateMenuBar() override;
@@ -1027,6 +1029,7 @@ private:
 
     wxWindow* createHighlightedNetNavigator();
 
+    void onNetNavigatorDPIChanged( wxDPIChangedEvent& aEvent );
     void onNetNavigatorFilterChanged( wxCommandEvent& aEvent );
     void onNetNavigatorKey( wxKeyEvent& aEvent );
     void onNetNavigatorItemMenu( wxTreeEvent& aEvent );
@@ -1075,7 +1078,7 @@ private:
     DIALOG_SCHEMATIC_SETUP*     m_schematicSetupDialog;
 
 
-    wxGenericTreeCtrl*          m_netNavigator;
+    NET_NAVIGATOR_TREE*         m_netNavigator;
     wxSearchCtrl*               m_netNavigatorFilter;
     BITMAP_BUTTON*              m_netNavigatorMenuButton;
     wxString                    m_netNavigatorFilterValue;

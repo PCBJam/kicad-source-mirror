@@ -18,9 +18,12 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <chrono>
 #include <iostream>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
+#include <bs_thread_pool.hpp>
 #include <wx/datetime.h>
 #include <wx/log.h>
 #include <wx/tokenzr.h>
@@ -31,6 +34,7 @@
 #include <database/database_connection.h>
 #include <database/database_lib_settings.h>
 #include <fmt.h>
+#include <hash.h>
 #include <ki_exception.h>
 #include <lib_symbol.h>
 
@@ -46,12 +50,13 @@ SCH_IO_DATABASE::SCH_IO_DATABASE() :
         m_conn()
 {
     m_cacheTimestamp = 0;
-    m_cacheModifyHash = 0;
+    m_cacheSignature = 0;
 }
 
 
 SCH_IO_DATABASE::~SCH_IO_DATABASE()
 {
+    stopBackgroundRefresh();
 }
 
 
@@ -81,6 +86,8 @@ void SCH_IO_DATABASE::EnumerateSymbolLib( std::vector<LIB_SYMBOL*>& aSymbolList,
 
     bool powerSymbolsOnly = ( aProperties && aProperties->contains( SYMBOL_LIBRARY_ADAPTER::PropPowerSymsOnly ) );
 
+    std::shared_lock lock( m_cacheMutex );
+
     for( auto const& pair : m_nameToSymbolcache )
     {
         LIB_SYMBOL* symbol = pair.second.get();
@@ -88,6 +95,14 @@ void SCH_IO_DATABASE::EnumerateSymbolLib( std::vector<LIB_SYMBOL*>& aSymbolList,
         if( !powerSymbolsOnly || symbol->IsPower() )
             aSymbolList.emplace_back( symbol );
     }
+}
+
+
+void SCH_IO_DATABASE::CheckLibrary( const wxString& aLibraryPath,
+                                    const std::map<std::string, UTF8>* aProperties )
+{
+    ensureSettings( aLibraryPath );
+    ensureConnection();
 }
 
 
@@ -104,6 +119,27 @@ LIB_SYMBOL* SCH_IO_DATABASE::LoadSymbol( const wxString&   aLibraryPath,
 
     cacheLib();
 
+    std::string tableName;
+    std::string symbolName( aAliasName.ToUTF8() );
+
+    {
+        std::shared_lock lock( m_cacheMutex );
+
+        if( auto cacheIt = m_nameToSymbolcache.find( aAliasName ); cacheIt != m_nameToSymbolcache.end() )
+        {
+            LIB_SYMBOL* cached = cacheIt->second.get();
+            return cached->Duplicate();
+        }
+
+        auto sanitizedIt = m_sanitizedNameMap.find( aAliasName );
+
+        if( sanitizedIt != m_sanitizedNameMap.end() )
+        {
+            tableName = sanitizedIt->second.first;
+            symbolName = sanitizedIt->second.second;
+        }
+    }
+
     /*
      * Table names are tricky, in order to allow maximum flexibility to the user.
      * The slash character is used as a separator between a table name and symbol name, but symbol
@@ -113,25 +149,10 @@ LIB_SYMBOL* SCH_IO_DATABASE::LoadSymbol( const wxString&   aLibraryPath,
      * name is blank if our config has an entry for the null table.
      */
 
-    std::string tableName;
-    std::string symbolName( aAliasName.ToUTF8() );
-
-    auto sanitizedIt = m_sanitizedNameMap.find( aAliasName );
-
-    if( sanitizedIt != m_sanitizedNameMap.end() )
+    if( tableName.empty() && aAliasName.Contains( '/' ) )
     {
-        tableName = sanitizedIt->second.first;
-        symbolName = sanitizedIt->second.second;
-    }
-    else
-    {
-        tableName.clear();
-
-        if( aAliasName.Contains( '/' ) )
-        {
-            tableName = std::string( aAliasName.BeforeFirst( '/' ).ToUTF8() );
-            symbolName = std::string( aAliasName.AfterFirst( '/' ).ToUTF8() );
-        }
+        tableName = std::string( aAliasName.BeforeFirst( '/' ).ToUTF8() );
+        symbolName = std::string( aAliasName.AfterFirst( '/' ).ToUTF8() );
     }
 
     std::vector<const DATABASE_LIB_TABLE*> tablesToTry;
@@ -196,14 +217,17 @@ void SCH_IO_DATABASE::GetSubLibraryNames( std::vector<wxString>& aNames )
 
 void SCH_IO_DATABASE::GetAvailableSymbolFields( std::vector<wxString>& aNames )
 {
+    std::lock_guard<std::mutex> lock( m_symbolLoadMutex );
+
     std::copy( m_customFields.begin(), m_customFields.end(), std::back_inserter( aNames ) );
 }
 
 
 void SCH_IO_DATABASE::GetDefaultSymbolFields( std::vector<wxString>& aNames )
 {
-    std::copy( m_defaultShownFields.begin(), m_defaultShownFields.end(),
-               std::back_inserter( aNames ) );
+    std::lock_guard<std::mutex> lock( m_symbolLoadMutex );
+
+    std::copy( m_defaultShownFields.begin(), m_defaultShownFields.end(), std::back_inserter( aNames ) );
 }
 
 
@@ -221,18 +245,113 @@ bool SCH_IO_DATABASE::TestConnection( wxString* aErrorMsg )
 }
 
 
-void SCH_IO_DATABASE::cacheLib()
+size_t SCH_IO_DATABASE::computeSignature( const TABLE_RESULT_LIST& aTableResults ) const
 {
-    long long currentTimestampSeconds = wxDateTime::Now().GetValue().GetValue() / 1000;
+    size_t signature = 0;
 
-    if( m_adapter->GetModifyHash() == m_cacheModifyHash
-        && ( currentTimestampSeconds - m_cacheTimestamp ) < m_settings->m_Cache.max_age )
+    for( const auto& [table, results] : aTableResults )
     {
-        return;
+        for( const DATABASE_CONNECTION::ROW& result : results )
+        {
+            size_t rowSignature = 0;
+
+            for( const auto& [column, value] : result )
+            {
+                hash_combine( signature, std::string_view( column ) );
+
+                if( const std::string* str = std::any_cast<std::string>( &value ) )
+                    hash_combine( rowSignature, std::string_view( *str ) );
+            }
+
+            hash_combine( signature, rowSignature );
+
+            if( auto it = result.find( table->symbols_col ); it != result.end() )
+            {
+                if( const std::string* str = std::any_cast<std::string>( &it->second ) )
+                {
+                    LIB_ID symbolId;
+                    symbolId.Parse( *str );
+
+                    if( symbolId.IsValid() )
+                    {
+                        const UTF8& nickname = symbolId.GetLibNickname();
+                        hash_combine( signature, std::string_view( nickname.c_str() ) );
+
+                        if( std::optional<int> libHash = m_adapter->GetLibraryModifyHash( nickname ) )
+                            hash_combine( signature, *libHash );
+                    }
+                }
+            }
+        }
     }
 
-    std::map<wxString, std::unique_ptr<LIB_SYMBOL>> newSymbolCache;
-    std::map<wxString, std::pair<std::string, std::string>> newSanitizedNameMap;
+    return signature;
+}
+
+
+bool SCH_IO_DATABASE::materializeCache( const TABLE_RESULT_LIST& aTableResults,
+        std::map<wxString, std::unique_ptr<LIB_SYMBOL>>& aSymbolCache,
+        std::map<wxString, std::pair<std::string, std::string>>& aSanitizedNameMap )
+{
+    for( const auto& [table, results] : aTableResults )
+    {
+        for( const DATABASE_CONNECTION::ROW& result : results )
+        {
+            if( !result.contains( table->key_col ) )
+                continue;
+
+            std::string rawName = std::any_cast<std::string>( result.at( table->key_col ) );
+            UTF8        sanitizedName = LIB_ID::FixIllegalChars( rawName, false );
+            std::string sanitizedKey = sanitizedName.c_str();
+            std::string prefix = ( m_settings->m_GloballyUniqueKeys || table->name.empty() )
+                                         ? ""
+                                         : fmt::format( "{}/", table->name );
+            std::string sanitizedDisplayName = fmt::format( "{}{}", prefix, sanitizedKey );
+            wxString    name( sanitizedDisplayName );
+
+            aSanitizedNameMap[name] = std::make_pair( table->name, rawName );
+
+            std::unique_ptr<LIB_SYMBOL> symbol = loadSymbolFromRow( name, *table, result );
+
+            if( symbol )
+                aSymbolCache[symbol->GetName()] = std::move( symbol );
+        }
+    }
+
+    return !aSymbolCache.empty();
+}
+
+
+void SCH_IO_DATABASE::cacheLib()
+{
+    // Guard against re-entrant cacheLib() calls. A self-referential symbol row (issue #24249)
+    // causes m_adapter->LoadSymbol to route back into SCH_IO_DATABASE::LoadSymbol, which would
+    // otherwise call cacheLib() again while it is in the middle of populating its caches.
+    if( m_inCacheLib )
+        return;
+
+    long long currentTimestampSeconds = wxDateTime::Now().GetValue().GetValue() / 1000;
+
+    // After the initial load, the background refresh thread handles all cache updates.
+    {
+        std::shared_lock lock( m_cacheMutex );
+
+        if( m_cachePopulated )
+            return;
+    }
+
+    m_inCacheLib = true;
+
+    struct CACHE_LIB_GUARD
+    {
+        bool* flag;
+        ~CACHE_LIB_GUARD() { *flag = false; }
+    } cacheLibGuard{ &m_inCacheLib };
+
+    // Re-query the database (the connection layer caches results subject to its own max_age) and
+    // compute a lightweight signature of the raw rows so we can skip the costly materialization
+    // when nothing relevant has changed.
+    TABLE_RESULT_LIST tableResults;
 
     for( const DATABASE_LIB_TABLE& table : m_settings->m_Tables )
     {
@@ -241,43 +360,175 @@ void SCH_IO_DATABASE::cacheLib()
         if( !m_conn->SelectAll( table.table, table.key_col, results ) )
         {
             if( !m_conn->GetLastError().empty() )
-            {
-                wxString msg = wxString::Format( _( "Error reading database table %s: %s" ),
-                                                 table.table, m_conn->GetLastError() );
-                THROW_IO_ERROR( msg );
-            }
+                THROW_IO_ERRORF( _( "Error reading database table %s: %s" ), table.table, m_conn->GetLastError() );
 
             continue;
         }
 
-        for( DATABASE_CONNECTION::ROW& result : results )
+        tableResults.emplace_back( &table, std::move( results ) );
+    }
+
+    size_t signature = computeSignature( tableResults );
+
+    {
+        std::unique_lock lock( m_cacheMutex );
+
+        if( m_cachePopulated && signature == m_cacheSignature )
         {
-            if( !result.count( table.key_col ) )
-                continue;
-
-            std::string rawName = std::any_cast<std::string>( result[table.key_col] );
-            UTF8        sanitizedName = LIB_ID::FixIllegalChars( rawName, false );
-            std::string sanitizedKey = sanitizedName.c_str();
-            std::string prefix =
-                    ( m_settings->m_GloballyUniqueKeys || table.name.empty() ) ? "" : fmt::format( "{}/", table.name );
-            std::string sanitizedDisplayName = fmt::format( "{}{}", prefix, sanitizedKey );
-            wxString    name( sanitizedDisplayName );
-
-            newSanitizedNameMap[name] = std::make_pair( table.name, rawName );
-
-            std::unique_ptr<LIB_SYMBOL> symbol = loadSymbolFromRow( name, table, result );
-
-            if( symbol )
-                newSymbolCache[symbol->GetName()] = std::move( symbol );
+            m_cacheTimestamp = currentTimestampSeconds;
+            return;
         }
     }
 
-    m_nameToSymbolcache = std::move( newSymbolCache );
-    m_sanitizedNameMap = std::move( newSanitizedNameMap );
+    std::map<wxString, std::unique_ptr<LIB_SYMBOL>> newSymbolCache;
+    std::map<wxString, std::pair<std::string, std::string>> newSanitizedNameMap;
 
-    m_cacheTimestamp = currentTimestampSeconds;
-    m_cacheModifyHash = m_adapter->GetModifyHash();
+    materializeCache( tableResults, newSymbolCache, newSanitizedNameMap );
+
+    {
+        std::unique_lock lock( m_cacheMutex );
+
+        m_nameToSymbolcache = std::move( newSymbolCache );
+        m_sanitizedNameMap = std::move( newSanitizedNameMap );
+
+        m_cacheTimestamp = currentTimestampSeconds;
+        m_cacheSignature = signature;
+        m_cachePopulated = true;
+        m_modifyHash++;
+    }
+
+    if( !m_refreshRunning.load() )
+        startBackgroundRefresh();
 }
+
+
+void SCH_IO_DATABASE::startBackgroundRefresh()
+{
+    if( m_refreshRunning.exchange( true ) )
+        return;
+
+    wxLogTrace( traceDatabase, wxT( "Starting background refresh thread" ) );
+    m_refreshThread = std::thread( &SCH_IO_DATABASE::backgroundRefreshWorker, this );
+}
+
+
+void SCH_IO_DATABASE::stopBackgroundRefresh()
+{
+    m_refreshRunning = false;
+    m_refreshCV.notify_all();
+
+    if( m_refreshThread.joinable() )
+        m_refreshThread.join();
+}
+
+
+void SCH_IO_DATABASE::backgroundRefreshWorker()
+{
+    BS::this_thread::set_os_thread_name( "dblib bg" );
+
+    while( m_refreshRunning.load() )
+    {
+        long long maxAge = 0;
+
+        {
+            std::unique_lock lock( m_cacheMutex );
+
+            if( m_settings )
+                maxAge = m_settings->m_Cache.max_age;
+        }
+
+        if( maxAge <= 0 )
+            maxAge = 1;
+
+        if( m_conn && m_cachePopulated.load() )
+        {
+            wxLogTrace( traceDatabase, wxT( "Initiating background refresh" ) );
+
+            try
+            {
+                std::vector<std::pair<const DATABASE_LIB_TABLE*, std::vector<DATABASE_CONNECTION::ROW>>> tableResults;
+                bool querySuccess = true;
+
+                for( const DATABASE_LIB_TABLE& table : m_settings->m_Tables )
+                {
+                    m_conn->ClearCache( table.table );
+
+                    std::vector<DATABASE_CONNECTION::ROW> results;
+
+                    if( !m_conn->SelectAll( table.table, table.key_col, results ) )
+                    {
+                        wxLogTrace( traceDatabase, wxT( "Background refresh: SelectAll failed for table %s" ),
+                                    table.table );
+                        querySuccess = false;
+                        break;
+                    }
+
+                    tableResults.emplace_back( &table, std::move( results ) );
+                }
+
+                if( querySuccess )
+                {
+                    size_t signature = computeSignature( tableResults );
+
+                    bool dataChanged = false;
+
+                    {
+                        std::unique_lock lock( m_cacheMutex );
+
+                        if( signature == m_cacheSignature )
+                            m_cacheTimestamp = wxDateTime::Now().GetValue().GetValue() / 1000;
+                        else
+                            dataChanged = true;
+                    }
+
+                    if( dataChanged )
+                    {
+                        std::map<wxString, std::unique_ptr<LIB_SYMBOL>> newSymbolCache;
+                        std::map<wxString, std::pair<std::string, std::string>> newSanitizedNameMap;
+
+                        materializeCache( tableResults, newSymbolCache, newSanitizedNameMap );
+
+                        wxLogTrace( traceDatabase, wxT( "Background refresh: new data" ) );
+
+                        {
+                            std::unique_lock lock( m_cacheMutex );
+
+                            m_nameToSymbolcache = std::move( newSymbolCache );
+                            m_sanitizedNameMap = std::move( newSanitizedNameMap );
+
+                            m_cacheTimestamp = wxDateTime::Now().GetValue().GetValue() / 1000;
+                            m_cacheSignature = signature;
+                            m_cachePopulated = true;
+                            m_modifyHash++;
+                        }
+                    }
+                    else
+                    {
+                        wxLogTrace( traceDatabase, wxT( "Background refresh: no new data" ) );
+                    }
+                }
+            }
+            catch( const IO_ERROR& e )
+            {
+                wxLogTrace( traceDatabase, wxT( "Background refresh failed: %s; cache preserved" ), e.What() );
+            }
+            catch( const std::exception& e )
+            {
+                wxLogTrace( traceDatabase, wxT( "Background refresh failed: %s; cache preserved" ), e.what() );
+            }
+        }
+
+        {
+            std::unique_lock lock( m_refreshMutex );
+            m_refreshCV.wait_for( lock, std::chrono::seconds( maxAge ),
+                                  [this]()
+                                  {
+                                      return !m_refreshRunning.load();
+                                  } );
+        }
+    }
+}
+
 
 void SCH_IO_DATABASE::ensureSettings( const wxString& aSettingsPath )
 {
@@ -373,23 +624,23 @@ void SCH_IO_DATABASE::connect()
 
         for( const DATABASE_LIB_TABLE& tableIter : m_settings->m_Tables )
         {
-            std::set<std::string> columns;
-
-            columns.insert( boost::to_lower_copy( tableIter.key_col ) );
-            columns.insert( boost::to_lower_copy( tableIter.footprints_col ) );
-            columns.insert( boost::to_lower_copy( tableIter.symbols_col ) );
-
-            columns.insert( boost::to_lower_copy( tableIter.properties.description ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.footprint_filters ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.keywords ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.exclude_from_sim ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.exclude_from_bom ) );
-            columns.insert( boost::to_lower_copy( tableIter.properties.exclude_from_board ) );
+            // Trusted even if unreported by the driver, to support generated columns (#16952)
+            std::set<std::string> requiredColumns{ tableIter.key_col,
+                                                   tableIter.footprints_col,
+                                                   tableIter.symbols_col };
 
             for( const DATABASE_FIELD_MAPPING& field : tableIter.fields )
-                columns.insert( boost::to_lower_copy( field.column ) );
+                requiredColumns.insert( field.column );
 
-            m_conn->CacheTableInfo( tableIter.table, columns );
+            // Only used if confirmed present, so a misconfigured mapping can't break the table (#23532)
+            std::set<std::string> optionalColumns{ tableIter.properties.description,
+                                                   tableIter.properties.footprint_filters,
+                                                   tableIter.properties.keywords,
+                                                   tableIter.properties.exclude_from_sim,
+                                                   tableIter.properties.exclude_from_bom,
+                                                   tableIter.properties.exclude_from_board };
+
+            m_conn->CacheTableInfo( tableIter.table, requiredColumns, optionalColumns );
         }
 
         m_conn->SetCacheParams( m_settings->m_Cache.max_size, m_settings->m_Cache.max_age );
@@ -450,6 +701,7 @@ std::unique_ptr<LIB_SYMBOL>  SCH_IO_DATABASE::loadSymbolFromRow( const wxString&
                                                 const DATABASE_LIB_TABLE& aTable,
                                                 const DATABASE_CONNECTION::ROW& aRow )
 {
+    std::lock_guard lock( m_symbolLoadMutex );
     std::unique_ptr<LIB_SYMBOL> symbol = nullptr;
 
     if( aRow.count( aTable.symbols_col ) )
@@ -461,24 +713,63 @@ std::unique_ptr<LIB_SYMBOL>  SCH_IO_DATABASE::loadSymbolFromRow( const wxString&
         LIB_ID symbolId;
         symbolId.Parse( std::any_cast<std::string>( aRow.at( aTable.symbols_col ) ) );
 
+        // A row's Symbols column may resolve back into the same database library (issue #24249,
+        // e.g. a mistyped library nickname). The adapter would route that lookup back into
+        // SCH_IO_DATABASE::LoadSymbol and re-enter loadSymbolFromRow on the same row until the
+        // stack overflows. Track in-flight LIB_IDs and skip the recursive load on re-entry.
+        struct CYCLE_GUARD
+        {
+            std::unordered_set<wxString>* set;
+            wxString                      key;
+            bool                          owns = false;
+
+            ~CYCLE_GUARD()
+            {
+                if( owns )
+                    set->erase( key );
+            }
+        } guard{ &m_inProgressLoads, {}, false };
+
+        bool cycle = false;
+
         if( symbolId.IsValid() )
-            originalSymbol = m_adapter->LoadSymbol( symbolId );
+        {
+            guard.key = symbolId.Format().wx_str();
+            guard.owns = m_inProgressLoads.insert( guard.key ).second;
+            cycle = !guard.owns;
+
+            if( cycle )
+            {
+                wxLogTrace( traceDatabase,
+                            wxT( "loadSymbolFromRow: cycle detected resolving '%s' "
+                                 "(row '%s' in table '%s'); skipping recursive load" ),
+                            symbolIdStr, aSymbolName, aTable.name );
+            }
+            else
+            {
+                originalSymbol = m_adapter->LoadSymbol( symbolId );
+            }
+        }
 
         if( originalSymbol )
         {
-            wxLogTrace( traceDatabase, wxT( "loadSymbolFromRow: found original symbol '%s'" ),
-                        symbolIdStr );
             symbol.reset( originalSymbol->Duplicate() );
             symbol->SetSourceLibId( symbolId );
         }
+        else if( cycle )
+        {
+            wxLogTrace( traceDatabase, wxT( "loadSymbolFromRow: source symbol '%s' is a "
+                                            "self-reference, will create empty symbol" ),
+                        symbolIdStr );
+        }
         else if( !symbolId.IsValid() )
         {
-            wxLogTrace( traceDatabase, wxT( "loadSymboFromRow: source symbol id '%s' is invalid, "
+            wxLogTrace( traceDatabase, wxT( "loadSymbolFromRow: source symbol id '%s' is invalid, "
                                             "will create empty symbol" ), symbolIdStr );
         }
-        else
+        else if( !symbolIdStr.empty() )
         {
-            wxLogTrace( traceDatabase, wxT( "loadSymboFromRow: source symbol '%s' not found, "
+            wxLogTrace( traceDatabase, wxT( "loadSymbolFromRow: source symbol '%s' not found, "
                                             "will create empty symbol" ), symbolIdStr );
         }
     }
@@ -708,6 +999,11 @@ std::unique_ptr<LIB_SYMBOL>  SCH_IO_DATABASE::loadSymbolFromRow( const wxString&
     }
 
     symbol->GetDrawItems().sort();
+
+    // Field mappings (including Description) are applied with SCH_FIELD::SetText, which does not
+    // refresh the cached values the library tree and chooser read. Without this the upper chooser
+    // panel keeps the source symbol's description while the details panel shows the database value.
+    symbol->RefreshLibraryTreeCaches();
 
     return symbol;
 }

@@ -72,21 +72,6 @@ DRC_RE_MATCHED_LENGTH_DIFF_PAIR_OVERLAY_PANEL::DRC_RE_MATCHED_LENGTH_DIFF_PAIR_O
     toleranceField->SetUnitBinder( m_toleranceBinder.get() );
     toleranceField->GetControl()->SetValidator( VALIDATOR_NUMERIC_CTRL( false, false ) );
 
-    // Add +/- decoration between opt and tolerance fields
-    {
-        const DRC_RE_FIELD_POSITION& optPos = positions[0];
-        const DRC_RE_FIELD_POSITION& tolPos = positions[1];
-        int                          fieldHeight = optLengthField->GetControl()->GetBestSize().GetHeight();
-
-        auto*         plusMinus = new wxStaticText( this, wxID_ANY, wxS( "\u00B1" ) );
-        wxSize        pmSize = plusMinus->GetBestSize();
-        wxStaticText* optMmLabel = optLengthField->GetLabel();
-        int           afterOptLabel = optMmLabel->GetPosition().x + optMmLabel->GetBestSize().GetWidth();
-        int           gapMid = ( afterOptLabel + tolPos.xStart ) / 2;
-        plusMinus->SetPosition(
-                wxPoint( gapMid - pmSize.GetWidth() / 2, optPos.yTop + ( fieldHeight - pmSize.GetHeight() ) / 2 ) );
-    }
-
     // Create max skew field
     auto* maxSkewField = AddField<wxTextCtrl>( wxS( "max_skew" ), positions[2], wxTE_CENTRE | wxTE_PROCESS_ENTER );
     m_maxSkewBinder = std::make_unique<UNIT_BINDER>( &m_unitsProvider, eventSource, nullptr, maxSkewField->GetControl(),
@@ -94,17 +79,8 @@ DRC_RE_MATCHED_LENGTH_DIFF_PAIR_OVERLAY_PANEL::DRC_RE_MATCHED_LENGTH_DIFF_PAIR_O
     maxSkewField->SetUnitBinder( m_maxSkewBinder.get() );
     maxSkewField->GetControl()->SetValidator( VALIDATOR_NUMERIC_CTRL( false, false ) );
 
-    {
-        const DRC_RE_FIELD_POSITION& skewPos = positions[2];
-        wxStaticText*                skewMmLabel = maxSkewField->GetLabel();
-        int afterSkewLabel = skewMmLabel->GetPosition().x + skewMmLabel->GetBestSize().GetWidth();
-        int fieldHeight = maxSkewField->GetControl()->GetBestSize().GetHeight();
-
-        m_withinDiffPairsCheckbox = new wxCheckBox( this, wxID_ANY, _( "Within diff pairs" ) );
-        wxSize cbSize = m_withinDiffPairsCheckbox->GetBestSize();
-        m_withinDiffPairsCheckbox->SetPosition(
-                wxPoint( afterSkewLabel + 8, skewPos.yTop + ( fieldHeight - cbSize.GetHeight() ) / 2 ) );
-    }
+    auto* withinDiffPairs = AddCheckbox( wxS( "within_diff_pairs" ), positions[3] );
+    m_withinDiffPairsCheckbox = static_cast<wxCheckBox*>( withinDiffPairs->GetControl() );
 
     auto notifyModified = [this]( wxCommandEvent& )
     {

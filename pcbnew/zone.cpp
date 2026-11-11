@@ -122,9 +122,6 @@ void ZONE::CopyFrom( const BOARD_ITEM* aOther )
 ZONE::~ZONE()
 {
     delete m_Poly;
-
-    if( BOARD* board = GetBoard() )
-        board->IncrementTimeStamp();
 }
 
 
@@ -212,6 +209,9 @@ void ZONE::InitDataFromSrcInCopyCtor( const ZONE& aZone, PCB_LAYER_ID aLayer )
     m_netinfo                 = aZone.m_netinfo;
     m_area                    = aZone.m_area;
     m_outlinearea             = aZone.m_outlinearea;
+
+    // Fresh outline; lock-free bbox cache starts invalid.
+    m_bboxCacheTimeStamp.store( -1, std::memory_order_relaxed );
 }
 
 
@@ -226,6 +226,23 @@ ZONE* ZONE::Clone( PCB_LAYER_ID aLayer ) const
     ZONE* clone = new ZONE( BOARD_ITEM::GetParent() );
     clone->InitDataFromSrcInCopyCtor( *this, aLayer );
     return clone;
+}
+
+
+BOARD_ITEM* ZONE::Duplicate( bool addToParentGroup, BOARD_COMMIT* aCommit ) const
+{
+    BOARD_ITEM* dupe = BOARD_ITEM::Duplicate( addToParentGroup, aCommit );
+
+    if( const BOARD* board = GetBoard() )
+    {
+        ZONE* newZone = static_cast<ZONE*>( dupe );
+
+        // Give the copy its own name so it does not collide with the original (issue 23131)
+        if( !newZone->GetZoneName().IsEmpty() )
+            newZone->SetZoneName( board->GetUniqueZoneName( newZone->GetZoneName(), newZone ) );
+    }
+
+    return dupe;
 }
 
 
@@ -252,6 +269,11 @@ void ZONE::Serialize( google::protobuf::Any& aContainer ) const
     zone.set_name( m_zoneName.ToUTF8() );
     zone.set_priority( m_priority );
     zone.set_filled( m_isFilled );
+
+    if( FOOTPRINT* parent = GetParentFootprint() )
+        zone.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
+    else if( const BOARD* board = GetBoard() )
+        zone.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
 
     if( m_isRuleArea )
     {
@@ -285,6 +307,12 @@ void ZONE::Serialize( google::protobuf::Any& aContainer ) const
         cu->set_min_island_area( m_minIslandArea );
         cu->set_fill_mode( ToProtoEnum<ZONE_FILL_MODE, types::ZoneFillMode>( m_fillMode ) );
 
+        cu->set_corner_smoothing(
+                ToProtoEnum<ZONE_SETTINGS::CORNER_SMOOTHING, types::ZoneCornerSmoothingMode>( m_cornerSmoothingType ) );
+
+        if( m_cornerRadius != 0 )
+            cu->mutable_corner_radius()->set_value_nm( m_cornerRadius );
+
         types::HatchFillSettings* hatch = cu->mutable_hatch_settings();
         hatch->mutable_thickness()->set_value_nm( m_hatchThickness );
         hatch->mutable_gap()->set_value_nm( m_hatchGap );
@@ -300,8 +328,7 @@ void ZONE::Serialize( google::protobuf::Any& aContainer ) const
         }
 
         PackNet( cu->mutable_net() );
-        cu->mutable_teardrop()->set_type(
-                ToProtoEnum<TEARDROP_TYPE, types::TeardropType>( m_teardropType ) );
+        cu->mutable_teardrop()->set_type( ToProtoEnum<TEARDROP_TYPE, types::ZoneTeardropType>( m_teardropType ) );
     }
 
     for( const auto& [layer, shape] : m_FilledPolysList )
@@ -340,7 +367,7 @@ bool ZONE::Deserialize( const google::protobuf::Any& aContainer )
     if( !aContainer.UnpackTo( &zone ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( zone.id().value() );
+    SetUuidDirect( KIID( zone.id().value() ) );
     SetLayerSet( UnpackLayerSet( zone.layers() ) );
     SetAssignedPriority( zone.priority() );
     SetZoneName( wxString::FromUTF8( zone.name() ) );
@@ -381,6 +408,13 @@ bool ZONE::Deserialize( const google::protobuf::Any& aContainer )
         m_minIslandArea = cu.min_island_area();
         m_fillMode = FromProtoEnum<ZONE_FILL_MODE>( cu.fill_mode() );
 
+        m_cornerSmoothingType = FromProtoEnum<ZONE_SETTINGS::CORNER_SMOOTHING>( cu.corner_smoothing() );
+
+        if( cu.has_corner_radius() )
+            SetCornerRadius( cu.corner_radius().value_nm() );
+        else
+            SetCornerRadius( 0 );
+
         m_hatchThickness = cu.hatch_settings().thickness().value_nm();
         m_hatchGap = cu.hatch_settings().gap().value_nm();
         m_hatchOrientation = EDA_ANGLE( cu.hatch_settings().orientation().value_degrees(), DEGREES_T );
@@ -415,7 +449,6 @@ bool ZONE::Deserialize( const google::protobuf::Any& aContainer )
 
     if( zone.filled() )
     {
-        // TODO(JE) check what else has to happen here
         SetIsFilled( true );
         SetNeedRefill( false );
 
@@ -426,6 +459,11 @@ bool ZONE::Deserialize( const google::protobuf::Any& aContainer )
             m_FilledPolysList[layer] = std::make_shared<SHAPE_POLY_SET>( shape );
         }
     }
+    else
+    {
+        UnFill();
+    }
+
 
     HatchBorder();
 
@@ -665,6 +703,11 @@ const BOX2I ZONE::GetBoundingBox() const
 {
     if( const BOARD* board = GetBoard() )
     {
+        // Lock-free fast path, valid while the board timestamp matches what we cached for.
+        // Skips the caches mutex that otherwise serializes every fill worker.
+        if( m_bboxCacheTimeStamp.load( std::memory_order_acquire ) == board->GetTimeStamp() )
+            return m_bboxCache;
+
         std::unordered_map<const ZONE*, BOX2I>& cache = board->m_ZoneBBoxCache;
 
         {
@@ -692,9 +735,22 @@ const BOX2I ZONE::GetBoundingBox() const
 
 void ZONE::CacheBoundingBox()
 {
-    // GetBoundingBox() will cache it for us, and there's no sense duplicating the somewhat tricky
-    // locking code.
-    GetBoundingBox();
+    const BOARD* board = GetBoard();
+    BOX2I        bbox = m_Poly->BBox();
+
+    if( board )
+    {
+        // Board cache, for callers that read it directly.
+        {
+            std::unique_lock<std::shared_mutex> writeLock( board->m_CachesMutex );
+            board->m_ZoneBBoxCache[this] = bbox;
+        }
+
+        // Per-zone lock-free copy.  Single-threaded per zone, so box-before-timestamp (release)
+        // suffices for the acquiring reader in GetBoundingBox().
+        m_bboxCache = bbox;
+        m_bboxCacheTimeStamp.store( board->GetTimeStamp(), std::memory_order_release );
+    }
 }
 
 
@@ -1069,6 +1125,10 @@ void ZONE::Move( const VECTOR2I& offset )
         if( it != GetBoard()->m_ZoneBBoxCache.end() )
             it->second.Move( offset );
     }
+
+    // Move doesn't bump the board timestamp, so invalidate the lock-free copy rather than race
+    // readers by mutating it.  GetBoundingBox() falls back to the board cache (moved above).
+    m_bboxCacheTimeStamp.store( -1, std::memory_order_release );
 }
 
 
@@ -1471,8 +1531,9 @@ bool ZONE::BuildSmoothedPoly( SHAPE_POLY_SET& aSmoothedPoly, PCB_LAYER_ID aLayer
 
     const BOARD* board = GetBoard();
     bool         keepExternalFillets = false;
-    bool         smooth_requested = m_cornerSmoothingType == ZONE_SETTINGS::SMOOTHING_CHAMFER
-                                    || m_cornerSmoothingType == ZONE_SETTINGS::SMOOTHING_FILLET;
+
+    bool smooth_requested = m_cornerSmoothingType == ZONE_SETTINGS::CORNER_SMOOTHING::CHAMFER
+                            || m_cornerSmoothingType == ZONE_SETTINGS::CORNER_SMOOTHING::FILLET;
 
     if( IsTeardropArea() )
     {
@@ -1491,11 +1552,11 @@ bool ZONE::BuildSmoothedPoly( SHAPE_POLY_SET& aSmoothedPoly, PCB_LAYER_ID aLayer
 
                 switch( m_cornerSmoothingType )
                 {
-                case ZONE_SETTINGS::SMOOTHING_CHAMFER:
+                case ZONE_SETTINGS::CORNER_SMOOTHING::CHAMFER:
                     aPoly = aPoly.Chamfer( (int) m_cornerRadius );
                     break;
 
-                case ZONE_SETTINGS::SMOOTHING_FILLET:
+                case ZONE_SETTINGS::CORNER_SMOOTHING::FILLET:
                     aPoly = aPoly.Fillet( (int) m_cornerRadius, GetMaxError() );
                     break;
 

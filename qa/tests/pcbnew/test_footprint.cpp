@@ -25,8 +25,10 @@
 #include <qa_utils/geometry/geometry.h>
 
 #include <board.h>
+#include <embedded_files.h>
 #include <geometry/shape_utils.h>
 #include <footprint.h>
+#include <mmh3_hash.h>
 #include <pcb_shape.h>
 
 
@@ -149,5 +151,105 @@ BOOST_AUTO_TEST_CASE( FootprintCourtyardAndHull )
         assertHullMatch( expectedHull );
     }
 }
+
+
+// Regression test for GitLab issue #24345.  Cloning a footprint with embedded files (3D models,
+// fonts, etc.) must not duplicate the embedded payloads.  BOARD_NETLIST_UPDATER clones each
+// footprint up to four times per "Update PCB from schematic" pass, so deep-copying embedded
+// data per clone blows up memory on boards with hundreds of footprints carrying large
+// (multi-megabyte) embedded 3D models.
+BOOST_AUTO_TEST_CASE( FootprintCloneSharesEmbeddedFiles )
+{
+    BOARD     board;
+    FOOTPRINT fp( &board );
+
+    auto* file = new EMBEDDED_FILES::EMBEDDED_FILE();
+    file->name = wxS( "model.step" );
+    file->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::MODEL;
+
+    // Keep the test payload small so the suite stays fast, but use enough data to exercise
+    // the compression/encode path.
+    std::string payload( 4096, 'k' );
+    file->decompressedData.assign( payload.begin(), payload.end() );
+
+    MMH3_HASH hash( EMBEDDED_FILES::Seed() );
+    hash.add( file->decompressedData );
+    file->data_hash = hash.digest().ToString();
+
+    BOOST_REQUIRE( EMBEDDED_FILES::CompressAndEncode( *file ) == EMBEDDED_FILES::RETURN_CODE::OK );
+
+    fp.AddFile( file );
+
+    EMBEDDED_FILES::EMBEDDED_FILE* originalFile = fp.GetEmbeddedFile( wxS( "model.step" ) );
+    BOOST_REQUIRE( originalFile );
+
+    // Clone the footprint several times, mimicking the BOARD_NETLIST_UPDATER undo-snapshot
+    // pattern.  Each clone must reference the same payload, not allocate a fresh copy.
+    std::vector<std::unique_ptr<FOOTPRINT>> clones;
+
+    for( int ii = 0; ii < 4; ++ii )
+    {
+        clones.emplace_back( static_cast<FOOTPRINT*>( fp.Clone() ) );
+        EMBEDDED_FILES::EMBEDDED_FILE* cloneFile =
+                clones.back()->GetEmbeddedFile( wxS( "model.step" ) );
+        BOOST_REQUIRE( cloneFile );
+        BOOST_CHECK_EQUAL( cloneFile, originalFile );
+    }
+
+    // Releasing all clones must leave the source footprint's embedded file intact.
+    clones.clear();
+    BOOST_CHECK( fp.HasFile( wxS( "model.step" ) ) );
+    BOOST_CHECK_EQUAL( fp.GetEmbeddedFile( wxS( "model.step" ) ), originalFile );
+}
+
+
+// The footprint properties dialogs write their fields back by deleting every field and
+// recreating it from the grid, and the scripting API can remove fields outright.  Either one
+// can leave a footprint without its mandatory fields while a commit is still computing the
+// damage bounding box for it.
+BOOST_AUTO_TEST_CASE( FootprintBoundingBoxWithoutMandatoryFields )
+{
+    BOARD     board;
+    FOOTPRINT fp( &board );
+
+    const int shapeSize = pcbIUScale.mmToIU( 3.0 );
+
+    {
+        std::unique_ptr<PCB_SHAPE> shape = std::make_unique<PCB_SHAPE>( &fp, SHAPE_T::RECTANGLE );
+        shape->SetLayer( F_Cu );
+        shape->SetStart( VECTOR2I( 0, 0 ) );
+        shape->SetEnd( VECTOR2I( shapeSize, shapeSize ) );
+        shape->SetWidth( pcbIUScale.mmToIU( 0.1 ) );
+
+        fp.Add( shape.release() );
+    }
+
+    // Keep the annotations out of the bounding box so that dropping them cannot change it for
+    // a legitimate reason.
+    for( FIELD_T id : { FIELD_T::REFERENCE, FIELD_T::VALUE } )
+        fp.GetField( id )->SetVisible( false );
+
+    const BOX2I withFields = fp.GetBoundingBox();
+
+    for( FIELD_T id : { FIELD_T::REFERENCE, FIELD_T::VALUE } )
+    {
+        std::unique_ptr<PCB_FIELD> field( fp.GetField( id ) );
+        BOOST_REQUIRE( field );
+        fp.Remove( field.get() );
+    }
+
+    const FOOTPRINT& constFp = fp;
+    BOOST_REQUIRE( !constFp.GetField( FIELD_T::REFERENCE ) );
+    BOOST_REQUIRE( !constFp.GetField( FIELD_T::VALUE ) );
+
+    BOOST_CHECK( fp.GetBoundingBox() == withFields );
+
+    // Text variables resolve against the same fields, and are read while the footprint is in
+    // this state to draw it.
+    wxString token = wxS( "VALUE" );
+    BOOST_CHECK( fp.ResolveTextVar( &token ) );
+    BOOST_CHECK( token.IsEmpty() );
+}
+
 
 BOOST_AUTO_TEST_SUITE_END()

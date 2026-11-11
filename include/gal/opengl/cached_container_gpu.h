@@ -51,6 +51,9 @@ public:
         return m_isMapped;
     }
 
+    ///< @copydoc VERTEX_CONTAINER::Abandon()
+    void Abandon() override;
+
     ///< @copydoc VERTEX_CONTAINER::Map()
     void Map() override;
 
@@ -72,6 +75,16 @@ protected:
      */
     bool defragmentResize( unsigned int aNewSize ) override;
     bool defragmentResizeMemcpy( unsigned int aNewSize );
+
+    /**
+     * Grow the buffer while keeping the peak video memory at max(old, new) rather than
+     * old + new, by staging the compacted vertices through host memory and releasing the
+     * old buffer before allocating the replacement.
+     *
+     * @param aNewSize is the new size of the container, expressed in number of vertices.
+     * @return false in case of failure (e.g. mapping the new buffer failed).
+     */
+    bool defragmentResizeStaged( unsigned int aNewSize );
 
     ///< Flag saying if vertex buffer is currently mapped
     bool m_isMapped;
